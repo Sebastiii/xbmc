@@ -413,6 +413,8 @@ class CAdvancedSettings : public ISettingCallback, public ISettingsHandler
     bool GetResetSeek() const;
     bool m_resetSeek;
 
+    bool m_bypassDVModeSwitch = false;
+
   private:
     void Initialize();
     void Clear();
