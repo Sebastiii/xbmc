@@ -117,6 +117,9 @@ public:
    */
   bool GetStats(int &lateframes, double &pts, int &queued, int &discard);
 
+  double GetRenderPts();
+  double GetFramePts();
+
   /**
    * Video player call this on flush in oder to discard any queued frames
    */
@@ -137,6 +140,9 @@ protected:
   void PresentSingle(bool clear, DWORD flags, DWORD alpha);
   void PresentFields(bool clear, DWORD flags, DWORD alpha);
   void PresentBlend(bool clear, DWORD flags, DWORD alpha);
+
+  void SetPresentSource();
+  bool Paused(bool paused, double clock);
 
   void PrepareNextRender();
   bool IsPresenting();
@@ -207,6 +213,7 @@ protected:
     double         pts;
     EFIELDSYNC     presentfield;
     EPRESENTMETHOD presentmethod;
+    double duration;
   } m_Queue[NUM_BUFFERS]{};
 
   std::deque<int> m_free;
@@ -230,6 +237,7 @@ protected:
   bool m_presentstarted = false;
   int m_presentsource = 0;
   int m_presentsourcePast = -1;
+  double m_presentframetime = 0;
   XbmcThreads::ConditionVariable m_presentevent;
   CEvent m_flushEvent;
   CEvent m_initEvent;
@@ -258,4 +266,8 @@ protected:
 
   private:
   CDataCacheCore &m_dataCacheCore;
+  bool CalcOverlayActiveArea(CRect& src, CRect& dst) const;
+  void ClockAlign();
+  void RenderUpdate(bool clear, unsigned int flags, unsigned int alpha);
+
 };

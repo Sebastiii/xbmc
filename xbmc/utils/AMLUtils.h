@@ -122,6 +122,7 @@ void aml_dv_display_trigger();
 void aml_dv_display_auto_now();
 void aml_dv_start();
 unsigned int aml_vs10_by_setting(const std::string setting);
+bool aml_dv_use_active_area();
 enum DV_MODE aml_dv_mode();
 enum DV_TYPE aml_dv_type();
 void aml_dv_enable_fel();
@@ -148,6 +149,7 @@ bool aml_set_reg_ignore_alpha();
 bool aml_unset_reg_ignore_alpha();
 std::string aml_video_fps_info();
 std::string aml_video_fps_drop();
+void aml_wait(useconds_t uSeconds);
 
 void set_vsvdb_payload_ver(int max_lum_nits_value);
 void CalculateVSVDBPayload();

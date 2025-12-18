@@ -692,6 +692,20 @@ bool CDataCacheCore::IsRenderClockSync()
   return m_renderInfo.m_isClockSync;
 }
 
+void CDataCacheCore::SetRenderPts(double pts)
+{
+  std::lock_guard lock(m_renderSection);
+
+  m_renderInfo.pts = pts;
+}
+
+double CDataCacheCore::GetRenderPts()
+{
+  std::lock_guard lock(m_renderSection);
+
+  return m_renderInfo.pts;
+}
+
 // player states
 void CDataCacheCore::SeekFinished(int64_t offset)
 {
