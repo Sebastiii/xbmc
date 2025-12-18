@@ -1164,37 +1164,67 @@ int CRenderManager::WaitForBuffer(volatile std::atomic_bool& bStop,
   return m_queued.size() + m_discard.size();
 }
 
+void inline CRenderManager::SetPresentSource()
+{
+  if (m_presentstarted)
+  {
+    if (m_discard.empty() || (m_discard.back() != m_presentsource))
+      m_discard.push_back(m_presentsource);
+  }
+  m_presentsource = m_queued.front();
+  m_presentpts = m_Queue[m_presentsource].pts;
+  m_presentframetime = m_Queue[m_presentsource].duration;
+}
+
+bool inline CRenderManager::Paused(bool paused, double clock)
+{
+  static double previousClock = DVD_NOPTS_VALUE;
+
+  // for pause, check for frame advance
+  bool check = paused ? (clock == previousClock) : paused;
+
+  previousClock = clock;
+
+  return check;
+}
+
 void CRenderManager::PrepareNextRender()
 {
-  if (m_queued.empty())
-  {
-    CLog::Log(LOGERROR, "CRenderManager::PrepareNextRender - asked to prepare with nothing available");
-    m_presentstep = PRESENT_IDLE;
-    m_presentevent.notifyAll();
-    return;
-  }
-
   if (!m_showVideo && !m_forceNext)
     return;
 
-  double frametime = 1.0 /
-                     static_cast<double>(CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS()) *
-                     DVD_TIME_BASE;
-
   double renderPts = m_dvdClock.GetClock();
 
+  float speed = m_dataCacheCore.GetSpeed();
+  bool paused = Paused((speed == 0.0f), renderPts);
+
+  if (paused)
+    return;
+
+  bool playing = (speed == 1.0f);
+
   // Make sure the queued are sorted by pts and no duplicates.
-  std::sort(m_queued.begin(), m_queued.end(), [this](int a, int b) { return m_Queue[a].pts < m_Queue[b].pts; });
+  std::sort(m_queued.begin(), m_queued.end(),
+            [this](int a, int b) { return m_Queue[a].pts < m_Queue[b].pts; });
   auto last = std::unique(m_queued.begin(), m_queued.end());
   m_queued.erase(last, m_queued.end());
 
-  double nextFramePts = m_Queue[m_queued.front()].pts;
+  SetPresentSource(); // get next frame
+
   if (m_dvdClock.GetClockSpeed() < 0)
-    nextFramePts = renderPts;
+  {
+    m_presentpts = renderPts;
+  }
+
+  // How far away are we from the clock (renderPts)
+  double diff = (renderPts - m_presentpts);
 
   if (m_clockSync.m_enabled)
   {
-    double err = fmod(renderPts - nextFramePts, frametime);
+    m_presentframetime =
+        1.0 / static_cast<double>(CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS()) *
+        DVD_TIME_BASE;
+    double err = fmod(diff, m_presentframetime);
     m_clockSync.m_error += err;
     m_clockSync.m_errCount++;
     if (m_clockSync.m_errCount > 30)
@@ -1206,93 +1236,30 @@ void CRenderManager::PrepareNextRender()
 
       m_dvdClock.SetVsyncAdjust(-average);
     }
-    renderPts += frametime / 2 - m_clockSync.m_syncOffset;
+    renderPts += m_presentframetime / 2 - m_clockSync.m_syncOffset;
+    diff = (renderPts - m_presentpts);
   }
   else
   {
     m_dvdClock.SetVsyncAdjust(0);
   }
 
-  CLog::LogFC(LOGDEBUG, LOGAVTIMING,
-              "renderPts: {:.3f} renderPts: {:.3f} nextFramePts: {:.3f} -> diff: {:.3f}  render: {:d} "
-              "forceNext: {:d}",
-              renderPts / DVD_TIME_BASE, renderPts / DVD_TIME_BASE, nextFramePts / DVD_TIME_BASE,
-              (renderPts - nextFramePts) / DVD_TIME_BASE, renderPts >= nextFramePts, m_forceNext);
-
-  bool combined = false;
-  if (m_presentsourcePast >= 0)
-  {
-    m_discard.push_back(m_presentsourcePast);
-    m_presentsourcePast = -1;
-    combined = true;
-  }
-
-  if ((renderPts >= nextFramePts) || m_forceNext)
-  {
-    // see if any future queued frames are already due
-    auto iter = m_queued.begin();
-    int idx = *iter;
-    int lateframes = 0;
-
-    while (iter != m_queued.end())
+  // remove late frames from queue - present from next up frame.
+  if (diff > 0)
+    while ((diff > -500) && (m_queued.size() > 2))
     {
-      // the slot for rendering in time is [pts .. (pts + frametime)]
-      // renderer/drivers have internal queues, being slightly late here does not mean that
-      // we are really late. The likelihood that we recover decreases the greater m_lateframes
-      // get. Skipping a frame is easier than having decoder dropping one (lateframes > 10)
-      double x = (m_lateframes <= 6) ? 0.98 : 0;
-      if (renderPts < m_Queue[*iter].pts + x * frametime)
-        break;
-      lateframes++;
-      idx = *iter;
-      ++iter;
+      if (playing)
+        m_QueueSkip++;
+      m_queued.pop_front(); // skip this frame
+      SetPresentSource(); // get next frame
+      diff = (renderPts - m_presentpts);
     }
 
-    // push back present source index before other lates to keep order
-    if (m_presentstarted) m_discard.push_back(m_presentsource);
-
-    float speed = m_dataCacheCore.GetSpeed();
-    bool playing = (speed == 1.0f);
-
-    // skip late frames
-    while ((m_queued.front() != idx) && (m_queued.size() > 2))
-    {
-      m_presentsourcePast = m_queued.front();
-      m_queued.pop_front();
-
-      if (m_presentsourcePast >= 0)
-      {
-        m_discard.push_back(m_presentsourcePast);
-        if (playing) m_QueueSkip++;
-        m_presentsourcePast = -1;
-      }
-    }
-
-    if (lateframes)
-      m_lateframes += lateframes;
-    else
-      m_lateframes = 0;
-
-    m_presentstep = PRESENT_FLIP;
-    m_presentsource = idx;
-    m_presentstarted = true;
-    m_queued.pop_front();
-    m_presentpts = m_Queue[m_presentsource].pts;
-    m_presentevent.notifyAll();
-
-    m_playerPort->UpdateRenderBuffers(m_queued.size(), m_discard.size(), m_free.size());
-  }
-  else if (!combined && renderPts > (nextFramePts - frametime))
-  {
-    m_lateframes = 0;
-    m_presentstep = PRESENT_FLIP;
-    m_presentsourcePast = m_presentsource;
-    m_presentsource = m_queued.front();
-    m_presentstarted = true;
-    m_queued.pop_front();
-    m_presentpts = m_Queue[m_presentsource].pts - frametime / 2;
-    m_presentevent.notifyAll();
-  }
+  m_lateframes = static_cast<int>(std::max(0.0, diff / m_presentframetime));
+  m_presentstep = PRESENT_FLIP;
+  m_presentstarted = true;
+  m_queued.pop_front();
+  m_presentevent.notifyAll();
 }
 
 void CRenderManager::DiscardBuffer()
