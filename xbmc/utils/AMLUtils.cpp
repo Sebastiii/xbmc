@@ -1531,32 +1531,6 @@ std::string aml_video_fps_drop() {
   return format_fps_info().drop_info;
 }
 
-void aml_wait(useconds_t uSeconds)
-{
-   struct timespec target, now;
-
-   clock_gettime(CLOCK_MONOTONIC, &now);
-
-   target.tv_sec = uSeconds / 1000000;
-   target.tv_nsec = (uSeconds % 1000000) * 1000;
-
-   target.tv_sec += now.tv_sec;
-   target.tv_nsec += now.tv_nsec;
-
-   if (target.tv_nsec >= 1000000000) {
-     target.tv_sec++;
-     target.tv_nsec -= 1000000000;
-   }
-
-   clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &target, nullptr);
-}
-
-bool aml_dv_use_active_area()
-{
-  return (aml_is_dv_enable() &&
-          (aml_dv_dolby_vision_mode() == DOLBY_VISION_OUTPUT_MODE_IPT_TUNNEL));
-}
-
 void aml_dv_send_md_levels() {
   DOVIStreamMetadata dovi_stream_metadata;
   dovi_stream_metadata = CServiceBroker::GetDataCacheCore().GetVideoDoViStreamMetadata();

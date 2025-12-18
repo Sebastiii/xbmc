@@ -117,9 +117,6 @@ public:
    */
   bool GetStats(int &lateframes, double &pts, int &queued, int &discard);
 
-  double GetRenderPts();
-  double GetFramePts();
-
   /**
    * Video player call this on flush in oder to discard any queued frames
    */
@@ -266,8 +263,4 @@ protected:
 
   private:
   CDataCacheCore &m_dataCacheCore;
-  bool CalcOverlayActiveArea(CRect& src, CRect& dst) const;
-  void ClockAlign();
-  void RenderUpdate(bool clear, unsigned int flags, unsigned int alpha);
-
 };

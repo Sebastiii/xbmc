@@ -1052,8 +1052,7 @@ void CVideoPlayerVideo::ResetFrameRateCalc()
 
 double CVideoPlayerVideo::GetCurrentPts()
 {
-  //double renderPts;
-  double renderPts = m_renderManager.GetRenderPts();
+  double renderPts;
   int sleepTime;
   int queued, discard;
 

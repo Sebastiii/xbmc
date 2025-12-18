@@ -176,8 +176,6 @@ public:
   // render info
   void SetRenderClockSync(bool enabled);
   bool IsRenderClockSync();
-  void SetRenderPts(double pts);
-  double GetRenderPts();
 
   // player states
   /*!
@@ -395,7 +393,6 @@ protected:
   struct SRenderInfo
   {
     bool m_isClockSync;
-    double pts = 0;
   } m_renderInfo;
 
   mutable CCriticalSection m_stateSection;

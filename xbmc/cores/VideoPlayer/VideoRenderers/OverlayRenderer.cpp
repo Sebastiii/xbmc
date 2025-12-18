@@ -285,11 +285,6 @@ void CRenderer::SetStereoMode(const std::string &stereomode)
   m_stereomode = stereomode;
 }
 
-void CRenderer::SetForceInside(bool forceInside)
-{
-  m_forceInside = forceInside;
-}
-
 void CRenderer::SetSubtitleVerticalPosition(const int value, bool save)
 {
   std::lock_guard lock(m_section);
