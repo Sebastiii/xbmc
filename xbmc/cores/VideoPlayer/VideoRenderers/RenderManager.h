@@ -195,9 +195,14 @@ protected:
 
   // Display latency tweak from AdvancedSettings for the current refresh rate and resolution in milliseconds
   std::atomic_int m_videoLatencyTweak = 0;
+  // in milliseconds
+  double m_latencyTweak = 0.0;
 
   // Display latency tweak from AdvancedSettings for audio in milliseconds
   std::atomic_int m_audioLatencyTweak = 0;
+
+  // Display latency updated in PrepareNextRender in DVD clock units, includes m_latencyTweak
+  double m_displayLatency = 0.0;
 
   // User set latency
   std::atomic_int m_videoDelay = {};

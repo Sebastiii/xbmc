@@ -15,6 +15,7 @@
 #include "RenderFlags.h"
 #include "ServiceBroker.h"
 #include "application/Application.h"
+#include "cores/DataCacheCore.h"
 #include "cores/VideoPlayer/Interface/TimingConstants.h"
 #include "guilib/GUIComponent.h"
 #include "guilib/StereoscopicsManager.h"
@@ -1190,43 +1191,44 @@ bool inline CRenderManager::Paused(bool paused, double clock)
 
 void CRenderManager::PrepareNextRender()
 {
+  if (m_queued.empty())
+  {
+    CLog::Log(LOGERROR, "CRenderManager::PrepareNextRender - asked to prepare with nothing available");
+    m_presentstep = PRESENT_IDLE;
+    m_presentevent.notifyAll();
+    return;
+  }
+
   if (!m_showVideo && !m_forceNext)
     return;
 
-  double renderPts = m_dvdClock.GetClock();
-
-  float speed = m_dataCacheCore.GetSpeed();
-  bool paused = Paused((speed == 0.0f), renderPts);
-
-  if (paused)
-    return;
-
-  bool playing = (speed == 1.0f);
-
   // Make sure the queued are sorted by pts and no duplicates.
-  std::sort(m_queued.begin(), m_queued.end(),
-            [this](int a, int b) { return m_Queue[a].pts < m_Queue[b].pts; });
+  std::sort(m_queued.begin(), m_queued.end(), [this](int a, int b) { return m_Queue[a].pts < m_Queue[b].pts; });
   auto last = std::unique(m_queued.begin(), m_queued.end());
   m_queued.erase(last, m_queued.end());
 
-  SetPresentSource(); // get next frame
+  double frametime = 1.0 /
+                     static_cast<double>(CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS()) *
+                     DVD_TIME_BASE;
 
+  m_displayLatency = DVD_MSEC_TO_TIME(
+      m_latencyTweak +
+      m_audioLatencyTweak -
+      m_videoDelay);
+
+  double frameOnScreen = m_dvdClock.GetClock();
+  double renderPts = frameOnScreen + m_displayLatency;
+
+  int nextFrameIndex = m_queued.front();
+  double nextFramePts = m_Queue[nextFrameIndex].pts;
   if (m_dvdClock.GetClockSpeed() < 0)
-  {
-    m_presentpts = renderPts;
-  }
-
-  // How far away are we from the clock (renderPts)
-  double diff = (renderPts - m_presentpts);
+    nextFramePts = renderPts;
 
   if (m_clockSync.m_enabled)
   {
-    m_presentframetime =
-        1.0 / static_cast<double>(CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS()) *
-        DVD_TIME_BASE;
-    double err = fmod(diff, m_presentframetime);
+    double err = fmod(renderPts - nextFramePts, frametime);
     m_clockSync.m_error += err;
-    m_clockSync.m_errCount++;
+    m_clockSync.m_errCount ++;
     if (m_clockSync.m_errCount > 30)
     {
       double average = m_clockSync.m_error / m_clockSync.m_errCount;
@@ -1236,30 +1238,71 @@ void CRenderManager::PrepareNextRender()
 
       m_dvdClock.SetVsyncAdjust(-average);
     }
-    renderPts += m_presentframetime / 2 - m_clockSync.m_syncOffset;
-    diff = (renderPts - m_presentpts);
+    renderPts += frametime / 2 - m_clockSync.m_syncOffset;
   }
   else
   {
     m_dvdClock.SetVsyncAdjust(0);
   }
 
-  // remove late frames from queue - present from next up frame.
-  if (diff > 0)
-    while ((diff > -500) && (m_queued.size() > 2))
+  CLog::LogFC(LOGDEBUG, LOGAVTIMING,
+              "frameOnScreen: {:.3f} renderPts: {:.3f} nextFramePts: {:.3f} -> diff: {:.3f}  render: {:d} "
+              "forceNext: {:d}",
+              frameOnScreen / DVD_TIME_BASE, renderPts / DVD_TIME_BASE, nextFramePts / DVD_TIME_BASE,
+              (renderPts - nextFramePts) / DVD_TIME_BASE, renderPts >= nextFramePts, m_forceNext);
+
+  bool combined = false;
+  if (m_presentsourcePast >= 0)
+  {
+    m_discard.push_back(m_presentsourcePast);
+    m_presentsourcePast = -1;
+    combined = true;
+  }
+ 
+  if (renderPts >= nextFramePts || m_forceNext)
+  {
+    // push back present source index before other lates to keep order
+    if (m_presentstarted) m_discard.push_back(m_presentsource);
+
+    double diff = (renderPts - nextFramePts);
+    while (diff > 62000 && m_queued.size() > 2)
     {
-      if (playing)
-        m_QueueSkip++;
-      m_queued.pop_front(); // skip this frame
-      SetPresentSource(); // get next frame
-      diff = (renderPts - m_presentpts);
+      // skip late frames if possible; if the queue is almost empty, we don't skip
+      // even if we should to avoid emptying the queue too fast
+      int late = m_queued.front();
+      m_queued.pop_front();
+
+      m_discard.push_back(late);
+      m_QueueSkip++;
+
+      diff = (renderPts - m_Queue[m_queued.front()].pts);
     }
 
-  m_lateframes = static_cast<int>(std::max(0.0, diff / m_presentframetime));
-  m_presentstep = PRESENT_FLIP;
-  m_presentstarted = true;
-  m_queued.pop_front();
-  m_presentevent.notifyAll();
+    int idx = m_queued.front();
+
+    m_lateframes = static_cast<int>(std::max(0.0, diff / frametime));
+    m_presentstep = PRESENT_FLIP;
+    m_presentsource = idx;
+    m_presentstarted = true;
+    m_queued.pop_front();
+    m_presentpts = m_Queue[m_presentsource].pts;
+    m_presentevent.notifyAll();
+
+  }
+  else if (!combined && renderPts > (nextFramePts - frametime))
+  {
+    m_lateframes = 0;
+    m_presentstep = PRESENT_FLIP;
+    m_presentsourcePast = m_presentsource;
+    m_presentsource = m_queued.front();
+    m_presentstarted = true;
+    m_queued.pop_front();
+    m_presentpts = m_Queue[m_presentsource].pts - frametime / 2;
+    m_presentevent.notifyAll();
+  }
+
+  if (m_presentstarted) m_dataCacheCore.SetRenderPts(m_Queue[m_presentsource].pts);
+
 }
 
 void CRenderManager::DiscardBuffer()
