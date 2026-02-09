@@ -14,6 +14,12 @@
 #include "threads/SingleLock.h"
 #include "windowing/GraphicContext.h"
 #include "windowing/WindowSystemFactory.h"
+#include "settings/AdvancedSettings.h"
+#include "settings/SettingsComponent.h"
+#include "ServiceBroker.h"
+#include "settings/Settings.h"
+#include "settings/SettingsComponent.h"
+#include "windowing/WinSystem.h"
 
 using namespace KODI;
 using namespace KODI::WINDOWING::AML;
@@ -87,10 +93,40 @@ bool CWinSystemAmlogicGLESContext::CreateNewWindow(const std::string& name,
 
   // If changing in or out of Dolby Vision and it is on then make sure we do a mode swtich - TODO: combine with DV InfoFrame?
   StreamHdrType hdrType = CServiceBroker::GetWinSystem()->GetGfxContext().GetHDRType();
-  bool force_mode_switch_by_dv =
-         ((hdrType != m_hdrType) &&
-          ((hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION) || (m_hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION)) &&
-       (aml_dv_mode() != DV_MODE_OFF));
+  bool bypass_dv_mode_switch = CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_bypassDVModeSwitch;
+  const auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
+  const auto bypass_dv_mode_switch_gui = settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_BYPASS);
+  bool is_bypass_active = bypass_dv_mode_switch || bypass_dv_mode_switch_gui;
+
+  CLog::Log(LOGINFO, "CWinSystemAmlogicGLESContext::{}: "
+    "m_bWindowCreated: {}, "
+    "frac rate {:d}({:d}), "
+    "m_bypassDVModeSwitch: {}, "
+    "m_bypassDVModeSwitchGUI: {}",
+    __FUNCTION__,
+    m_bWindowCreated,
+    fractional_rate, cur_fractional_rate,
+    bypass_dv_mode_switch,
+    bypass_dv_mode_switch_gui);
+
+  bool force_mode_switch_by_dv = !is_bypass_active &&
+                               ((hdrType != m_hdrType) &&
+                                ((hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION) ||
+                                 (m_hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION)) &&
+                                (aml_dv_mode() != DV_MODE_OFF));
+
+  CLog::Log(LOGINFO, "CWinSystemAmlogicGLESContext::{}: "
+    "m_bWindowCreated: {}, "
+    "frac rate {:d}({:d}), "
+    "force mode switch: {}, "
+    "m_bypassDVModeSwitch: {}, "
+    "m_bypassDVModeSwitchGUI: {}",
+    __FUNCTION__,
+    m_bWindowCreated,
+    fractional_rate, cur_fractional_rate,
+    force_mode_switch_by_dv,
+    bypass_dv_mode_switch,
+    bypass_dv_mode_switch_gui);
 
   // get current used resolution
   if (!aml_get_native_resolution(current_resolution))

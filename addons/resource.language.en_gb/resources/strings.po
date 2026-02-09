@@ -25833,6 +25833,18 @@ msgctxt "#60603"
 msgid "Set this option to let the software automatically select between using normal Player Led versus Video Processor (VP) settings depending on your Display Max Lum capability (shown below) and the DV Video mastered MDL. When VP is in use the OSD will be a different colour. This feature only works with DV Mode On Demand."
 msgstr ""
 
+#. "Dolby Vision HDR Bypass"
+#: system/settings/settings.xml
+msgctxt "#60604"
+msgid "Disable DV blank screen when starting to play"
+msgstr ""
+
+#. "Dolby Vision HDR Bypass"
+#: system/settings/settings.xml
+msgctxt "#60605"
+msgid "Setting this option to avoid handcheck when starting DV video from HDR or SDR"
+msgstr ""
+
 #. Title of Dolby Vision RPU conversion setting
 #: system/settings/settings.xml
 msgctxt "#69196"
