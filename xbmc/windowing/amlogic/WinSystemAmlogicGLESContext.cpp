@@ -14,6 +14,9 @@
 #include "threads/SingleLock.h"
 #include "windowing/GraphicContext.h"
 #include "windowing/WindowSystemFactory.h"
+#include "settings/AdvancedSettings.h"
+#include "settings/SettingsComponent.h"
+#include "ServiceBroker.h"
 
 using namespace KODI;
 using namespace KODI::WINDOWING::AML;
@@ -87,10 +90,33 @@ bool CWinSystemAmlogicGLESContext::CreateNewWindow(const std::string& name,
 
   // If changing in or out of Dolby Vision and it is on then make sure we do a mode swtich - TODO: combine with DV InfoFrame?
   StreamHdrType hdrType = CServiceBroker::GetWinSystem()->GetGfxContext().GetHDRType();
-  bool force_mode_switch_by_dv =
-         ((hdrType != m_hdrType) &&
-          ((hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION) || (m_hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION)) &&
-       (aml_dv_mode() != DV_MODE_OFF));
+  bool bypass_dv_mode_switch = CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_bypassDVModeSwitch;
+
+  CLog::Log(LOGINFO, "CWinSystemAmlogicGLESContext::{}: "
+    "m_bWindowCreated: {}, "
+    "frac rate {:d}({:d}), "
+    "m_bypassDVModeSwitch: {}",
+    __FUNCTION__,
+    m_bWindowCreated,
+    fractional_rate, cur_fractional_rate,
+    bypass_dv_mode_switch);
+
+  bool force_mode_switch_by_dv = !bypass_dv_mode_switch &&
+                               ((hdrType != m_hdrType) &&
+                                ((hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION) ||
+                                 (m_hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION)) &&
+                                (aml_dv_mode() != DV_MODE_OFF));
+
+  CLog::Log(LOGINFO, "CWinSystemAmlogicGLESContext::{}: "
+    "m_bWindowCreated: {}, "
+    "frac rate {:d}({:d}), "
+    "force mode switch: {}, "
+    "m_bypassDVModeSwitch: {}",
+    __FUNCTION__,
+    m_bWindowCreated,
+    fractional_rate, cur_fractional_rate,
+    force_mode_switch_by_dv,
+    bypass_dv_mode_switch);
 
   // get current used resolution
   if (!aml_get_native_resolution(current_resolution))

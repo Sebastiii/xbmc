@@ -412,6 +412,8 @@ class CAdvancedSettings : public ISettingCallback, public ISettingsHandler
     bool GetResetSeek() const;
     bool m_resetSeek;
 
+    bool m_bypassDVModeSwitch = false;
+
     void SetLimitCD(bool limit_cd);
     bool GetLimitCD() const;
     bool m_limitCD;
