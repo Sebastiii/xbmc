@@ -741,6 +741,10 @@ bool CVideoPlayer::CloseFile(bool reopen)
 {
   CLog::Log(LOGDEBUG, "CVideoPlayer::CloseFile()");
 
+  CLog::Log(LOGINFO, "CVideoPlayer::CloseFile - Forcing PQ reset BEFORE closing threads");
+  CLog::Log(LOGINFO, "Forcing hardware NONE gamma curve and color space");
+  aml_set_transfer_pq(StreamHdrType::HDR_TYPE_NONE, 0);
+
   // set the abort request so that other threads can finish up
   m_bAbortRequest = true;
   m_bCloseRequest = true;
@@ -2633,6 +2637,10 @@ void CVideoPlayer::SendPlayerMessage(std::shared_ptr<CDVDMsg> pMsg, unsigned int
 void CVideoPlayer::OnExit()
 {
   CLog::Log(LOGDEBUG, "CVideoPlayer::OnExit()");
+
+  CLog::Log(LOGINFO, "CVideoPlayer::OnExit - Forcing PQ reset BEFORE closing threads");
+  CLog::Log(LOGINFO, "Forcing hardware NONE gamma curve and color space");
+  aml_set_transfer_pq(StreamHdrType::HDR_TYPE_NONE, 0);
 
   // set event to inform openfile something went wrong in case openfile is still waiting for this event
   SetCaching(CACHESTATE_DONE);
