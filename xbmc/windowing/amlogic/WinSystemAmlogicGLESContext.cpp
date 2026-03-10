@@ -218,6 +218,11 @@ bool CWinSystemAmlogicGLESContext::CreateNewWindow(const std::string& name,
 bool CWinSystemAmlogicGLESContext::DestroyWindow()
 {
   m_pGLContext.DestroySurface();
+
+  // Force HDR/PQ reset for the GUI and when CE/Kodi from fresh
+  CLog::Log(LOGDEBUG, "CWinSystemAmlogicGLESContext::{}: DestroyWindow - Forcing reset for GUI", __FUNCTION__);
+  aml_set_transfer_pq(StreamHdrType::HDR_TYPE_NONE, 0);
+
   return CWinSystemAmlogic::DestroyWindow();
 }
 
