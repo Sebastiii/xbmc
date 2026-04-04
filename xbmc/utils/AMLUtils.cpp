@@ -899,7 +899,8 @@ void aml_dv_open(StreamHdrType hdrType, unsigned int bitDepth)
 
 void aml_dv_close()
 {
-  if (aml_is_dv_enable() && (aml_dv_mode() == DV_MODE_ON_DEMAND)) aml_dv_off();
+  const auto bypass_dv_mode_switch_gui = settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_BYPASS);
+  if (aml_is_dv_enable() && (aml_dv_mode() == DV_MODE_ON_DEMAND) && !bypass_dv_mode_switch_gui) aml_dv_off();
   aml_dv_start(); // If DV Mode ON in Kodi Menu.
 }
 
