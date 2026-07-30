@@ -74,6 +74,7 @@ private:
   bool m_failedSwap{false};
   int m_vsyncFd{-1};
   bool m_vsyncAlignFailed{false};
+  bool m_firstStartGUI = true;
 };
 
 }

@@ -26800,6 +26800,18 @@ msgctxt "#69237"
 msgid "Decodes SDR GUI elements with the sRGB transfer function instead of a plain gamma curve while the display is in HDR10/HDR10+ mode (OSD, subtitles and other graphics). Restores shadow detail that is otherwise rendered too dark. Has no effect in Dolby Vision, HLG or SDR modes."
 msgstr ""
 
+#. "Engage Dolby Vision at startup" (ported from Pannal PR #46)
+#: system/settings/settings.xml
+msgctxt "#60904"
+msgid "Engage Dolby Vision at startup"
+msgstr ""
+
+#. "Engage Dolby Vision at startup" (ported from Pannal PR #46)
+#: system/settings/settings.xml
+msgctxt "#60905"
+msgid "Initialises the DV core to the configured VS10 output mode when the GUI starts, so playback start and stop don't need a mode switch. Useful if your display is slow to re-sync -- some projectors take up to 15 seconds per switch. Means the GUI is no longer outside Dolby Vision under On Demand."
+msgstr ""
+
 #. Label for setting "Dither GUI for 8-bit output (HDR10/HDR10+)" (videoscreen.guidither8bit)
 #: system/settings/settings.xml
 msgctxt "#69238"

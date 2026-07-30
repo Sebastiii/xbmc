@@ -535,6 +535,7 @@ public:
   static constexpr auto SETTING_COREELEC_AUDIO_EAC3_SMALL_SPF_PCM = "coreelec.audio.eac3.small.spf.pcm";
   static constexpr auto SETTING_COREELEC_AUDIO_DDR_PRIORITY = "coreelec.audio.ddr_priority";
   static constexpr auto SETTING_COREELEC_AMLOGIC_DV_KEEP_SDR_STATE = "coreelec.amlogic.dolbyvision.keep_sdr_state";
+  static constexpr auto SETTING_COREELEC_AMLOGIC_DV_ENGAGE_AT_STARTUP = "coreelec.amlogic.dolbyvision.engage_at_startup";
   static constexpr auto SETTING_COREELEC_RESET_PTS_ON_SEEK = "coreelec.resetptsonseek";
   static constexpr auto SETTING_COREELEC_SUBTITLES_RECALL_FROM_FILE = "coreelec.subtitles.recallfromfile";
   static constexpr auto SETTING_COREELEC_CODECLOGO_TIMEOUT = "coreelec.codeclogotimeout";
