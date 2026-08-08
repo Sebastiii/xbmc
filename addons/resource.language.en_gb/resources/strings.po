@@ -26578,6 +26578,18 @@ msgctxt "#60901"
 msgid "Skips the HDMI mode switch when entering or leaving Dolby Vision playback. Avoids black screens during transitions, but some TVs need the mode switch to pick up the Dolby Vision signalling correctly."
 msgstr ""
 
+#. "Keep SDR state on stop" (ported from Pannal PR #48)
+#: system/settings/settings.xml
+msgctxt "#60902"
+msgid "Keep SDR output state on playback stop"
+msgstr ""
+
+#. "Keep SDR output state on playback stop" (ported from Pannal PR #48)
+#: system/settings/settings.xml
+msgctxt "#60903"
+msgid "Prevents shutting down the Dolby Vision pipeline on playback stop when outputting SDR under On Demand mode, avoiding screen blinks when returning to the GUI."
+msgstr ""
+
 #. Title of Dolby Vision RPU conversion setting
 #: system/settings/settings.xml
 msgctxt "#69196"

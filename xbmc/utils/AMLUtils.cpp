@@ -1899,6 +1899,22 @@ void aml_dv_close()
     return;
   }
 
+  // On Demand mode with active SDR output state (ported from Pannal PR #48):
+  // avoid shutting down the DV pipeline on playback stop when the core is
+  // currently running in an SDR-ish output mode, preventing an unnecessary
+  // HDMI mode switch/blink when returning to the SDR GUI. Opt-in via its own
+  // setting to protect VS10-only / non-DV setups.
+  if (aml_dv_mode() == DV_MODE_ON_DEMAND && aml_is_dv_enable() &&
+      (existing_mode == DOLBY_VISION_OUTPUT_MODE_SDR10 || existing_mode == DOLBY_VISION_OUTPUT_MODE_BYPASS) &&
+      settings()->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_KEEP_SDR_STATE))
+  {
+    const auto close_ms_sdr_keep = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t_close_start).count();
+    logM(LOGDEBUG, "aml_dv_close TIMING: total={}ms existing_mode={} dv_mode={} exit=on_demand_sdr_keep",
+         close_ms_sdr_keep, aml_dv_output_mode_to_string(existing_mode), static_cast<int>(aml_dv_mode()));
+    return;
+  }
+
   if (aml_dv_mode() != DV_MODE_ON)
     aml_apply_pq_input_state(StreamHdrType::HDR_TYPE_NONE, 0);
 
