@@ -668,6 +668,7 @@ bool CDolbyVisionAML::Setup()
   set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_CMV40_APPEND, true);
   set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_AUDIO_SEAMLESSBRANCH, true);
   set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_BYPASS, true);
+  set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_HANDSHAKE_BYPASS, true);
   set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_CMV40_AUTO_TRIGGER, true);
   set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_CMV40_AUTO2_THRESHOLD, true);
 

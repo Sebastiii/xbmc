@@ -530,6 +530,7 @@ public:
   static constexpr auto SETTING_COREELEC_AUDIO_EAC3_ATMOS_DIALNORM = "coreelec.audio.eac3.atmos.dialnorm";
   static constexpr auto SETTING_COREELEC_AUDIO_TRUEHD_ATMOS_DIALNORM = "coreelec.audio.truehd.atmos.dialnorm";
   static constexpr auto SETTING_COREELEC_AMLOGIC_DV_BYPASS = "coreelec.amlogic.dolbyvision.bypass";
+  static constexpr auto SETTING_COREELEC_AMLOGIC_DV_HANDSHAKE_BYPASS = "coreelec.amlogic.dolbyvision.handshake_bypass";
   static constexpr auto SETTING_COREELEC_AUDIO_DTS_DIALNORM = "coreelec.audio.dts.dialnorm";
   static constexpr auto SETTING_COREELEC_AUDIO_EAC3_SMALL_SPF_PCM = "coreelec.audio.eac3.small.spf.pcm";
   static constexpr auto SETTING_COREELEC_AUDIO_DDR_PRIORITY = "coreelec.audio.ddr_priority";

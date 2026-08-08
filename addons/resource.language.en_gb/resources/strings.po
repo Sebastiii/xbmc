@@ -26566,6 +26566,18 @@ msgctxt "#60608"
 msgid "Setting this option to avoid handcheck when starting DV video from HDR or SDR"
 msgstr ""
 
+#. "Dolby Vision HDR Bypass" (ported from Pannal PR #45)
+#: system/settings/settings.xml
+msgctxt "#60900"
+msgid "Disable DV black screen when starting or stopping playback"
+msgstr ""
+
+#. "Dolby Vision HDR Bypass" (ported from Pannal PR #45)
+#: system/settings/settings.xml
+msgctxt "#60901"
+msgid "Skips the HDMI mode switch when entering or leaving Dolby Vision playback. Avoids black screens during transitions, but some TVs need the mode switch to pick up the Dolby Vision signalling correctly."
+msgstr ""
+
 #. Title of Dolby Vision RPU conversion setting
 #: system/settings/settings.xml
 msgctxt "#69196"
