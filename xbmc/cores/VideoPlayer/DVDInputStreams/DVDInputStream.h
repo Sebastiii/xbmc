@@ -105,10 +105,18 @@ public:
     virtual void OnLeft() = 0;
     virtual void OnRight() = 0;
 
+    enum class MenuCall
+    {
+      Auto,
+      Popup,
+      Top,
+    };
+
     /*! \brief Open the Menu
     * \return true if the menu is successfully opened, false otherwise
     */
-    virtual bool OnMenu() = 0;
+    virtual bool OnMenu(MenuCall call = MenuCall::Auto) = 0;
+    virtual bool OnColorKey(int key) { return false; }
     virtual void OnBack() = 0;
     virtual void OnNext() = 0;
     virtual void OnPrevious() = 0;
@@ -123,7 +131,12 @@ public:
 
     virtual bool IsInMenu() = 0;
     virtual void SkipStill() = 0;
+    virtual bool ConsumeDiscontinuityFlush() { return false; }
     virtual double GetTimeStampCorrection() { return 0.0; }
+    virtual bool GetSeamTimeOffsets(int& generation, double& current, double& previous)
+    {
+      return false;
+    }
     virtual bool GetState(std::string &xmlstate) = 0;
     virtual bool SetState(const std::string &xmlstate) = 0;
     virtual bool CanSeek() { return !IsInMenu(); }
@@ -162,6 +175,9 @@ public:
     virtual CDVDDemux* GetExtentionDemux() = 0;
     virtual void DisableExtention() = 0;
     virtual bool OpenNextStream() = 0;
+    virtual void OnStereoStreamUnrecoverable() {}
+    virtual bool ConsumeStereoResyncRequest() { return false; }
+    virtual bool ExtentionAbortRequested() { return false; }
   };
 
   enum ENextStream

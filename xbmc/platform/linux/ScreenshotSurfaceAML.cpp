@@ -29,9 +29,18 @@ std::unique_ptr<IScreenshotSurface> CScreenshotSurfaceAML::CreateSurface()
 
 bool CScreenshotSurfaceAML::Capture()
 {
+  CGUIComponent* gui = CServiceBroker::GetGUI();
+  if (!gui)
+    return false;
+
+  if (!gui->GetWindowManager().BeginRenderExclusion())
+    return false;
+
   std::lock_guard lock(CServiceBroker::GetWinSystem()->GetGfxContext());
 
-  CServiceBroker::GetGUI()->GetWindowManager().Render();
+  gui->GetWindowManager().Render();
+
+  gui->GetWindowManager().EndRenderExclusion();
 
 #ifndef HAS_GLES
   glReadBuffer(GL_BACK);

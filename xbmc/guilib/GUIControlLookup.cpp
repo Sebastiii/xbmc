@@ -37,6 +37,21 @@ CGUIControl *CGUIControlLookup::GetControl(int iControl, std::vector<CGUIControl
   return pPotential;
 }
 
+CRect CGUIControlLookup::GetVisibleControlBounds() const
+{
+  CRect bounds;
+  for (const auto& entry : m_lookup)
+  {
+    const CGUIControl* control = entry.second;
+    if (!control || !control->IsVisible())
+      continue;
+    const CRect& region = control->GetRenderRegion();
+    if (!region.IsEmpty())
+      bounds.Union(region);
+  }
+  return bounds;
+}
+
 bool CGUIControlLookup::IsValidControl(const CGUIControl *control) const
 {
   if (control->GetID())

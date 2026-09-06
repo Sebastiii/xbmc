@@ -24,10 +24,12 @@ public:
   void CreateTextureObject() override;
   void DestroyTextureObject() override;
   void LoadToGPU() override;
+  void SyncGPU() override;
   void BindToUnit(unsigned int unit) override;
 
 protected:
   GLuint m_texture = 0;
   bool m_isOglVersion3orNewer = false;
+  bool m_mipmapsApplied = false;
 };
 

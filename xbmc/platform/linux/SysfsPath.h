@@ -46,7 +46,7 @@ public:
     {
       std::ifstream file(m_path);
 
-      T value;
+      T value{};
 
       file >> value;
 

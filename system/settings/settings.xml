@@ -101,6 +101,33 @@
           </constraints>
           <control type="list" format="string" />
         </setting>
+        <setting id="coreelec.mkveditions" type="boolean" label="60670" help="60671">
+          <level>2</level>
+          <default>false</default>
+          <control type="toggle" />
+        </setting>
+        <setting id="coreelec.amlogic.fastseek" type="boolean" label="60630" help="60631">
+          <requirement>HAVE_AMCODEC</requirement>
+          <level>2</level>
+          <default>true</default>
+          <control type="toggle" />
+        </setting>
+        <setting id="coreelec.amlogic.detectbrokenfiles" type="boolean" label="60626" help="60627">
+          <level>2</level>
+          <default>false</default>
+          <control type="toggle" />
+        </setting>
+        <setting id="coreelec.codeclogotimeout" type="integer" label="60610" help="60611">
+          <requirement>HAVE_AMCODEC</requirement>
+          <level>2</level>
+          <default>15</default>
+          <constraints>
+            <minimum>0</minimum>
+            <step>1</step>
+            <maximum>30</maximum>
+          </constraints>
+          <control type="spinner" format="integer" />
+        </setting>
       </group>
       <group id="3" label="14231">
         <setting id="videoplayer.rendermethod" type="integer" label="13415" help="36153">
@@ -174,6 +201,23 @@
           <control type="spinner" format="string" />
           <control type="edit" format="integer" />
         </setting>
+        <setting id="videoplayer.amlmpeg2keepprog" type="boolean" label="69361" help="69362">
+          <requirement>HAVE_AMCODEC</requirement>
+          <level>2</level>
+          <default>false</default>
+          <updates>
+            <update type="change" />
+          </updates>
+          <dependencies>
+            <dependency type="visible">
+              <and>
+                <condition setting="videoplayer.useamcodec" operator="is">true</condition>
+                <condition setting="videoplayer.useamcodecmpeg2" operator="!is">9999</condition>
+              </and>
+            </dependency>
+          </dependencies>
+          <control type="toggle" />
+        </setting>
         <setting id="videoplayer.useamcodecmpeg4" type="integer" label="39002">
           <requirement>HAVE_AMCODEC</requirement>
           <level>2</level>
@@ -224,20 +268,27 @@
           <default>0</default>
           <constraints>
             <options>
-              <option label="20420">9999</option>   <!-- Never -->
-              <option label="39033">9998</option>  <!-- Exclude 24p -->
-              <option label="39000">800</option>  <!-- HD -->
+              <!-- Withheld while software VC-1 decode has two open defects: the frame rate
+                   detector relatches about eight seconds in and switches the display mode
+                   mid playback, and the software chain carries no deinterlacer so interlaced
+                   material loses field rate motion. Restore these three when that is fixed.
+              <option label="20420">9999</option>
+              <option label="39033">9998</option>
+              <option label="39000">800</option>
+              -->
               <option label="20422">0</option>  <!-- Always -->
             </options>
           </constraints>
           <updates>
             <update type="change" />
           </updates>
+          <!-- VC-1 ignores the amcodec master switch, so this stays readable when it is off.
           <dependencies>
             <dependency type="enable">
-              <condition setting="videoplayer.useamcodec" operator="is">true</condition> <!-- USE AMCODEC -->
+              <condition setting="videoplayer.useamcodec" operator="is">true</condition>
             </dependency>
           </dependencies>
+          -->
           <control type="spinner" format="string" />
           <control type="edit" format="integer" />
         </setting>
@@ -519,6 +570,11 @@
           </constraints>
           <control type="list" format="string" />
         </setting>
+        <setting id="disc.allowbdjtopmenu" type="boolean" label="60657" help="60658">
+          <level>2</level>
+          <default>false</default>
+          <control type="toggle" />
+        </setting>
       </group>
       <group id="3" label="620">
         <setting id="audiocds.autoaction" type="integer" label="14097" help="36283">
@@ -658,22 +714,120 @@
           <control type="toggle" />
         </setting>
       </group>
+      <group id="4" label="69187">
+        <setting id="subtitles.captionsimpaired" type="boolean" label="69204" help="69205">
+          <level>2</level>
+          <default>false</default>
+          <control type="toggle" />
+        </setting>
+      </group>
     </category>
     <category id="subtitles" label="287" help="37033">
       <group id="1" label="39186">
-        <setting id="subtitles.align" type="integer" label="21460" help="36192">
+        <setting id="subtitles.pgsverticalmode" type="integer" label="65100" help="65101">
           <level>2</level>
-          <default>2</default> <!-- Align::BOTTOM_OUTSIDE -->
+          <default>0</default>
+          <constraints>
+            <minimum>0</minimum>
+            <maximum>5</maximum>
+            <options>
+              <option label="65102">0</option>
+              <option label="65103">1</option>
+              <option label="65104">2</option>
+              <option label="65105">3</option>
+              <option label="65106">4</option>
+              <option label="65107">5</option>
+            </options>
+          </constraints>
+          <control type="list" format="string" />
+        </setting>
+        <setting id="subtitles.pgsverticaloffset" type="integer" parent="subtitles.pgsverticalmode" label="65108" help="65109">
+          <level>2</level>
+          <default>0</default>
+          <constraints>
+            <minimum>-60</minimum>
+            <step>1</step>
+            <maximum>60</maximum>
+          </constraints>
+          <dependencies>
+            <dependency type="visible" setting="subtitles.pgsverticalmode" operator="is">5</dependency>
+          </dependencies>
+          <control type="spinner" format="integer" />
+        </setting>
+        <setting id="subtitles.pgsmanualactiveaspect" type="string" parent="subtitles.pgsverticalmode" label="65110" help="65111">
+          <level>2</level>
+          <default>auto</default>
           <constraints>
             <options>
+              <option label="65112">auto</option>
+              <option label="65113">16:9</option>
+              <option label="65114">1.85:1</option>
+              <option label="65115">2.20:1</option>
+              <option label="65116">2.35:1</option>
+              <option label="65117">2.39:1</option>
+            </options>
+          </constraints>
+          <dependencies>
+            <dependency type="visible">
+              <or>
+                <condition setting="subtitles.pgsverticalmode" operator="is">1</condition>
+                <condition setting="subtitles.pgsverticalmode" operator="is">2</condition>
+              </or>
+            </dependency>
+          </dependencies>
+          <control type="list" format="string" />
+        </setting>
+        <setting id="subtitles.align" type="integer" label="21460" help="36192">
+          <level>2</level>
+          <default>5</default> <!-- Align::ORIGINAL -->
+          <dependencies>
+            <dependency type="visible" setting="subtitles.pgsverticalmode" operator="is">0</dependency>
+          </dependencies>
+          <constraints>
+            <options>
+              <option label="65102">5</option> <!-- Align::ORIGINAL -->
               <option label="21461">0</option> <!-- Align::MANUAL -->
               <option label="21462">1</option> <!-- Align::BOTTOM_INSIDE -->
-              <option label="21463">2</option> <!-- Align::BOTTOM_OUTSIDE -->
+              <option label="65118">2</option> <!-- Align::BOTTOM_OUTSIDE -->
               <option label="21464">3</option> <!-- Align::TOP_INSIDE -->
               <option label="21465">4</option> <!-- Align::TOP_OUTSIDE -->
             </options>
           </constraints>
           <control type="list" format="string" />
+        </setting>
+        <setting id="subtitles.restrict.to.active.area" type="boolean" label="65119" help="65120">
+          <level>2</level>
+          <default>false</default>
+          <dependencies>
+            <dependency type="visible" setting="subtitles.pgsverticalmode" operator="is">0</dependency>
+            <dependency type="visible" setting="subtitles.align" operator="is">5</dependency>
+          </dependencies>
+          <control type="toggle" />
+        </setting>
+        <setting id="subtitles.dolbyvision.l5.signal.mode" type="integer" label="60326" help="60327">
+          <requirement>HAVE_AMCODEC</requirement>
+          <level>2</level>
+          <default>2</default>
+          <dependencies>
+            <dependency type="visible" setting="coreelec.amlogic.dolbyvision.mode" operator="!is">2</dependency>
+            <dependency type="visible" setting="coreelec.amlogic.dolbyvision.type" operator="is">0</dependency>
+            <dependency type="visible" setting="coreelec.amlogic.dolbyvision.std.source.metadata.level5" operator="is">true</dependency>
+            <dependency type="visible">
+              <or>
+                <condition setting="subtitles.restrict.to.active.area" operator="is">false</condition>
+                <condition setting="subtitles.pgsverticalmode" operator="!is">0</condition>
+                <condition setting="subtitles.align" operator="!is">5</condition>
+              </or>
+            </dependency>
+          </dependencies>
+          <constraints>
+            <options>
+              <option label="60322">0</option>
+              <option label="60328">1</option>
+              <option label="60329">2</option>
+            </options>
+          </constraints>
+          <control type="spinner" format="string" />
         </setting>
         <setting id="subtitles.fontname" type="string" label="14089" help="36185">
           <level>1</level>
@@ -818,6 +972,82 @@
           </dependencies>
           <control type="slider" format="percentage" range="0,100" />
         </setting>
+        <setting id="videoscreen.hdrpgspeakluminance" type="integer" label="69211" help="69212">
+          <requirement>
+            <or>
+              <condition>HAS_DX</condition>
+              <condition>HAS_MEDIACODEC</condition>
+              <condition>HAVE_WEBOS</condition>
+              <condition>HAVE_AMCODEC</condition>
+            </or>
+          </requirement>
+          <dependencies>
+            <dependency type="visible" on="property" name="ishdrdisplay"/>
+          </dependencies>
+          <level>2</level>
+          <default>50</default>
+          <control type="slider" format="percentage" range="0,100" />
+        </setting>
+        <setting id="videoscreen.hdrpgssaturation" type="integer" label="69213" help="69214">
+          <requirement>
+            <or>
+              <condition>HAS_DX</condition>
+              <condition>HAS_MEDIACODEC</condition>
+              <condition>HAVE_WEBOS</condition>
+              <condition>HAVE_AMCODEC</condition>
+            </or>
+          </requirement>
+          <dependencies>
+            <dependency type="visible" on="property" name="ishdrdisplay"/>
+          </dependencies>
+          <level>2</level>
+          <default>50</default>
+          <control type="slider" format="percentage" range="0,100" />
+        </setting>
+        <setting id="videoscreen.sdrpgspeakluminance" type="integer" label="69228" help="69229">
+          <requirement>
+            <or>
+              <condition>HAS_DX</condition>
+              <condition>HAS_MEDIACODEC</condition>
+              <condition>HAVE_WEBOS</condition>
+              <condition>HAVE_AMCODEC</condition>
+            </or>
+          </requirement>
+          <dependencies>
+            <dependency type="visible" on="property" name="ishdrdisplay"/>
+          </dependencies>
+          <level>2</level>
+          <default>50</default>
+          <control type="slider" format="percentage" range="0,100" />
+        </setting>
+        <setting id="videoscreen.sdrpgssaturation" type="integer" label="69230" help="69231">
+          <requirement>
+            <or>
+              <condition>HAS_DX</condition>
+              <condition>HAS_MEDIACODEC</condition>
+              <condition>HAVE_WEBOS</condition>
+              <condition>HAVE_AMCODEC</condition>
+            </or>
+          </requirement>
+          <dependencies>
+            <dependency type="visible" on="property" name="ishdrdisplay"/>
+          </dependencies>
+          <level>2</level>
+          <default>50</default>
+          <control type="slider" format="percentage" range="0,100" />
+        </setting>
+        <setting id="subtitles.bitmapzoom" type="integer" label="69215" help="69216">
+          <level>1</level>
+          <default>100</default>
+          <constraints>
+            <minimum>10</minimum>
+            <step>5</step>
+            <maximum>200</maximum>
+          </constraints>
+          <control type="slider" format="integer">
+            <formatlabel>14047</formatlabel>
+          </control>
+        </setting>
         <setting id="subtitles.marginvertical" type="number" label="39182" help="39183">
           <level>3</level>
           <default>4.95</default>
@@ -832,6 +1062,16 @@
           <control type="slider" format="percentage">
             <format>{:.2f} %</format>
           </control>
+        </setting>
+        <setting id="coreelec.resetptsonseek" type="boolean" label="60604" help="60605">
+          <level>3</level>
+          <default>false</default>
+          <control type="toggle" />
+        </setting>
+        <setting id="coreelec.subtitles.recallfromfile" type="boolean" label="60612" help="60613">
+          <level>2</level>
+          <default>false</default>
+          <control type="toggle" />
         </setting>
         <setting id="subtitles.overridefonts" type="boolean" label="21368" help="36190">
           <level>3</level>
@@ -856,6 +1096,14 @@
             <dependency type="enable" on="property" operator="!is" name="isplaying" />
           </dependencies>
           <control type="list" format="string" />
+        </setting>
+        <setting id="subtitles.overrideass" type="boolean" label="69202" help="69203">
+          <level>1</level>
+          <default>false</default>
+          <dependencies>
+            <dependency type="enable" on="property" operator="!is" name="isplaying" />
+          </dependencies>
+          <control type="toggle" />
         </setting>
         <setting id="subtitles.stereoscopicdepth" type="integer" label="36545" help="36546">
           <level>2</level>
@@ -1170,6 +1418,14 @@
         <setting id="myvideos.extractflags" type="boolean" label="20433" help="36178">
           <level>2</level>
           <default>true</default>
+          <control type="toggle" />
+        </setting>
+        <setting id="myvideos.extracthdr10plus" type="boolean" label="60665" help="60666">
+          <level>2</level>
+          <default>true</default>
+          <dependencies>
+            <dependency type="enable" setting="myvideos.extractflags" operator="is">true</dependency>
+          </dependencies>
           <control type="toggle" />
         </setting>
         <setting id="myvideos.extractchapterthumbs" type="boolean" label="37044" help="37045">
@@ -2159,7 +2415,7 @@
         <setting id="pvrpowermanagement.dailywakeuptime" type="string" label="19248" help="36246">
           <level>2</level>
           <default>00:00:00</default>
-          <control type="edit" format="string" />
+          <control type="button" format="action" />
           <dependencies>
             <dependency type="enable" setting="pvrpowermanagement.enabled" operator="is">true</dependency>
           </dependencies>
@@ -2580,7 +2836,7 @@
       <group id="4" label="37053">
         <setting id="smb.chunksize" type="integer" label="37056" help="37057">
         <level>2</level>
-        <default>1024</default>
+        <default>2048</default>
           <constraints>
             <options>filechunksizes</options>
           </constraints>
@@ -2605,7 +2861,7 @@
       <group id="2" label="37053">
         <setting id="nfs.chunksize" type="integer" label="37054" help="37055">
         <level>2</level>
-        <default>1024</default>
+        <default>2048</default>
           <constraints>
             <options>filechunksizes</options>
           </constraints>
@@ -2617,7 +2873,7 @@
       <group id="1" label="16000">
         <setting id="filecache.buffermode" type="integer" label="37103" help="37104">
           <level>2</level>
-          <default>1</default>
+          <default>4</default>
           <constraints>
             <options>filecachebuffermodes</options>
           </constraints>
@@ -2625,7 +2881,7 @@
         </setting>
         <setting id="filecache.memorysize" type="integer" label="37105" help="37106">
           <level>2</level>
-          <default>128</default>
+          <default>256</default>
           <dependencies>
             <dependency type="enable">
               <condition setting="filecache.buffermode" operator="!is">3</condition>
@@ -2653,7 +2909,7 @@
       <group id="2" label="37053">
         <setting id="filecache.chunksize" type="integer" label="37053" help="37109">
           <level>2</level>
-          <default>1048576</default>
+          <default>2097152</default>
           <dependencies>
             <dependency type="enable">
               <condition setting="filecache.buffermode" operator="!is">3</condition>
@@ -3115,6 +3371,77 @@
           </dependencies>
           <control type="spinner" format="integer" />
         </setting>
+        <setting id="coreelec.amlogic.hdr10.limiter" type="boolean" label="60652" help="60653">
+          <requirement>HAVE_AMCODEC</requirement>
+          <visible>true</visible>
+          <level>2</level>
+          <default>false</default>
+          <control type="toggle" />
+        </setting>
+        <setting id="coreelec.amlogic.hdr10.max.luminance" type="integer" label="60622" help="60623" parent="coreelec.amlogic.hdr10.limiter">
+          <requirement>HAVE_AMCODEC</requirement>
+          <level>2</level>
+          <default>0</default>
+          <dependencies>
+            <dependency type="visible" setting="coreelec.amlogic.hdr10.limiter" operator="is">true</dependency>
+          </dependencies>
+          <constraints>
+            <minimum>0</minimum>
+            <step>100</step>
+            <maximum>10000</maximum>
+          </constraints>
+          <control type="slider" format="integer" range="0,100,10000" />
+        </setting>
+        <setting id="coreelec.amlogic.hdr10.max.cll" type="integer" label="60624" help="60625" parent="coreelec.amlogic.hdr10.limiter">
+          <requirement>HAVE_AMCODEC</requirement>
+          <level>2</level>
+          <default>0</default>
+          <dependencies>
+            <dependency type="visible" setting="coreelec.amlogic.hdr10.limiter" operator="is">true</dependency>
+          </dependencies>
+          <constraints>
+            <minimum>0</minimum>
+            <step>100</step>
+            <maximum>10000</maximum>
+          </constraints>
+          <control type="slider" format="integer" range="0,100,10000" />
+        </setting>
+        <setting id="coreelec.amlogic.prefer.12bit" type="boolean" label="60614" help="60615">
+          <requirement>HAVE_AMCODEC</requirement>
+          <visible>true</visible>
+          <level>2</level>
+          <default>true</default>
+          <control type="toggle" />
+        </setting>
+        <setting id="coreelec.amlogic.usedisplayasclock" type="boolean" label="60110" help="60111">
+          <requirement>HAVE_AMCODEC</requirement>
+          <level>2</level>
+          <default>true</default>
+          <control type="toggle" />
+        </setting>
+        <setting id="coreelec.amlogic.videosync.fallback.on.stall" type="boolean" parent="coreelec.amlogic.usedisplayasclock" label="60112" help="60113">
+          <requirement>HAVE_AMCODEC</requirement>
+          <level>2</level>
+          <default>true</default>
+          <dependencies>
+            <dependency type="visible" setting="coreelec.amlogic.usedisplayasclock" operator="is">true</dependency>
+          </dependencies>
+          <control type="toggle" />
+        </setting>
+        <setting id="coreelec.amlogic.dolbyvision.masterclock.vsync.offset" type="integer" parent="coreelec.amlogic.usedisplayasclock" label="60606" help="60607">
+          <requirement>HAVE_AMCODEC</requirement>
+          <level>2</level>
+          <default>8</default>
+          <dependencies>
+            <dependency type="visible" setting="coreelec.amlogic.usedisplayasclock" operator="is">true</dependency>
+          </dependencies>
+          <constraints>
+            <minimum>0</minimum>
+            <step>1</step>
+            <maximum>15</maximum>
+          </constraints>
+          <control type="spinner" format="integer" />
+        </setting>
       </group>
       <group id="2" label="39191">
       <setting id="videoscreen.usesystemsdrpeakluminance" type="boolean" label="36096" help="39190">
@@ -3130,7 +3457,31 @@
         </dependencies>
         <control type="toggle" />
       </setting>
-      <setting id="videoscreen.guipeakluminance" type="integer" label="36097" help="36547">
+      <setting id="videoscreen.guipeakluminance.hlg" type="integer" label="69232" help="69233">
+        <requirement>
+          <condition>HAVE_AMCODEC</condition>
+        </requirement>
+        <dependencies>
+          <dependency type="visible" on="property" name="ishdrdisplay"/>
+        </dependencies>
+        <level>2</level>
+        <default>50</default>
+        <control type="slider" format="percentage" range="0,100" />
+      </setting>
+
+      <setting id="videoscreen.guisaturation.hlg" type="integer" label="69234" help="69235">
+        <requirement>
+          <condition>HAVE_AMCODEC</condition>
+        </requirement>
+        <dependencies>
+          <dependency type="visible" on="property" name="ishdrdisplay"/>
+        </dependencies>
+        <level>2</level>
+        <default>50</default>
+        <control type="slider" format="percentage" range="0,100" />
+      </setting>
+
+      <setting id="videoscreen.guipeakluminance" type="integer" label="69220" help="69221">
         <requirement>
           <or>
             <condition>HAS_DX</condition>
@@ -3147,44 +3498,75 @@
               <condition>HAVE_AMCODEC</condition>
             </or>
           </dependency>
+        </dependencies>
+        <level>2</level>
+        <default>45</default>
+        <control type="slider" format="percentage" range="0,100" />
+      </setting>
+
+      <setting id="videoscreen.guisdrsaturation" type="integer" label="69222" help="69223">
+        <requirement>
+          <or>
+            <condition>HAS_DX</condition>
+            <condition>HAS_MEDIACODEC</condition>
+            <condition>HAVE_WEBOS</condition>
+            <condition>HAVE_AMCODEC</condition>
+          </or>
+        </requirement>
+        <dependencies>
+          <dependency type="visible" on="property" name="ishdrdisplay"/>
+          <dependency type="enable">
+            <or>
+              <condition on="property" name="hassystemsdrpeakluminance" operator="!is" />
+              <condition setting="videoscreen.usesystemsdrpeakluminance" operator="is">false</condition>
+              <condition>HAVE_AMCODEC</condition>
+            </or>
+          </dependency>
+        </dependencies>
+        <level>2</level>
+        <default>65</default>
+        <control type="slider" format="percentage" range="0,100" />
+      </setting>
+
+      <setting id="videoscreen.guisrgbtransfer" type="boolean" label="69236" help="69237">
+        <requirement>
+          <condition>HAVE_AMCODEC</condition>
+        </requirement>
+        <dependencies>
+          <dependency type="visible" on="property" name="ishdrdisplay"/>
+        </dependencies>
+        <level>2</level>
+        <default>true</default>
+        <control type="toggle" />
+      </setting>
+
+      <setting id="videoscreen.guidither8bit" type="boolean" label="69238" help="69239">
+        <requirement>
+          <condition>HAVE_AMCODEC</condition>
+        </requirement>
+        <dependencies>
+          <dependency type="visible" on="property" name="ishdrdisplay"/>
+        </dependencies>
+        <level>2</level>
+        <default>true</default>
+        <control type="toggle" />
+      </setting>
+
+      <setting id="videoscreen.guipeakluminance.dolbyvision" type="integer" label="69224" help="69225">
+        <requirement>
+          <condition>HAVE_AMCODEC</condition>
+        </requirement>
+        <dependencies>
+          <dependency type="visible" on="property" name="ishdrdisplay"/>
         </dependencies>
         <level>2</level>
         <default>40</default>
         <control type="slider" format="percentage" range="0,100" />
       </setting>
 
-      <setting id="videoscreen.guisdrsaturation" type="integer" label="36095" help="36998">
+      <setting id="videoscreen.guisaturation.dolbyvision" type="integer" label="69226" help="69227">
         <requirement>
-          <or>
-            <condition>HAS_DX</condition>
-            <condition>HAS_MEDIACODEC</condition>
-            <condition>HAVE_WEBOS</condition>
-            <condition>HAVE_AMCODEC</condition>
-          </or>
-        </requirement>
-        <dependencies>
-          <dependency type="visible" on="property" name="ishdrdisplay"/>
-          <dependency type="enable">
-            <or>
-              <condition on="property" name="hassystemsdrpeakluminance" operator="!is" />
-              <condition setting="videoscreen.usesystemsdrpeakluminance" operator="is">false</condition>
-              <condition>HAVE_AMCODEC</condition>
-            </or>
-          </dependency>
-        </dependencies>
-        <level>2</level>
-        <default>50</default>
-        <control type="slider" format="percentage" range="0,100" />
-      </setting>
-
-      <setting id="videoscreen.hdrpgspeakluminance" type="integer" label="69211" help="69212">
-        <requirement>
-          <or>
-            <condition>HAS_DX</condition>
-            <condition>HAS_MEDIACODEC</condition>
-            <condition>HAVE_WEBOS</condition>
-            <condition>HAVE_AMCODEC</condition>
-          </or>
+          <condition>HAVE_AMCODEC</condition>
         </requirement>
         <dependencies>
           <dependency type="visible" on="property" name="ishdrdisplay"/>
@@ -3194,22 +3576,6 @@
         <control type="slider" format="percentage" range="0,100" />
       </setting>
 
-      <setting id="videoscreen.hdrpgssaturation" type="integer" label="69213" help="69214">
-        <requirement>
-          <or>
-            <condition>HAS_DX</condition>
-            <condition>HAS_MEDIACODEC</condition>
-            <condition>HAVE_WEBOS</condition>
-            <condition>HAVE_AMCODEC</condition>
-          </or>
-        </requirement>
-        <dependencies>
-          <dependency type="visible" on="property" name="ishdrdisplay"/>
-        </dependencies>
-        <level>2</level>
-        <default>50</default>
-        <control type="slider" format="percentage" range="0,100" />
-      </setting>
       </group>
       <group id="3" label="14126">
         <setting id="videoscreen.whitelist" type="list[string]" parent="videoscreen.screen" label="14126" help="36443">
@@ -3295,6 +3661,8 @@
               <option label="34106">6</option> <!-- AE_CH_LAYOUT_4_1 -->
               <option label="34107">7</option> <!-- AE_CH_LAYOUT_5_0 -->
               <option label="34108">8</option> <!-- AE_CH_LAYOUT_5_1 -->
+              <option label="60634">11</option> <!-- AE_CH_LAYOUT_6_0 -->
+              <option label="60635">12</option> <!-- AE_CH_LAYOUT_6_1 -->
               <option label="34109">9</option> <!-- AE_CH_LAYOUT_7_0 -->
               <option label="34110">10</option> <!-- AE_CH_LAYOUT_7_1 -->
             </options>
@@ -3336,19 +3704,30 @@
           </dependencies>
           <control type="toggle" />
         </setting>
-        <setting id="audiooutput.boostcenter" type="integer" label="38007" help="38008">
+        <setting id="audiooutput.boostcenter" type="number" label="38007" help="38008">
           <level>2</level>
           <default>0</default>
           <constraints>
             <minimum>0</minimum>
-            <step>1</step>
+            <step>0.5</step>
             <maximum>30</maximum>
           </constraints>
-          <control type="spinner" format="string">
-            <formatlabel>38009</formatlabel>
+          <control type="slider" format="number">
+            <format>{:.1f} dB</format>
           </control>
         </setting>
+        <setting id="audiooutput.drc" type="integer" label="60636" help="60637">
+          <level>2</level>
+          <default>100</default>
+          <control type="slider" format="percentage" range="0,1,100" />
+        </setting>
         <setting id="audiooutput.lowlatency" type="boolean" label="295" help="36441">
+          <level>2</level>
+          <default>true</default>
+          <control type="toggle" />
+        </setting>
+        <setting id="coreelec.audio.ddr_priority" type="boolean" label="69355" help="69356">
+          <requirement>HAVE_AMCODEC</requirement>
           <level>2</level>
           <default>true</default>
           <control type="toggle" />
@@ -3412,7 +3791,50 @@
         <setting id="audiooutput.mixsublevel" type="integer" label="34131" help="34132">
           <level>2</level>
           <default>0</default>
-          <control type="slider" format="percentage" range="0,1,100" />
+          <constraints>
+            <minimum>0</minimum>
+            <step>1</step>
+            <maximum>300</maximum>
+          </constraints>
+          <control type="slider" format="integer">
+            <format>{:d} %</format>
+          </control>
+        </setting>
+        <setting id="audiooutput.lfemixto" type="integer" label="60617" help="60618">
+          <level>2</level>
+          <default>0</default>
+          <constraints>
+            <options>
+              <option label="571">0</option>
+              <option label="60619">1</option>
+            </options>
+          </constraints>
+          <control type="list" format="string" />
+        </setting>
+        <setting id="audiooutput.ignoredownmixmetadata" type="boolean" label="60620" help="60621">
+          <level>2</level>
+          <default>false</default>
+          <control type="toggle" />
+        </setting>
+        <setting id="coreelec.amlogic.dolbyvision.audio.seamlessbranch" type="integer" label="60594" help="60595">
+          <!-- <requirement>HAVE_AMCODEC</requirement> -->
+          <visible>true</visible>
+          <level>2</level>
+          <default>5</default>
+     <!-- <dependencies>
+            <dependency type="visible" setting="coreelec.amlogic.dolbyvision.mode" operator="!is">2</dependency>
+          </dependencies> -->
+          <constraints>
+            <options>
+              <option label="60596">0</option>  <!-- Off -->
+              <option label="60597">1</option>  <!-- 1 -->
+              <!-- <option label="60598">2</option>   2 -->
+              <option label="60599">3</option>  <!-- 3 -->
+              <option label="60600">4</option>  <!-- 4 -->
+              <option label="60601">5</option>  <!-- 5 -->
+            </options>
+          </constraints>
+          <control type="spinner" format="string" />
         </setting>
       </group>
       <group id="2" label="15108">
@@ -3524,6 +3946,29 @@
           </dependencies>
           <control type="toggle" />
         </setting>
+        <setting id="coreelec.audio.eac3.small.spf.pcm" type="integer" label="60644" help="60645" parent="audiooutput.eac3passthrough">
+          <level>1</level>
+          <default>0</default>
+          <constraints>
+            <options>
+              <option label="60649">0</option>
+              <option label="60646">768</option>
+              <option label="60647">512</option>
+              <option label="60648">256</option>
+            </options>
+          </constraints>
+          <dependencies>
+            <dependency type="visible">
+              <and>
+                <condition on="property" name="aesettingvisible" setting="audiooutput.config">audiooutput.eac3passthrough</condition>
+                <condition on="property" name="aesettingvisible" setting="audiooutput.passthroughdevice">audiooutput.eac3passthrough</condition>
+                <condition setting="audiooutput.eac3passthrough" operator="is">true</condition>
+              </and>
+            </dependency>
+            <dependency type="enable" setting="audiooutput.passthrough" operator="is">true</dependency>
+          </dependencies>
+          <control type="spinner" format="string" />
+        </setting>
         <setting id="audiooutput.dtspassthrough" type="boolean" label="254" help="36366">
           <level>1</level>
           <default>false</default>
@@ -3589,6 +4034,7 @@
           <level>2</level>
           <default>false</default>
           <dependencies>
+            <dependency type="visible" on="property" name="aesettingvisible" setting="audiooutput.config">audiooutput.passthrough</dependency>
             <dependency type="enable">
               <and>
                 <condition setting="audiooutput.passthrough" operator="is">true</condition>
@@ -3601,6 +4047,7 @@
           <level>2</level>
           <default>false</default>
           <dependencies>
+            <dependency type="visible" on="property" name="aesettingvisible" setting="audiooutput.config">audiooutput.passthrough</dependency>
             <dependency type="enable">
               <and>
                 <condition setting="audiooutput.passthrough" operator="is">true</condition>
@@ -3614,6 +4061,25 @@
           <level>2</level>
           <default>false</default>
           <dependencies>
+            <dependency type="visible">
+              <and>
+                <condition on="property" name="aesettingvisible" setting="audiooutput.config">audiooutput.truehdpassthrough</condition>
+                <condition on="property" name="aesettingvisible" setting="audiooutput.passthroughdevice">audiooutput.truehdpassthrough</condition>
+              </and>
+            </dependency>
+            <dependency type="enable">
+              <and>
+                <condition setting="audiooutput.passthrough" operator="is">true</condition>
+              </and>
+            </dependency>
+          </dependencies>
+          <control type="toggle" />
+        </setting>
+        <setting id="coreelec.audio.dts.dialnorm" type="boolean" label="69357" help="69358">
+          <level>2</level>
+          <default>false</default>
+          <dependencies>
+            <dependency type="visible" on="property" name="aesettingvisible" setting="audiooutput.config">audiooutput.dtspassthrough</dependency>
             <dependency type="enable">
               <and>
                 <condition setting="audiooutput.passthrough" operator="is">true</condition>
@@ -3889,6 +4355,11 @@
     </category>
     <category id="logging" label="14092" help="36391">
       <group id="1" label="14260">
+        <setting id="debug.showonscreendebuginfo" type="boolean" label="69359" help="69360">
+          <level>1</level>
+          <default>false</default>
+          <control type="toggle" />
+        </setting>
         <setting id="debug.showloginfo" type="boolean" label="20191" help="36392">
           <level>1</level>
           <default>false</default>
@@ -3951,30 +4422,6 @@
       </group>
     </category>
     <category id="coreelec" label="14278" help="14279">
-      <group id="1" label="131">
-        <setting id="coreelec.amlogic.noisereduction" type="boolean" label="14280" help="69999">
-          <requirement>HAVE_AMCODEC</requirement>
-          <visible>true</visible>
-          <level>3</level>
-          <default>true</default>
-          <control type="toggle" />
-        </setting>
-        <setting id="coreelec.amlogic.sdr2hdr" type="boolean" label="14282" help="14283">
-          <requirement>HAVE_AMCODEC</requirement>
-          <visible>false</visible>
-          <default>false</default>
-          <control type="toggle" />
-        </setting>
-        <setting id="coreelec.amlogic.hdr2sdr" type="boolean" label="14284" help="14285">
-          <requirement>HAVE_AMCODEC</requirement>
-          <visible>false</visible>
-          <default>false</default>
-          <control type="toggle" />
-          <dependencies>
-            <dependency type="enable" setting="coreelec.amlogic.sdr2hdr" operator="is">false</dependency>
-          </dependencies>
-        </setting>
-      </group>
       <group id="2" label="60001">
         <setting id="coreelec.amlogic.dolbyvision.mode" type="integer" label="60011" help="60012">
           <requirement>HAVE_AMCODEC</requirement>
@@ -4000,8 +4447,8 @@
           </dependencies>
           <constraints>
             <minimum>50</minimum>
-            <step>1</step>
-            <maximum>250</maximum>
+            <step>10</step>
+            <maximum>1000</maximum>
           </constraints>
           <control type="slider" format="integer" />
         </setting>
@@ -4106,6 +4553,7 @@
               <option label="60082">1</option> <!-- BT.2020 -->
               <option label="60083">2</option> <!-- BT.709 -->
               <option label="60563">3</option> <!-- DISPLAY -->
+              <option label="60084">4</option> <!-- EPSON LS12000 -->
             </options>
           </constraints>
           <control type="spinner" format="string" />
@@ -4302,11 +4750,51 @@
           </constraints>
           <control type="spinner" format="string" />
         </setting>
-        <setting id="coreelec.amlogic.dolbyvision.std.source.metadata.level5" type="boolean" label="60150" help="60151" parent="coreelec.amlogic.dolbyvision.type">
+        <setting id="coreelec.amlogic.dolbyvision.type.assigned" type="boolean" label="60650" help="60651">
           <requirement>HAVE_AMCODEC</requirement>
           <visible>false</visible>
           <level>2</level>
           <default>false</default>
+          <control type="toggle" />
+        </setting>
+        <setting id="coreelec.amlogic.dolbyvision.vs10.sdr.boost" type="integer" label="60638" help="60639" parent="coreelec.amlogic.dolbyvision.type">
+          <requirement>HAVE_AMCODEC</requirement>
+          <visible>false</visible>
+          <level>2</level>
+          <default>0</default>
+          <dependencies>
+            <dependency type="visible" setting="coreelec.amlogic.dolbyvision.mode" operator="!is">2</dependency>
+          </dependencies>
+          <constraints>
+            <options>
+              <option label="60640">0</option>
+              <option label="60641">1</option>
+              <option label="60642">2</option>
+            </options>
+          </constraints>
+          <control type="spinner" format="string" />
+        </setting>
+        <setting id="coreelec.amlogic.dolbyvision.vs10.sdr.source.max.nits" type="integer" label="60632" help="60633" parent="coreelec.amlogic.dolbyvision.vs10.sdr.boost">
+          <requirement>HAVE_AMCODEC</requirement>
+          <visible>false</visible>
+          <level>2</level>
+          <default>1000</default>
+          <dependencies>
+            <dependency type="visible" setting="coreelec.amlogic.dolbyvision.mode" operator="!is">2</dependency>
+            <dependency type="visible" setting="coreelec.amlogic.dolbyvision.vs10.sdr.boost" operator="is">2</dependency>
+          </dependencies>
+          <constraints>
+            <minimum>100</minimum>
+            <step>100</step>
+            <maximum>4000</maximum>
+          </constraints>
+          <control type="slider" format="integer" />
+        </setting>
+        <setting id="coreelec.amlogic.dolbyvision.std.source.metadata.level5" type="boolean" label="60150" help="60151" parent="coreelec.amlogic.dolbyvision.type">
+          <requirement>HAVE_AMCODEC</requirement>
+          <visible>false</visible>
+          <level>2</level>
+          <default>true</default>
           <dependencies>
             <dependency type="visible" setting="coreelec.amlogic.dolbyvision.mode" operator="!is">2</dependency>
             <dependency type="visible" setting="coreelec.amlogic.dolbyvision.type" operator="is">0</dependency>
@@ -4317,7 +4805,7 @@
           <requirement>HAVE_AMCODEC</requirement>
           <visible>false</visible>
           <level>2</level>
-          <default>false</default>
+          <default>true</default>
           <dependencies>
             <dependency type="visible" setting="coreelec.amlogic.dolbyvision.mode" operator="!is">2</dependency>
             <dependency type="visible" setting="coreelec.amlogic.dolbyvision.type" operator="is">0</dependency>
@@ -4351,7 +4839,7 @@
           <dependencies>
             <dependency type="visible" setting="coreelec.amlogic.dolbyvision.mode" operator="!is">2</dependency>
             <dependency type="visible" setting="coreelec.amlogic.dolbyvision.video.processor" operator="is">0</dependency>
-            <dependency type="visible" setting="coreelec.amlogic.dolbyvision.type" operator="is">0</dependency>
+            <dependency type="visible" setting="coreelec.amlogic.dolbyvision.type" operator="!is">3</dependency>
           </dependencies>
           <constraints>
             <options>
@@ -4359,32 +4847,52 @@
               <option label="60323">1</option> <!-- No L2 -->
               <option label="60324">2</option> <!-- Always -->
               <option label="60325">3</option> <!-- Auto -->
+              <option label="60337">4</option> <!-- Auto 2 -->
             </options>
           </constraints>
           <control type="spinner" format="string" />
         </setting>
-      </group>
-      <group id="3" label="60005">
-        <setting id="coreelec.amlogic.dolbyvision.audio.seamlessbranch" type="integer" label="60594" help="60595">
-          <!-- <requirement>HAVE_AMCODEC</requirement> -->
-          <visible>true</visible>
+        <setting id="coreelec.amlogic.dolbyvision.cmv40.auto.trigger" type="integer" label="60330" help="60331" parent="coreelec.amlogic.dolbyvision.cmv40.append">
+          <requirement>HAVE_AMCODEC</requirement>
+          <visible>false</visible>
           <level>2</level>
-          <default>4</default>
-     <!-- <dependencies>
+          <default>0</default>
+          <dependencies>
             <dependency type="visible" setting="coreelec.amlogic.dolbyvision.mode" operator="!is">2</dependency>
-          </dependencies> -->
+            <dependency type="visible" setting="coreelec.amlogic.dolbyvision.video.processor" operator="is">0</dependency>
+            <dependency type="visible" setting="coreelec.amlogic.dolbyvision.type" operator="!is">3</dependency>
+            <dependency type="visible" setting="coreelec.amlogic.dolbyvision.cmv40.append" operator="is">3</dependency>
+          </dependencies>
           <constraints>
             <options>
-              <option label="60596">0</option>  <!-- Off -->
-              <option label="60597">1</option>  <!-- 1 -->
-              <!-- <option label="60598">2</option>   2 -->
-              <option label="60599">3</option>  <!-- 3 -->
-              <option label="60600">4</option>  <!-- 4 -->
-              <option label="60601">5</option>  <!-- 5 -->
+              <option label="60332">0</option> <!-- Source -->
+              <option label="60333">1</option> <!-- 1000 nits -->
+              <option label="60334">2</option> <!-- 2000 nits -->
+              <option label="60335">3</option> <!-- 4000 nits -->
+              <option label="60336">4</option> <!-- 10000 nits -->
             </options>
           </constraints>
           <control type="spinner" format="string" />
         </setting>
+        <setting id="coreelec.amlogic.dolbyvision.cmv40.auto2.threshold" type="integer" label="60338" help="60339" parent="coreelec.amlogic.dolbyvision.cmv40.append">
+          <requirement>HAVE_AMCODEC</requirement>
+          <visible>false</visible>
+          <level>2</level>
+          <default>20</default>
+          <dependencies>
+            <dependency type="visible" setting="coreelec.amlogic.dolbyvision.mode" operator="!is">2</dependency>
+            <dependency type="visible" setting="coreelec.amlogic.dolbyvision.video.processor" operator="is">0</dependency>
+            <dependency type="visible" setting="coreelec.amlogic.dolbyvision.type" operator="!is">3</dependency>
+            <dependency type="visible" setting="coreelec.amlogic.dolbyvision.cmv40.append" operator="is">4</dependency>
+          </dependencies>
+          <constraints>
+            <minimum>0</minimum>
+            <maximum>50</maximum>
+          </constraints>
+          <control type="edit" format="integer" />
+        </setting>
+      </group>
+      <group id="3" label="60006">
       </group>
     </category>
     <category id="cache" label="439" help="36399">
@@ -4549,7 +5057,7 @@
       <group id="1" label="24997">
         <setting id="lookandfeel.skin" type="addon" label="166" help="36103">
           <level>0</level>
-          <default>skin.estuary</default>
+          <default>skin.avdvplus.estuary</default>
           <constraints>
             <addontype>xbmc.gui.skin</addontype>
           </constraints>

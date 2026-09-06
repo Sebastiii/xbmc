@@ -29,6 +29,8 @@ void CServicesSettings::SettingOptionsChunkSizesFiller(const SettingConstPtr& se
   list.emplace_back(StringUtils::Format(kb, 256), 256);
   list.emplace_back(StringUtils::Format(kb, 512), 512);
   list.emplace_back(StringUtils::Format(mb, 1), 1024);
+  list.emplace_back(StringUtils::Format(mb, 2), 2 * 1024);
+  list.emplace_back(StringUtils::Format(mb, 4), 4 * 1024);
 }
 
 void CServicesSettings::SettingOptionsBufferModesFiller(const SettingConstPtr& setting,
@@ -113,4 +115,6 @@ void CServicesSettings::SettingOptionsCacheChunkSizesFiller(const SettingConstPt
   list.emplace_back(StringUtils::Format(kb, 256), 256 * 1024);
   list.emplace_back(StringUtils::Format(kb, 512), 512 * 1024);
   list.emplace_back(StringUtils::Format(mb, 1), 1024 * 1024);
+  list.emplace_back(StringUtils::Format(mb, 2), 2 * 1024 * 1024);
+  list.emplace_back(StringUtils::Format(mb, 4), 4 * 1024 * 1024);
 }

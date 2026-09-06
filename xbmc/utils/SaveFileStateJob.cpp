@@ -54,6 +54,20 @@ void CSaveFileState::DoWork(CFileItem& item,
     if (URIUtils::IsUPnP(progressTrackingFile)
         && UPNP::CUPnP::SaveFileState(item, bookmark, updatePlayCount))
     {
+      if (auto* gui = CServiceBroker::GetGUI())
+      {
+        CFileItem updatedItem(item);
+        if (updatedItem.HasVideoInfoTag())
+          updatedItem.GetVideoInfoTag()->SetResumePoint(bookmark);
+        if (updatedItem.HasProperty("original_listitem_url"))
+          updatedItem.SetPath(updatedItem.GetProperty("original_listitem_url").asString());
+        else
+          updatedItem.SetPath(progressTrackingFile);
+
+        CGUIMessage message(GUI_MSG_NOTIFY_ALL, 0, 0, GUI_MSG_UPDATE_ITEM, 0,
+                            std::make_shared<CFileItem>(updatedItem));
+        gui->GetWindowManager().SendThreadMessage(message);
+      }
       return;
     }
 #endif
@@ -70,8 +84,6 @@ void CSaveFileState::DoWork(CFileItem& item,
       }
       else
       {
-        videodatabase.BeginTransaction();
-
         if (URIUtils::IsPlugin(progressTrackingFile) && !(item.HasVideoInfoTag() && item.GetVideoInfoTag()->m_iDbId >= 0))
         {
           // FileItem from plugin can lack information, make sure all needed fields are set
@@ -98,7 +110,12 @@ void CSaveFileState::DoWork(CFileItem& item,
                         redactPath);
 
               // consider this item as played
+              videodatabase.BeginTransaction();
               const CDateTime newLastPlayed = videodatabase.IncrementPlayCount(item);
+              if (newLastPlayed.IsValid())
+                videodatabase.CommitTransaction();
+              else
+                videodatabase.RollbackTransaction();
 
               item.SetOverlayImage(CGUIListItem::ICON_OVERLAY_WATCHED);
               updateListing = true;
@@ -120,7 +137,12 @@ void CSaveFileState::DoWork(CFileItem& item,
           }
           else
           {
+            videodatabase.BeginTransaction();
             const CDateTime newLastPlayed = videodatabase.UpdateLastPlayed(item);
+            if (newLastPlayed.IsValid())
+              videodatabase.CommitTransaction();
+            else
+              videodatabase.RollbackTransaction();
 
             if (item.HasVideoInfoTag() && newLastPlayed.IsValid())
               item.GetVideoInfoTag()->m_lastPlayed = newLastPlayed;
@@ -129,11 +151,18 @@ void CSaveFileState::DoWork(CFileItem& item,
           if (!item.HasVideoInfoTag() ||
               item.GetVideoInfoTag()->GetResumePoint().timeInSeconds != bookmark.timeInSeconds)
           {
+            videodatabase.BeginTransaction();
+            bool success{true};
             if (bookmark.timeInSeconds <= 0.0)
-              videodatabase.ClearBookMarksOfFile(progressTrackingFile, CBookmark::RESUME);
+              success = videodatabase.ClearBookMarksOfFile(progressTrackingFile, CBookmark::RESUME);
             else
-              videodatabase.AddBookMarkToFile(progressTrackingFile, bookmark, CBookmark::RESUME);
-            if (item.HasVideoInfoTag())
+              success = videodatabase.AddBookMarkToFile(progressTrackingFile, bookmark, CBookmark::RESUME);
+            if (success)
+              videodatabase.CommitTransaction();
+            else
+              videodatabase.RollbackTransaction();
+
+            if (item.HasVideoInfoTag() && success)
               item.GetVideoInfoTag()->SetResumePoint(bookmark);
 
             // UPnP announce resume point changes to clients
@@ -164,14 +193,17 @@ void CSaveFileState::DoWork(CFileItem& item,
           }
         }
 
-        videodatabase.CommitTransaction();
-
         if (updateListing)
         {
           CUtil::DeleteVideoDatabaseDirectoryCache();
           CFileItemPtr msgItem(new CFileItem(item));
           if (item.HasProperty("original_listitem_url"))
-            msgItem->SetPath(item.GetProperty("original_listitem_url").asString());
+          {
+            const std::string original{item.GetProperty("original_listitem_url").asString()};
+            msgItem->SetPath(original);
+            if (URIUtils::IsBlurayPath(item.GetDynPath()))
+              msgItem->SetDynPath(original);
+          }
 
           // Could be part of an ISO stack. In this case the bookmark is saved onto the part.
           // In order to properly update the list, we need to refresh the stack's resume point

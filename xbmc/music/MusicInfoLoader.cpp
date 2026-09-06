@@ -26,6 +26,8 @@
 #include "utils/URIUtils.h"
 #include "utils/log.h"
 
+#include <algorithm>
+
 using namespace XFILE;
 using namespace MUSIC_INFO;
 
@@ -209,6 +211,28 @@ bool CMusicInfoLoader::LoadItemLookup(CFileItem* pItem)
         pItem->GetMusicInfoTag()->SetSong(it->second[0]);
         if (!it->second[0].strThumb.empty())
           pItem->SetArt("thumb", it->second[0].strThumb);
+      }
+      else if (it != m_songsMap.end() && it->second.size() > 1 &&
+               pItem->GetProperty("cueloadinformation").asBoolean(false))
+      {
+        const auto& songs{it->second};
+        const auto it2{std::find_if(
+            songs.begin(), songs.end(),
+            [&pItem](const CSong& song)
+            {
+              return song.iStartOffset == static_cast<int>(pItem->GetStartOffset()) &&
+                     song.iEndOffset == static_cast<int>(pItem->GetEndOffset());
+            })};
+        if (it2 != songs.end())
+        {
+          pItem->GetMusicInfoTag()->SetSong(*it2);
+          if (!it2->strThumb.empty())
+            pItem->SetArt("thumb", it2->strThumb);
+
+          pItem->SetDynPath(pItem->GetPath());
+          pItem->SetPath(StringUtils::Format("musicdb://songs/{}{}", it2->idSong,
+                                             URIUtils::GetExtension(it2->strFileName)));
+        }
       }
       else if (pItem->IsMusicDb())
       { // a music db item that doesn't have tag loaded - grab details from the database

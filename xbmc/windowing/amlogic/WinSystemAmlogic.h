@@ -38,12 +38,19 @@ public:
   float GetDisplayLatency() override;
   float GetGuiSdrPeakLuminance() const override;
   float GetGuiSdrSaturation() const override;
+  float GetGuiSrgbDecode() const override;
+  float GetGuiDither8Bit() const override;
+  bool GuiPqIsFinalStage() const;
 
   bool Hide() override;
   bool Show(bool show = true) override;
   virtual void Register(IDispResource *resource);
   virtual void Unregister(IDispResource *resource);
 protected:
+  void BeginModeSwitchBlank();
+  void EndModeSwitchBlank();
+  void OsdReassertTick();
+
   std::string m_framebuffer_name;
   EGLDisplay m_nativeDisplay;
   fbdev_window *m_nativeWindow;
@@ -58,6 +65,10 @@ protected:
   std::unique_ptr<CLibInputHandler> m_libinput;
   CHDRCapabilities m_hdr_caps;
   bool m_force_mode_switch;
+  bool m_modeSwitchBlanked;
+  int m_modeSwitchFb0Blank;
+  int m_modeSwitchFb1Blank;
+  int m_osdReassertFrames{0};
 
 private:
   std::unique_ptr<CDolbyVisionAML> m_dolbyVisionAML;

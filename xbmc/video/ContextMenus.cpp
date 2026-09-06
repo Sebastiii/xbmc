@@ -117,10 +117,10 @@ bool CVideoMarkWatched::IsVisible(const CFileItem& item) const
     else
       return !item.IsParentFolder() && URIUtils::IsPVRRecordingFileOrFolder(item.GetPath());
   }
-  else if (!item.HasVideoInfoTag())
-    return false;
-
-  return item.GetVideoInfoTag()->GetPlayCount() == 0;
+  else if (item.HasVideoInfoTag())
+    return item.GetVideoInfoTag()->GetPlayCount() <= 0;
+  else
+    return item.IsVideo();
 }
 
 bool CVideoMarkWatched::Execute(const std::shared_ptr<CFileItem>& item) const
@@ -156,10 +156,10 @@ bool CVideoMarkUnWatched::IsVisible(const CFileItem& item) const
     else
       return !item.IsParentFolder() && URIUtils::IsPVRRecordingFileOrFolder(item.GetPath());
   }
-  else if (!item.HasVideoInfoTag())
+  else if (item.HasVideoInfoTag())
+    return item.GetVideoInfoTag()->GetPlayCount() > 0;
+  else
     return false;
-
-  return item.GetVideoInfoTag()->GetPlayCount() > 0;
 }
 
 bool CVideoMarkUnWatched::Execute(const std::shared_ptr<CFileItem>& item) const

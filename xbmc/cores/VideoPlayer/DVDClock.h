@@ -36,6 +36,7 @@ public:
   void SetSpeed(int iSpeed);
   void SetSpeedAdjust(double adjust);
   double GetSpeedAdjust();
+  bool IsPaused() const;
 
   double GetClockSpeed(); /**< get the current speed of the clock relative normal system time */
 
@@ -60,7 +61,7 @@ protected:
   int64_t AbsoluteToSystem(double absolute) const;
   double SystemToPlaying(int64_t system);
 
-  CCriticalSection m_critSection;
+  mutable CCriticalSection m_critSection;
   int64_t m_systemUsed;
   int64_t m_startClock;
   int64_t m_pauseClock;

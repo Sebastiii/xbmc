@@ -45,11 +45,14 @@ namespace
 class CAsyncGetItemsForPlaylist : public IRunnable
 {
 public:
-  CAsyncGetItemsForPlaylist(const std::shared_ptr<CFileItem>& item, CFileItemList& queuedItems)
+  CAsyncGetItemsForPlaylist(const std::shared_ptr<CFileItem>& item,
+                            CFileItemList& queuedItems,
+                            ContentUtils::PlayMode mode)
     : m_item(item),
       m_resume((item->GetStartOffset() == STARTOFFSET_RESUME) &&
                VIDEO_UTILS::GetItemResumeInformation(*item).isResumable),
-      m_queuedItems(queuedItems)
+      m_queuedItems(queuedItems),
+      m_mode(mode)
   {
   }
 
@@ -69,6 +72,7 @@ private:
   const std::shared_ptr<CFileItem> m_item;
   const bool m_resume{false};
   CFileItemList& m_queuedItems;
+  const ContentUtils::PlayMode m_mode{ContentUtils::PlayMode::CHECK_AUTO_PLAY_NEXT_ITEM};
 };
 
 SortDescription GetSortDescription(const CGUIViewState& state, const CFileItemList& items)
@@ -188,8 +192,9 @@ void CAsyncGetItemsForPlaylist::GetItemsForPlaylist(const std::shared_ptr<CFileI
         sortDesc = state->GetSortMethod();
 
         // It makes no sense to play from younger to older.
-        if (sortDesc.sortBy == SortByDate || sortDesc.sortBy == SortByYear ||
-            sortDesc.sortBy == SortByEpisodeNumber)
+        if (m_mode != ContentUtils::PlayMode::PLAY_FROM_HERE &&
+            (sortDesc.sortBy == SortByDate || sortDesc.sortBy == SortByYear ||
+             sortDesc.sortBy == SortByEpisodeNumber))
           sortDesc.sortOrder = SortOrderAscending;
       }
       else
@@ -331,11 +336,12 @@ std::string GetVideoDbItemPath(const CFileItem& item)
 
 void AddItemToPlayListAndPlay(const std::shared_ptr<CFileItem>& itemToQueue,
                               const std::shared_ptr<CFileItem>& itemToPlay,
-                              const std::string& player)
+                              const std::string& player,
+                              ContentUtils::PlayMode mode)
 {
   // recursively add items to list
   CFileItemList queuedItems;
-  VIDEO_UTILS::GetItemsForPlayList(itemToQueue, queuedItems);
+  VIDEO_UTILS::GetItemsForPlayList(itemToQueue, queuedItems, mode);
 
   auto& playlistPlayer = CServiceBroker::GetPlaylistPlayer();
   playlistPlayer.ClearPlaylist(PLAYLIST::TYPE_VIDEO);
@@ -417,7 +423,7 @@ void PlayItem(
 
   if (item->m_bIsFolder && !item->IsPlugin())
   {
-    AddItemToPlayListAndPlay(item, nullptr, player);
+    AddItemToPlayListAndPlay(item, nullptr, player, mode);
   }
   else if (item->HasVideoInfoTag())
   {
@@ -446,7 +452,7 @@ void PlayItem(
       if (item->GetStartOffset() == STARTOFFSET_RESUME)
         parentItem->SetStartOffset(STARTOFFSET_RESUME);
 
-      AddItemToPlayListAndPlay(parentItem, item, player);
+      AddItemToPlayListAndPlay(parentItem, item, player, mode);
     }
     else // mode == PlayMode::PLAY_ONLY_THIS
     {
@@ -484,7 +490,7 @@ void QueueItem(const std::shared_ptr<CFileItem>& itemIn, QueuePosition pos)
     playlistId = PLAYLIST::TYPE_VIDEO;
 
   CFileItemList queuedItems;
-  GetItemsForPlayList(item, queuedItems);
+  GetItemsForPlayList(item, queuedItems, ContentUtils::PlayMode::CHECK_AUTO_PLAY_NEXT_ITEM);
 
   // if party mode, add items but DONT start playing
   if (g_partyModeManager.IsEnabled(PARTYMODECONTEXT_VIDEO))
@@ -504,9 +510,11 @@ void QueueItem(const std::shared_ptr<CFileItem>& itemIn, QueuePosition pos)
   // Note: video does not auto play on queue like music
 }
 
-bool GetItemsForPlayList(const std::shared_ptr<CFileItem>& item, CFileItemList& queuedItems)
+bool GetItemsForPlayList(const std::shared_ptr<CFileItem>& item,
+                         CFileItemList& queuedItems,
+                         ContentUtils::PlayMode mode)
 {
-  CAsyncGetItemsForPlaylist getItems(item, queuedItems);
+  CAsyncGetItemsForPlaylist getItems(item, queuedItems, mode);
   return CGUIDialogBusy::Wait(&getItems,
                               500, // 500ms before busy dialog appears
                               true); // can be cancelled

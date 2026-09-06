@@ -401,6 +401,7 @@ void CGUIIncludes::ResolveIncludes(TiXmlElement *node, std::map<INFO::InfoPtr, b
     return;
 
   TiXmlElement *include = node->FirstChildElement("include");
+  std::set<std::string> warnedIncludes;
   while (include)
   {
     // file: load includes from specified XML file
@@ -492,7 +493,16 @@ void CGUIIncludes::ResolveIncludes(TiXmlElement *node, std::map<INFO::InfoPtr, b
     }
     else
     { // invalid include
-      CLog::Log(LOGWARNING, "Skin has invalid include: {}", tagName);
+      if (warnedIncludes.insert(tagName).second)
+      {
+        const char* parentValue = node->Value();
+        const char* parentType = node->Attribute("type");
+        const char* parentId = node->Attribute("id");
+        CLog::Log(LOGWARNING,
+                  "Skin has invalid include: {} inside <{} type=\"{}\" id=\"{}\"> at line {}",
+                  tagName, parentValue ? parentValue : "", parentType ? parentType : "",
+                  parentId ? parentId : "", include->Row());
+      }
       include = include->NextSiblingElement("include");
     }
   }

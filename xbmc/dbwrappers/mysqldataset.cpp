@@ -176,6 +176,8 @@ int MysqlDatabase::connect(bool create_new)
       mysql_ssl_set(conn, key.empty() ? nullptr : key.c_str(), cert.empty() ? nullptr : cert.c_str(),
                     ca.empty() ? nullptr : ca.c_str(), capath.empty() ? nullptr : capath.c_str(),
                     ciphers.empty() ? nullptr : ciphers.c_str());
+      if (connect_timeout > 0)
+        mysql_options(conn, MYSQL_OPT_CONNECT_TIMEOUT, &connect_timeout);
     }
 
     if (!CWakeOnAccess::GetInstance().WakeUpHost(host, "MySQL : " + db))

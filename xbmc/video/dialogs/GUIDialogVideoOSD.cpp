@@ -96,8 +96,12 @@ bool CGUIDialogVideoOSD::OnMessage(CGUIMessage& message)
       pDialog = CServiceBroker::GetGUI()->GetWindowManager().GetDialog(WINDOW_DIALOG_SUBTITLE_OSD_SETTINGS);
       if (pDialog && pDialog->IsDialogRunning())
         pDialog->Close(true);
+
+      m_dynamicResourceAlloc = false;
+      CGUIDialog::OnMessage(message);
+      m_dynamicResourceAlloc = true;
+      return true;
     }
-    break;
   }
   return CGUIDialog::OnMessage(message);
 }

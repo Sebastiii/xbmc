@@ -10,8 +10,11 @@
 
 #include "cores/FFmpeg.h"
 
+#include <chrono>
 #include <optional>
 #include <stdint.h>
+#include <string>
+#include <vector>
 
 #include "ServiceBroker.h"
 #include "cores/DataCacheCore.h"
@@ -101,7 +104,62 @@ enum DOVICMv40Mode : int
   CMV40_NONE = 0,
   CMV40_NO_L2,
   CMV40_ALWAYS,
-  CMV40_AUTO
+  CMV40_AUTO,
+  CMV40_AUTO2
+};
+
+enum DOVICMv40AutoThreshold : int
+{
+  CMV40_AUTO_SOURCE = 0,
+  CMV40_AUTO_1000_NITS,
+  CMV40_AUTO_2000_NITS,
+  CMV40_AUTO_4000_NITS,
+  CMV40_AUTO_10000_NITS
+};
+
+struct DoViCMv40LogStateSnapshot
+{
+  int scenario{0};
+  bool headerPresent{false};
+  bool vdrDmDataPresent{false};
+  int dvType{0};
+  bool vs10Converting{false};
+  int cmv40Mode{0};
+  int maxLumNits{0};
+  std::optional<bool> hasL254;
+  std::optional<int> l2Count;
+  std::optional<bool> level2IsEmpty;
+  std::optional<int> srcMaxPq;
+  std::optional<int> srcMaxNits;
+  std::optional<bool> isDisplayBrighter;
+  std::optional<int> autoThreshold;
+  std::optional<bool> autoTrigger;
+  std::optional<bool> shouldAppend;
+  std::optional<int> l1MaxNits;
+  std::optional<int> auto2ThresholdPct;
+  std::optional<int> auto2ThresholdNits;
+  std::optional<int> appendResult;
+
+  bool operator==(const DoViCMv40LogStateSnapshot& o) const
+  {
+    return scenario == o.scenario && headerPresent == o.headerPresent &&
+           vdrDmDataPresent == o.vdrDmDataPresent && dvType == o.dvType &&
+           vs10Converting == o.vs10Converting &&
+           cmv40Mode == o.cmv40Mode && maxLumNits == o.maxLumNits &&
+           hasL254 == o.hasL254 && l2Count == o.l2Count &&
+           level2IsEmpty == o.level2IsEmpty && srcMaxPq == o.srcMaxPq &&
+           srcMaxNits == o.srcMaxNits && isDisplayBrighter == o.isDisplayBrighter &&
+           autoThreshold == o.autoThreshold && autoTrigger == o.autoTrigger &&
+           shouldAppend == o.shouldAppend && l1MaxNits == o.l1MaxNits &&
+           auto2ThresholdPct == o.auto2ThresholdPct &&
+           auto2ThresholdNits == o.auto2ThresholdNits && appendResult == o.appendResult;
+  }
+};
+
+struct DoViCMv40LogState
+{
+  std::optional<DoViCMv40LogStateSnapshot> last;
+  int last_published_scenario{-1};
 };
 
 class CBitstreamParser
@@ -113,6 +171,16 @@ public:
   static bool Open() { return true; }
   static void Close();
   static bool CanStartDecode(const uint8_t* buf, int buf_size);
+};
+
+struct DoviMetaVersionMemo
+{
+  bool valid{false};
+  uint8_t kind{0};
+  uint64_t a{0};
+  uint64_t b{0};
+  uint64_t c{0};
+  std::string str;
 };
 
 class CBitstreamConverter
@@ -137,9 +205,28 @@ public:
     if (m_convert_dovi != value) InvalidateDoViCache();
     m_convert_dovi = value; 
   }
-  void SetAppendCMv40(enum DOVICMv40Mode value) { 
+  void SetAppendCMv40(enum DOVICMv40Mode value) {
     if (m_append_cmv40 != value) InvalidateDoViCache();
-    m_append_cmv40 = value; 
+    m_append_cmv40 = value;
+  }
+  void SetCMv40AutoThreshold(enum DOVICMv40AutoThreshold value) {
+    if (m_cmv40_auto_threshold != value) InvalidateDoViCache();
+    m_cmv40_auto_threshold = value;
+  }
+  void SetCMv40Vs10Converting(bool converting) {
+    if (m_cmv40_vs10_converting != converting) InvalidateDoViCache();
+    m_cmv40_vs10_converting = converting;
+  }
+  void SetCMv40DisplayParams(int dvType, int maxLumNits) {
+    if (m_cmv40_max_lum_nits != maxLumNits) InvalidateDoViCache();
+    m_cmv40_dv_type = dvType;
+    m_cmv40_max_lum_nits = maxLumNits;
+    UpdateCMv40Auto2ThresholdPq();
+  }
+  void SetCMv40Auto2ThresholdPct(int pct) {
+    if (m_cmv40_auto2_threshold_pct != pct) InvalidateDoViCache();
+    m_cmv40_auto2_threshold_pct = pct;
+    UpdateCMv40Auto2ThresholdPq();
   }
   void SetConvertHdr10Plus(bool value) { m_convert_Hdr10Plus = value; }
   void SetPreferCovertHdr10Plus(bool value) { m_prefer_Hdr10Plus_conversion = value; }
@@ -154,43 +241,53 @@ public:
   static bool h264_sequence_header(const uint8_t *data,
                                    const uint32_t size,
                                    h264_sequence *sequence);
+  static std::optional<uint8_t> hevc_extract_sps_vui_transfer(const uint8_t* extradata,
+                                                              size_t size);
 
 protected:
   void InvalidateDoViCache() {
     m_cached_dovi_rpu_in_nal.clear();
     m_cached_dovi_rpu_out_nal.clear();
   }
+  void UpdateCMv40Auto2ThresholdPq();
 
   static int avc_parse_nal_units(AVIOContext* pb, const uint8_t* buf_in, int size);
   static int avc_parse_nal_units_buf(const uint8_t* buf_in, uint8_t** buf, int* size);
   int isom_write_avcc(AVIOContext* pb, const uint8_t* data, int len);
   // bitstream to bytestream (Annex B) conversion support.
   bool IsIDR(uint8_t unit_type);
+  bool IsHevcIrap(uint8_t unit_type);
+  bool IsDecodeStartPoint(uint8_t unit_type, const uint8_t* nal, const uint8_t* nal_end);
   bool IsSlice(uint8_t unit_type);
   bool BitstreamConvertInitAVC(void* in_extradata, int in_extrasize);
   bool BitstreamConvertInitHEVC(void* in_extradata, int in_extrasize);
   bool BitstreamConvert(uint8_t* pData, int iSize, uint8_t** poutbuf, int* poutbuf_size, double pts);
-  static void BitstreamAllocAndCopy(uint8_t** poutbuf,
-                                    int* poutbuf_size,
-                                    const uint8_t* sps_pps,
-                                    uint32_t sps_pps_size,
-                                    const uint8_t* in,
-                                    uint32_t in_size,
-                                    uint8_t nal_type);
-  static void BitstreamAllocAndCopy(uint8_t** poutbuf,
-                                    uint32_t* poutbuf_size,
-                                    const uint8_t* in,
-                                    uint32_t in_size,
-                                    uint8_t nal_type);
+  bool EnsureOutputBufferCapacity(uint8_t** poutbuf, uint32_t requiredSize);
+  void BitstreamAllocAndCopy(uint8_t** poutbuf,
+                             int* poutbuf_size,
+                             const uint8_t* sps_pps,
+                             uint32_t sps_pps_size,
+                             const uint8_t* in,
+                             uint32_t in_size,
+                             uint8_t nal_type);
+  void BitstreamAllocAndCopy(uint8_t** poutbuf,
+                             uint32_t* poutbuf_size,
+                             const uint8_t* in,
+                             uint32_t in_size,
+                             uint8_t nal_type);
+  void AppendHEVCFillerNAL(uint8_t** poutbuf, int* poutbuf_size, uint32_t payload_size);
+  void AppendHEVCFillerNAL(uint8_t** poutbuf, uint32_t* poutbuf_size, uint32_t payload_size);
   void ApplyMasteringDisplayColourVolume(const MasteringDisplayColourVolume& metadata, bool& update);
   void ApplyContentLightLevel(const ContentLightLevel& metadata, bool& update);
+  void ApplyAlternativeTransferCharacteristics(uint8_t transfer);
   void UpdateHdrStaticMetadata() const;
 
   void AddDoViRpuNaluWrap(const Hdr10PlusMetadata& meta, uint8_t **poutbuf, uint32_t& poutbuf_size, double pts);
-  void AddDoViRpuNalu(const Hdr10PlusMetadata& meta, uint8_t **poutbuf, int *poutbuf_size, double pts) const;
+  void AddDoViRpuNalu(const Hdr10PlusMetadata& meta, uint8_t **poutbuf, int *poutbuf_size, double pts);
 
   void ProcessSeiPrefixWrap(uint8_t *buf, int32_t nal_size, uint8_t **poutbuf, uint32_t& poutbuf_size, Hdr10PlusMetadata& meta, bool& convert_hdr10plus_meta);
   void ProcessSeiPrefix(uint8_t *buf, int32_t nal_size, uint8_t **poutbuf, int *poutbuf_size, Hdr10PlusMetadata& meta, bool& convert_hdr10plus_meta);
+  void ScanAnnexbHdrStaticMetadata(const uint8_t* pData, int iSize);
 
   void ProcessDoViRpuWrap(uint8_t* buf, int32_t nal_size, uint8_t** poutbuf, uint32_t& poutbuf_size, double pts);
   void ProcessDoViRpu(uint8_t* buf, int32_t nal_size, uint8_t** poutbuf, int* poutbuf_size, double pts);
@@ -205,6 +302,12 @@ protected:
 
   uint8_t* m_convertBuffer;
   int m_convertSize;
+  uint32_t m_convertBufferCapacity{0};
+  std::vector<uint8_t> m_dtdlBuffer;
+  DoviMetaVersionMemo m_doviMetaVerMemo;
+  DoviMetaVersionMemo m_doviSrcMetaVerMemo;
+  std::vector<uint8_t> m_seiBuf;
+  std::vector<CHevcSei> m_seiMessages;
   uint8_t* m_inputBuffer;
   int m_inputSize;
 
@@ -222,20 +325,35 @@ protected:
   CDataCacheCore& m_dataCacheCore;
   StreamHdrType m_initial_hdrType;
   bool m_start_decode;
+  unsigned int m_annexbStartScanCount = 0;
   enum DOVIMode m_convert_dovi;
   enum DOVICMv40Mode m_append_cmv40;
-  uint8_t m_cmv40_trim{1};
+  enum DOVICMv40AutoThreshold m_cmv40_auto_threshold{CMV40_AUTO_SOURCE};
+  int m_cmv40_dv_type{0};
+  bool m_cmv40_vs10_converting{false};
+  int m_cmv40_max_lum_nits{0};
+  int m_cmv40_auto2_threshold_pct{20};
+  int m_cmv40_auto2_threshold_pq{0};
+  int m_cmv40_src_pq_memo{-1};
+  int m_cmv40_src_nits_memo{0};
+  DoViCMv40LogState m_cmv40LogState;
   bool m_removeDovi;
   bool m_removeHdr10Plus;
   bool m_convert_Hdr10Plus;
   bool m_prefer_Hdr10Plus_conversion;
   bool m_dual_priority_Hdr10Plus;
+  Hdr10PlusMetadata m_lastHdr10PlusMeta{};
+  bool m_lastHdr10PlusMetaValid{false};
   enum PeakBrightnessSource m_convert_Hdr10Plus_peak_brightness_source;
   bool m_first_frame;
+  std::chrono::steady_clock::time_point m_gateFirstReject{};
   HDRStaticMetadataInfo m_hdrStaticMetadataInfo;
+  bool m_annexbHdrStaticDone{false};
+  uint32_t m_annexbHdrStaticScanCount{0};
 
   std::vector<uint8_t> m_cached_dovi_rpu_in_nal;
   std::vector<uint8_t> m_cached_dovi_rpu_out_nal;
+  std::vector<uint8_t> m_doviEmitNalu;
   DOVIFrameMetadata m_cached_dovi_frame_metadata{};
 };
 
@@ -243,4 +361,4 @@ void aml_dv_send_md_levels();
 void aml_dv_send_hdr10_data();
 void aml_dv_send_el_type();
 void aml_dv_send_profile(int dvprofile);
-void aml_kodi_set_cd_cs(int cd_cs_type);
+bool aml_kodi_set_cd_cs(int cd_cs_type);

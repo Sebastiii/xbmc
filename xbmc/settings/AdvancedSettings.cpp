@@ -13,6 +13,7 @@
 #include "URL.h"
 #include "application/AppParams.h"
 #include "filesystem/SpecialProtocol.h"
+#include "guilib/IDirtyRegionSolver.h"
 #include "network/DNSNameCache.h"
 #include "profiles/ProfileManager.h"
 #include "settings/Settings.h"
@@ -68,6 +69,8 @@ void CAdvancedSettings::OnSettingsLoaded()
     CLog::Log(LOGINFO, "Disabled debug logging due to GUI setting. Level {}.", m_logLevel);
   }
   CServiceBroker::GetLogging().SetLogLevel(m_logLevel);
+
+  m_showOnScreenDebugInfo = settings->GetBool(CSettings::SETTING_DEBUG_SHOWONSCREENDEBUGINFO);
 }
 
 void CAdvancedSettings::OnSettingsUnloaded()
@@ -83,6 +86,8 @@ void CAdvancedSettings::OnSettingChanged(const std::shared_ptr<const CSetting>& 
   const std::string &settingId = setting->GetId();
   if (settingId == CSettings::SETTING_DEBUG_SHOWLOGINFO)
     SetDebugMode(std::static_pointer_cast<const CSettingBool>(setting)->GetValue());
+  else if (settingId == CSettings::SETTING_DEBUG_SHOWONSCREENDEBUGINFO)
+    m_showOnScreenDebugInfo = std::static_pointer_cast<const CSettingBool>(setting)->GetValue();
 }
 
 void CAdvancedSettings::Initialize(CSettingsManager& settingsMgr)
@@ -111,6 +116,7 @@ void CAdvancedSettings::Initialize(CSettingsManager& settingsMgr)
   settingsMgr.RegisterSettingsHandler(this, true);
   std::set<std::string> settingSet;
   settingSet.insert(CSettings::SETTING_DEBUG_SHOWLOGINFO);
+  settingSet.insert(CSettings::SETTING_DEBUG_SHOWONSCREENDEBUGINFO);
   settingsMgr.RegisterCallback(this, settingSet);
 }
 
@@ -144,6 +150,9 @@ void CAdvancedSettings::Initialize()
   m_videoSubsDelayRange = 60;
   m_videoAudioDelayRange = 10;
   m_videoUseTimeSeeking = true;
+  m_videoSubtitleAsyncParse = true;
+  m_videoAsyncFullscreenOSD = 2;
+  m_videoAsyncVideoLayerRender = true;
   m_videoTimeSeekForward = 30;
   m_videoTimeSeekBackward = -30;
   m_videoTimeSeekForwardBig = 600;
@@ -152,6 +161,9 @@ void CAdvancedSettings::Initialize()
   m_videoPercentSeekBackward = -2;
   m_videoPercentSeekForwardBig = 10;
   m_videoPercentSeekBackwardBig = -10;
+  m_videoSeekMinimumDistanceBeforeEof = 10;
+  m_videoMenuDomainQueueTimeSize = 1.0f;
+  m_videoBdBoundaryDrain = true;
 
   m_videoPPFFmpegPostProc = "ha:128:7,va,dr";
   m_videoDefaultPlayer = "VideoPlayer";
@@ -166,9 +178,10 @@ void CAdvancedSettings::Initialize()
   m_videoVDPAUdeintSkipChromaHD = false;
   m_DXVACheckCompatibility = false;
   m_DXVACheckCompatibilityPresent = false;
-  m_videoFpsDetect = 1;
+  m_videoFpsDetect = 2;
   m_maxTempo = 1.55f;
   m_videoPreferStereoStream = false;
+  m_dvVsvdbV1Enabled = false;
 
   m_hasVideoDefaultLatency = false;
   m_videoDefaultLatency = 0.0;
@@ -184,9 +197,18 @@ void CAdvancedSettings::Initialize()
     m_videoDecoderBypassBufferReady = false;
     m_videoDecoderMinimumStreamBuffer = 17.5f;
   }
-  m_videoDecoderBuffer = 10.0f;
+  m_videoDecoderBuffer = 5.0f;
   m_videoDecoderStreamBuffer = 90.0f;
-  m_videoDecoderMinimumBuffer = 10.0f;
+  m_videoDecoderMinimumBuffer = 5.0f;
+  m_videoDeinterlaceDelayCompensation = false;
+  m_videoRateFieldHold = true;
+  m_vc1ForceFrameInt = true;
+  m_vc1DropFrame = true;
+  m_vc1RepairTimestamps = true;
+
+  m_blurayIsoCachePageSize = 256 * 1024;
+  m_blurayIsoCacheMaxBytes = 64 * 1024 * 1024;
+  m_blurayIsoCacheForwardPrefetchPages = 1;
 
   m_musicUseTimeSeeking = true;
   m_musicTimeSeekForward = 10;
@@ -341,6 +363,8 @@ void CAdvancedSettings::Initialize()
   m_bVideoScannerIgnoreErrors = false;
   m_iVideoLibraryDateAdded = 1; // prefer mtime over ctime and current time
 
+  m_caseSensitiveLocalArtMatch = true;
+
   m_iEpgUpdateCheckInterval = 300; /* Check every X seconds, if EPG data need to be updated. This does not mean that
                                       every X seconds an EPG update is actually triggered, it's just the interval how
                                       often to check whether an update should be triggered. If this value is greater
@@ -429,9 +453,20 @@ void CAdvancedSettings::Initialize()
 
   m_canWindowed = true;
   m_guiVisualizeDirtyRegions = false;
-  m_guiAlgorithmDirtyRegions = 3;
+  m_guiAlgorithmDirtyRegions = DIRTYREGION_SOLVER_FILL_VIEWPORT_ON_CHANGE;
+  m_guiAlgorithmDirtyRegionsIsExplicit = false;
   m_guiSmartRedraw = false;
-  m_guiAVChangeFlagTimeout = 11;
+  m_guiBufferAgePartialRedraw = 1;
+  m_guiBufferAgeAfterRenderScope = true;
+  m_guiMaxDirtyRegions = 4;
+  m_guiSkipSleepActiveWindow = 250;
+  m_guiMenuIdleFrameRateCap = 0;
+  m_guiSkinHdrFbo = 0;
+  m_guiOsdGuestComposite = 0;
+  m_guiOsdTrace = 0;
+  m_guiMipMapping = false;
+  m_guiMipMappingSharpen = 0.5f;
+  m_guiAVChangeFlagTimeout = 15;
   m_airTunesPort = 36666;
   m_airPlayPort = 36667;
 
@@ -453,11 +488,12 @@ void CAdvancedSettings::Initialize()
   m_videoExtensions += "|.pvr";
 
   m_stereoscopicregex_3d = "[-. _]3d[-. _]";
-  m_stereoscopicregex_sbs = "[-. _]h?sbs[-. _]";
-  m_stereoscopicregex_tab = "[-. _]h?tab[-. _]";
+  m_stereoscopicregex_sbs = "[-. _][fh]?sbs[-. _]";
+  m_stereoscopicregex_tab = "[-. _][fh]?tab[-. _]";
   m_stereoscopicregex_mvc = "[-. _]h?mvc[-. _]";
 
   m_logLevelHint = m_logLevel = LOG_LEVEL_NORMAL;
+  m_showOnScreenDebugInfo = false;
 
   m_openGlDebugging = false;
 
@@ -531,20 +567,20 @@ void CAdvancedSettings::DefaultAudioLatency() {
 
 void CAdvancedSettings::DefaultVideoLatency() {
 
-  if (!m_hasVideoDefaultLatency) m_videoDefaultLatency = 160;
+  if (!m_hasVideoDefaultLatency) m_videoDefaultLatency = 165;
 
   RefreshVideoLatency videolatency = {};
   videolatency.resolution = 2160;
   videolatency.refreshmin = 25;
   videolatency.refreshmax = 25;
-  videolatency.delay = 70;
+  videolatency.delay = 40;
   m_videoRefreshLatency.push_back(videolatency);
 
   videolatency = {};
   videolatency.resolution = 2160;
   videolatency.refreshmin = 50;
   videolatency.refreshmax = 60;
-  videolatency.delay = 90;
+  videolatency.delay = 60;
   m_videoRefreshLatency.push_back(videolatency);
 }
 
@@ -607,18 +643,6 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
         passTag->LinkEndChild(new TiXmlText("*****"));
       }
     }
-    if (network->FirstChildElement("nfstimeout"))
-    {
-#ifdef HAS_NFS_SET_TIMEOUT
-      XMLUtils::GetUInt(network, "nfstimeout", m_nfsTimeout, 0, 3600);
-#else
-      CLog::Log(LOGWARNING, "nfstimeout unsupported");
-#endif
-    }
-    if (network->FirstChildElement("nfsretries"))
-    {
-      XMLUtils::GetInt(network, "nfsretries", m_nfsRetries, -1, 30);
-    }
   }
 
   // Dump contents of copied AS.xml to debug log
@@ -637,6 +661,8 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
     XMLUtils::GetString(pElement, "defaultplayer", m_audioDefaultPlayer);
     // 101 on purpose - can be used to never automark as watched
     XMLUtils::GetFloat(pElement, "playcountminimumpercent", m_audioPlayCountMinimumPercent, 0.0f, 101.0f);
+    XMLUtils::GetInt(pElement, "pcmsinkbitsmax", m_audioPcmSinkBitsMax, 0, 32);
+    XMLUtils::GetInt(pElement, "sinksettleholdms", m_audioSinkSettleHoldMs, 0, 2000);
 
     XMLUtils::GetBoolean(pElement, "usetimeseeking", m_musicUseTimeSeeking);
     XMLUtils::GetInt(pElement, "timeseekforward", m_musicTimeSeekForward, 0, 6000);
@@ -661,7 +687,7 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
 
     XMLUtils::GetFloat(pElement, "limiterhold", m_limiterHold, 0.0f, 100.0f);
     XMLUtils::GetFloat(pElement, "limiterrelease", m_limiterRelease, 0.001f, 100.0f);
-    XMLUtils::GetUInt(pElement, "maxpassthroughoffsyncduration", m_maxPassthroughOffSyncDuration, 10, 80);
+    XMLUtils::GetUInt(pElement, "maxpassthroughoffsyncduration", m_maxPassthroughOffSyncDuration, 20, 80);
     XMLUtils::GetUInt(pElement, "addpacketunlocktime", m_audioAddPacketUnlockTime, 10, 5000);
     XMLUtils::GetBoolean(pElement, "allowmultichannelfloat", m_AllowMultiChannelFloat);
     XMLUtils::GetBoolean(pElement, "superviseaudiodelay", m_superviseAudioDelay);
@@ -705,6 +731,9 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
     XMLUtils::GetString(pElement, "stereoscopicregexsbs", m_stereoscopicregex_sbs);
     XMLUtils::GetString(pElement, "stereoscopicregextab", m_stereoscopicregex_tab);
     XMLUtils::GetString(pElement, "stereoscopicregexmvc", m_stereoscopicregex_mvc);
+    XMLUtils::GetFloat(pElement, "menudomainqueuetimesize", m_videoMenuDomainQueueTimeSize, 0.0f,
+                       16.0f);
+    XMLUtils::GetBoolean(pElement, "bdboundarydrain", m_videoBdBoundaryDrain);
     XMLUtils::GetFloat(pElement, "subsdelayrange", m_videoSubsDelayRange, 10, 600);
     XMLUtils::GetFloat(pElement, "audiodelayrange", m_videoAudioDelayRange, 10, 600);
     XMLUtils::GetString(pElement, "defaultplayer", m_videoDefaultPlayer);
@@ -715,6 +744,18 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
     XMLUtils::GetFloat(pElement, "ignorepercentatend", m_videoIgnorePercentAtEnd, 0, 100.0f);
 
     XMLUtils::GetBoolean(pElement, "usetimeseeking", m_videoUseTimeSeeking);
+    XMLUtils::GetBoolean(pElement, "subtitleasyncparse", m_videoSubtitleAsyncParse);
+    std::string asyncFullscreenOSD;
+    if (XMLUtils::GetString(pElement, "asyncfullscreenosd", asyncFullscreenOSD))
+    {
+      if (StringUtils::EqualsNoCase(asyncFullscreenOSD, "true"))
+        m_videoAsyncFullscreenOSD = 1;
+      else if (StringUtils::EqualsNoCase(asyncFullscreenOSD, "false"))
+        m_videoAsyncFullscreenOSD = 0;
+      else
+        m_videoAsyncFullscreenOSD = std::clamp(atoi(asyncFullscreenOSD.c_str()), 0, 2);
+    }
+    XMLUtils::GetBoolean(pElement, "asyncvideolayerrender", m_videoAsyncVideoLayerRender);
     XMLUtils::GetInt(pElement, "timeseekforward", m_videoTimeSeekForward, 0, 6000);
     XMLUtils::GetInt(pElement, "timeseekbackward", m_videoTimeSeekBackward, -6000, 0);
     XMLUtils::GetInt(pElement, "timeseekforwardbig", m_videoTimeSeekForwardBig, 0, 6000);
@@ -724,6 +765,7 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
     XMLUtils::GetInt(pElement, "percentseekbackward", m_videoPercentSeekBackward, -100, 0);
     XMLUtils::GetInt(pElement, "percentseekforwardbig", m_videoPercentSeekForwardBig, 0, 100);
     XMLUtils::GetInt(pElement, "percentseekbackwardbig", m_videoPercentSeekBackwardBig, -100, 0);
+    XMLUtils::GetInt(pElement, "seekminimumdistancebeforeeof", m_videoSeekMinimumDistanceBeforeEof, 0, 600);
 
     TiXmlElement* pVideoExcludes = pElement->FirstChildElement("excludefromlisting");
     if (pVideoExcludes)
@@ -841,8 +883,9 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
 
     //0 = disable fps detect, 1 = only detect on timestamps with uniform spacing, 2 detect on all timestamps
     XMLUtils::GetInt(pElement, "fpsdetect", m_videoFpsDetect, 0, 2);
-    XMLUtils::GetFloat(pElement, "maxtempo", m_maxTempo, 1.5, 2.1);
+    XMLUtils::GetFloat(pElement, "maxtempo", m_maxTempo, 1.5, 2.0);
     XMLUtils::GetBoolean(pElement, "preferstereostream", m_videoPreferStereoStream);
+    XMLUtils::GetBoolean(pElement, "dvvsvdbv1", m_dvVsvdbV1Enabled);
 
     // Store global display latency settings
     TiXmlElement* pVideoLatency = pElement->FirstChildElement("latency");
@@ -895,6 +938,19 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
     XMLUtils::GetFloat(pElement, "decoderstreambuffer", m_videoDecoderStreamBuffer, 0.0f, 100.0f);
     XMLUtils::GetFloat(pElement, "decoderminimumbuffer", m_videoDecoderMinimumBuffer, 0.0f, 100.0f);
     XMLUtils::GetFloat(pElement, "decoderminimumstreambuffer", m_videoDecoderMinimumStreamBuffer, 0.0f, 100.0f);
+    XMLUtils::GetBoolean(pElement, "deinterlacedelaycompensation", m_videoDeinterlaceDelayCompensation);
+    XMLUtils::GetBoolean(pElement, "videoratefieldhold", m_videoRateFieldHold);
+    XMLUtils::GetBoolean(pElement, "vc1forceframeint", m_vc1ForceFrameInt);
+    XMLUtils::GetBoolean(pElement, "vc1dropframe", m_vc1DropFrame);
+    XMLUtils::GetBoolean(pElement, "vc1repairtimestamps", m_vc1RepairTimestamps);
+  }
+
+  pElement = pRootElement->FirstChildElement("blurayisocache");
+  if (pElement)
+  {
+    XMLUtils::GetUInt(pElement, "pagesize", m_blurayIsoCachePageSize, 2048, 1024 * 1024);
+    XMLUtils::GetUInt(pElement, "maxbytes", m_blurayIsoCacheMaxBytes, 256 * 1024, 1024 * 1024 * 1024);
+    XMLUtils::GetUInt(pElement, "forwardprefetchpages", m_blurayIsoCacheForwardPrefetchPages, 0, 16);
   }
 
   pElement = pRootElement->FirstChildElement("musiclibrary");
@@ -936,6 +992,7 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
     XMLUtils::GetBoolean(pElement, "importwatchedstate", m_bVideoLibraryImportWatchedState);
     XMLUtils::GetBoolean(pElement, "importresumepoint", m_bVideoLibraryImportResumePoint);
     XMLUtils::GetInt(pElement, "dateadded", m_iVideoLibraryDateAdded);
+    XMLUtils::GetBoolean(pElement, "casesensitivelocalartmatch", m_caseSensitiveLocalArtMatch);
   }
 
   pElement = pRootElement->FirstChildElement("videoscanner");
@@ -968,6 +1025,18 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
     XMLUtils::GetBoolean(pElement, "disableipv6", m_curlDisableIPV6);
     XMLUtils::GetBoolean(pElement, "disablehttp2", m_curlDisableHTTP2);
     XMLUtils::GetString(pElement, "catrustfile", m_caTrustFile);
+    if (pElement->FirstChildElement("nfstimeout"))
+    {
+#ifdef HAS_NFS_SET_TIMEOUT
+      XMLUtils::GetUInt(pElement, "nfstimeout", m_nfsTimeout, 0, 3600);
+#else
+      CLog::Log(LOGWARNING, "nfstimeout unsupported");
+#endif
+    }
+    if (pElement->FirstChildElement("nfsretries"))
+    {
+      XMLUtils::GetInt(pElement, "nfsretries", m_nfsRetries, -1, 30);
+    }
   }
 
   pElement = pRootElement->FirstChildElement("jsonrpc");
@@ -1271,6 +1340,7 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
     XMLUtils::GetString(pDatabase, "ca", m_databaseVideo.ca);
     XMLUtils::GetString(pDatabase, "capath", m_databaseVideo.capath);
     XMLUtils::GetString(pDatabase, "ciphers", m_databaseVideo.ciphers);
+    XMLUtils::GetUInt(pDatabase, "connecttimeout", m_databaseVideo.connecttimeout, 1, 300);
     XMLUtils::GetBoolean(pDatabase, "compression", m_databaseVideo.compression);
   }
 
@@ -1288,6 +1358,7 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
     XMLUtils::GetString(pDatabase, "ca", m_databaseMusic.ca);
     XMLUtils::GetString(pDatabase, "capath", m_databaseMusic.capath);
     XMLUtils::GetString(pDatabase, "ciphers", m_databaseMusic.ciphers);
+    XMLUtils::GetUInt(pDatabase, "connecttimeout", m_databaseMusic.connecttimeout, 1, 300);
     XMLUtils::GetBoolean(pDatabase, "compression", m_databaseMusic.compression);
   }
 
@@ -1305,6 +1376,7 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
     XMLUtils::GetString(pDatabase, "ca", m_databaseTV.ca);
     XMLUtils::GetString(pDatabase, "capath", m_databaseTV.capath);
     XMLUtils::GetString(pDatabase, "ciphers", m_databaseTV.ciphers);
+    XMLUtils::GetUInt(pDatabase, "connecttimeout", m_databaseTV.connecttimeout, 1, 300);
     XMLUtils::GetBoolean(pDatabase, "compression", m_databaseTV.compression);
   }
 
@@ -1322,6 +1394,7 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
     XMLUtils::GetString(pDatabase, "ca", m_databaseEpg.ca);
     XMLUtils::GetString(pDatabase, "capath", m_databaseEpg.capath);
     XMLUtils::GetString(pDatabase, "ciphers", m_databaseEpg.ciphers);
+    XMLUtils::GetUInt(pDatabase, "connecttimeout", m_databaseEpg.connecttimeout, 1, 300);
     XMLUtils::GetBoolean(pDatabase, "compression", m_databaseEpg.compression);
   }
 
@@ -1335,9 +1408,29 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
   if (pElement)
   {
     XMLUtils::GetBoolean(pElement, "visualizedirtyregions", m_guiVisualizeDirtyRegions);
-    XMLUtils::GetInt(pElement, "algorithmdirtyregions",     m_guiAlgorithmDirtyRegions);
+    m_guiAlgorithmDirtyRegionsIsExplicit |=
+        XMLUtils::GetInt(pElement, "algorithmdirtyregions", m_guiAlgorithmDirtyRegions);
     XMLUtils::GetBoolean(pElement, "smartredraw", m_guiSmartRedraw);
+    XMLUtils::GetInt(pElement, "bufferagepartialredraw", m_guiBufferAgePartialRedraw, 0, 1);
+    XMLUtils::GetBoolean(pElement, "bufferageafterrenderscope", m_guiBufferAgeAfterRenderScope);
+    XMLUtils::GetInt(pElement, "maxdirtyregions", m_guiMaxDirtyRegions, 0, 64);
+    XMLUtils::GetInt(pElement, "skipsleepactivewindow", m_guiSkipSleepActiveWindow, 0, 2000);
+    XMLUtils::GetInt(pElement, "menuidleframeratecap", m_guiMenuIdleFrameRateCap, 0, 60);
+    XMLUtils::GetInt(pElement, "skinhdrfbo", m_guiSkinHdrFbo, 0, 1);
+    XMLUtils::GetInt(pElement, "osdguestcomposite", m_guiOsdGuestComposite, 0, 1);
+    XMLUtils::GetInt(pElement, "osdtrace", m_guiOsdTrace, 0, 1);
+    XMLUtils::GetInt(pElement, "anisotropicfiltering", m_guiAnisotropicFiltering);
+    XMLUtils::GetBoolean(pElement, "fronttobackrendering", m_guiFrontToBackRendering);
+    XMLUtils::GetBoolean(pElement, "geometryclear", m_guiGeometryClear);
+    XMLUtils::GetBoolean(pElement, "waitvsyncbeforeswap", m_guiWaitVsyncBeforeSwap);
+    XMLUtils::GetInt(pElement, "waitgpubeforeswap", m_guiWaitGpuBeforeSwap, 0, 2);
+    XMLUtils::GetBoolean(pElement, "srgbhdrcomposite", m_guiSrgbHdrComposite);
+    XMLUtils::GetBoolean(pElement, "compositedither", m_guiCompositeDither);
+    XMLUtils::GetBoolean(pElement, "asynctextureupload", m_guiAsyncTextureUpload);
     XMLUtils::GetBoolean(pElement, "transparentvideolayout", m_guiVideoLayoutTransparent);
+    XMLUtils::GetBoolean(pElement, "mipmapping", m_guiMipMapping);
+    XMLUtils::GetFloat(pElement, "mipmappingsharpen", m_guiMipMappingSharpen, 0.0f, 3.0f);
+    XMLUtils::GetBoolean(pElement, "minifiedmipmapping", m_guiMinifiedMipmapping);
     XMLUtils::GetUInt(pElement, "avchangeflagtimeout", m_guiAVChangeFlagTimeout);
   }
 
@@ -1355,126 +1448,6 @@ void CAdvancedSettings::ParseSettingsFile(const std::string &file)
 
   // load in the settings overrides
   CServiceBroker::GetSettingsComponent()->GetSettings()->LoadHidden(pRootElement);
-}
-
-void CAdvancedSettings::SetAlgoForReset(int num_resets)
-{
-  m_algoForReset = num_resets;
-}
-
-int CAdvancedSettings::GetAlgoForReset() const
-{
-  return m_algoForReset;
-}
-
-void CAdvancedSettings::SetLastResetTime(double reset_time)
-{
-  m_lastResetTime = reset_time;
-}
-
-double CAdvancedSettings::GetLastResetTime() const
-{
-  return m_lastResetTime;
-}
-
-void CAdvancedSettings::SetResetSync(bool reset_sync)
-{
-  m_resetSync = reset_sync;
-}
-
-bool CAdvancedSettings::GetResetSync() const
-{
-  return m_resetSync;
-}
-
-void CAdvancedSettings::SetResetSeek(bool reset_seek)
-{
-  m_resetSeek = reset_seek;
-}
-
-bool CAdvancedSettings::GetResetSeek() const
-{
-  return m_resetSeek;
-}
-
-void CAdvancedSettings::SetAlgoForResetSub(int num_resets)
-{
-  m_algoForResetSub = num_resets;
-}
-
-int CAdvancedSettings::GetAlgoForResetSub() const
-{
-  return m_algoForResetSub;
-}
-
-void CAdvancedSettings::SetLastResetTimeSub(double reset_time)
-{
-  m_lastResetTimeSub = reset_time;
-}
-
-double CAdvancedSettings::GetLastResetTimeSub() const
-{
-  return m_lastResetTimeSub;
-}
-
-void CAdvancedSettings::SetResetSyncSub(bool reset_sync)
-{
-  m_resetSyncSub = reset_sync;
-}
-
-bool CAdvancedSettings::GetResetSyncSub() const
-{
-  return m_resetSyncSub;
-}
-
-void CAdvancedSettings::SetResetSeekSub(bool reset_seek)
-{
-  m_resetSeekSub = reset_seek;
-}
-
-bool CAdvancedSettings::GetResetSeekSub() const
-{
-  return m_resetSeekSub;
-}
-
-void CAdvancedSettings::SetLimitCD(bool limit_cd)
-{
-  m_limitCD = limit_cd;
-}
-
-bool CAdvancedSettings::GetLimitCD() const
-{
-  return m_limitCD;
-}
-
-void CAdvancedSettings::SetLimitCDPrevVal(int cd_prev_val)
-{
-  m_limitCDPrevVal = cd_prev_val;
-}
-
-int CAdvancedSettings::GetLimitCDPrevVal() const
-{
-  return m_limitCDPrevVal;
-}
-
-void CAdvancedSettings::SetForceCS(bool force_cs)
-{
-  m_forceCS = force_cs;
-}
-
-bool CAdvancedSettings::GetForceCS() const
-{
-  return m_forceCS;
-}
-
-void CAdvancedSettings::SetForceCSPrevVal(int cs_prev_val)
-{
-  m_forceCSPrevVal = cs_prev_val;
-}
-
-int CAdvancedSettings::GetForceCSPrevVal() const
-{
-  return m_forceCSPrevVal;
 }
 
 void CAdvancedSettings::Clear()
@@ -1641,15 +1614,33 @@ int CAdvancedSettings::GetVideoLatencyTweak(float refreshrate, unsigned int reso
 
 int CAdvancedSettings::GetAudioLatencyTweak(CAEStreamInfo::DataType type)
 {
+  int delay = 0;
   for (int i = 0; i < (int) m_audioPassthroughLatency.size(); i++)
   {
     PassthroughAudioLatency& audiolatency = m_audioPassthroughLatency[i];
 
     if (type == audiolatency.type)
-      return audiolatency.delay;
+      delay = audiolatency.delay;
   }
 
-  return 0; // in milliseconds
+  return delay; // in milliseconds
+}
+
+void CAdvancedSettings::ApplyDirtyRegionAlgorithmForSkin(const std::string& skinId)
+{
+  if (m_guiAlgorithmDirtyRegionsIsExplicit)
+    return;
+
+  const int algorithm = (skinId == "skin.avdvplus.estuary")
+                            ? DIRTYREGION_SOLVER_COST_REDUCTION
+                            : DIRTYREGION_SOLVER_FILL_VIEWPORT_ON_CHANGE;
+
+  if (algorithm == m_guiAlgorithmDirtyRegions)
+    return;
+
+  m_guiAlgorithmDirtyRegions = algorithm;
+  CLog::Log(LOGINFO, "Advanced settings: dirty region algorithm {} selected for skin {}", algorithm,
+            skinId);
 }
 
 void CAdvancedSettings::SetDebugMode(bool debug)

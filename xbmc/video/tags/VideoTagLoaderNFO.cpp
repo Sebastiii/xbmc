@@ -50,7 +50,8 @@ CInfoScanner::INFO_TYPE CVideoTagLoaderNFO::Load(CVideoInfoTag& tag,
   else if (m_info)
     result = nfoReader.Create(m_path, m_info);
 
-  if (result == CInfoScanner::FULL_NFO || result == CInfoScanner::COMBINED_NFO)
+  if (result == CInfoScanner::FULL_NFO || result == CInfoScanner::COMBINED_NFO ||
+      result == CInfoScanner::OVERRIDE_NFO)
     nfoReader.GetDetails(tag, nullptr, prioritise);
 
   if (result == CInfoScanner::URL_NFO || result == CInfoScanner::COMBINED_NFO)
@@ -115,6 +116,18 @@ std::string CVideoTagLoaderNFO::FindNFO(const CFileItem& item,
       nfoFile = URIUtils::AddFileToFolder(strPath, "movie.nfo");
       if (CFileUtils::Exists(nfoFile))
         return nfoFile;
+    }
+
+    if (URIUtils::IsBlurayPath(item.GetPath()))
+    {
+      CFileItem item2(item);
+      const std::string path{URIUtils::GetDiscFile(item.GetPath())};
+      if (!path.empty())
+      {
+        item2.SetPath(path);
+        nfoFile = FindNFO(item2, movieFolder);
+        return nfoFile;
+      }
     }
 
     // try looking for .nfo file for a stacked item

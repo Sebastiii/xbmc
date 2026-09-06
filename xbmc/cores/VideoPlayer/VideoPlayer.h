@@ -9,6 +9,7 @@
 #pragma once
 
 #include "DVDClock.h"
+#include "DVDInputStreams/DVDInputStream.h"
 #include "DVDMessageQueue.h"
 #include "Edl.h"
 #include "FileItem.h"
@@ -27,6 +28,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <map>
 #include <memory>
 #include <unordered_map>
 #include <utility>
@@ -156,6 +158,8 @@ public:
     packets = 0;
     syncState = IDVDStreamPlayer::SYNC_STARTING;
     starttime = DVD_NOPTS_VALUE;
+    cachetime = 0.0;
+    cachetotal = 0.0;
     startpts = DVD_NOPTS_VALUE;
     lastdts = DVD_NOPTS_VALUE;
     avsync = AV_SYNC_FORCE;
@@ -197,6 +201,9 @@ struct SelectionStream
   std::string stereo_mode;
   float aspect_ratio = 0.0f;
   StreamHdrType hdrType = StreamHdrType::HDR_TYPE_NONE;
+  AVDOVIDecoderConfigurationRecord dovi{};
+  uint32_t fpsScale{0};
+  uint32_t fpsRate{0};
 };
 
 class CSelectionStreams
@@ -246,6 +253,7 @@ struct CacheInfo
 
 class CProcessInfo;
 class CJobQueue;
+class CVideoPlayerHwRenderThread;
 
 class CVideoPlayer : public IPlayer, public CThread, public IVideoPlayer,
                      public IDispResource, public IRenderLoop, public IRenderMsg
@@ -331,6 +339,8 @@ public:
   void SetTempo(float tempo) override;
   bool SupportsTempo() const override;
   void FrameAdvance(int frames) override;
+  void WaitAsyncMainPace() override;
+  uint64_t GetVisibleOverlaySetSignature(bool& animated) const override;
   bool OnAction(const CAction &action) override;
 
   void GetAudioStreamInfo(int index, AudioStreamInfo& info) const override;
@@ -341,6 +351,8 @@ public:
   void FrameMove() override;
   void Render(bool clear, uint32_t alpha = 255, bool gui = true) override;
   void FlushRenderer() override;
+  void PreInitRenderer() override;
+  void UnInitRenderer() override;
   void SetRenderViewMode(int mode, float zoom, float par, float shift, bool stretch) override;
   float GetRenderAspectRatio() const override;
   void TriggerUpdateResolution() override;
@@ -414,6 +426,14 @@ protected:
 
   int  AddSubtitleFile(const std::string& filename, const std::string& subfilename = "");
 
+  void CacheSubtitlePacket(DemuxPacket* pPacket);
+  std::vector<DemuxPacket*> FindActiveSubtitlePackets(double pts);
+  bool IsSubtitlePtsCovered(double pts) const;
+  void ReinjectSubtitlePackets(const std::vector<DemuxPacket*>& packets);
+  void FetchActiveSubtitleFromFile(double seekTimeMs, double targetPts, int streamId);
+  void RecallSubtitlesAfterSeek(double startPts, double seekTimeMs);
+  void ClearSubtitleSeekCache();
+
   /*!
    * \brief Propagate enable stream callbacks to demuxers.
    * \param current The current stream
@@ -443,12 +463,15 @@ protected:
   CacheInfo GetCachingTimes();
 
   void FlushBuffers(double pts, bool accurate, bool sync);
+  void DrainStreamsAtBoundary();
 
   void HandleMessages();
   void HandlePlaySpeed();
   bool IsInMenuInternal() const;
   void SynchronizeDemuxer();
   void CheckAutoSceneSkip();
+  bool IsWaitingForVideoDrainAtEof();
+  bool HandleReadPacketEndOfStream();
   bool CheckContinuity(CCurrentStream& current, DemuxPacket* pPacket);
   bool CheckSceneSkip(const CCurrentStream& current);
   bool CheckPlayerInit(CCurrentStream& current);
@@ -459,6 +482,7 @@ protected:
 
   bool ReadPacket(DemuxPacket*& packet, CDemuxStream*& stream);
   bool IsValidStream(const CCurrentStream& stream) const;
+  void UpdateMenuDomainQueueDepth(bool segmentOpen);
   bool IsBetterStream(const CCurrentStream& current, CDemuxStream* stream) const;
   void CheckBetterStream(CCurrentStream& current, CDemuxStream* stream);
   void CheckStreamChanges(CCurrentStream& current, CDemuxStream* stream);
@@ -476,20 +500,40 @@ protected:
 
   void UpdateContent();
   void UpdateContentState();
+  void QueueSubtitleSwitchSeek(const SelectionStream& stream);
 
   void UpdateFileItemStreamDetails(CFileItem& item);
+  static std::string GetDvProfileString(const AVDOVIDecoderConfigurationRecord& dovi);
+  static std::string GetObjectAudioProfile(const std::string& codecName);
   int GetPreviousChapter();
+  int GetNextChapter();
 
   bool m_players_created;
+  int m_lastChapterSeekTarget = 0;
 
   CFileItem m_item;
   CPlayerOptions m_playerOptions;
-  bool m_bAbortRequest;
+  std::atomic<bool> m_bAbortRequest;
+  bool m_parseCaptions{false};
+  bool m_subtitleDemuxerEof{false};
+  std::shared_ptr<CDVDInputStream::IMenus> m_menus;
   bool m_error;
   bool m_bCloseRequest;
 
+  bool m_brokenFileNotified = false;
+  bool m_brokenFileStallStarveLogged = false;
+  std::chrono::steady_clock::time_point m_brokenFileStallStart;
+  int64_t m_brokenFileStallBytes = -1;
+
   ECacheState  m_caching;
   XbmcThreads::EndTime<> m_cachingTimer;
+
+  std::chrono::steady_clock::time_point m_eofRenderWaitStart{};
+  static constexpr auto kEofRenderWaitMax = std::chrono::seconds(5);
+
+  std::chrono::steady_clock::time_point m_avResyncDeferStart{};
+  static constexpr auto kAvResyncDeferMax = std::chrono::milliseconds(200);
+  static constexpr auto kAvResyncNoSourceDeferMax = std::chrono::milliseconds(3000);
 
   std::unique_ptr<CProcessInfo> m_processInfo;
 
@@ -516,7 +560,6 @@ protected:
   int m_playSpeed;
   int m_streamPlayerSpeed;
   int m_demuxerSpeed = DVD_PLAYSPEED_NORMAL;
-  double m_demuxSeekBasePts{DVD_NOPTS_VALUE};
   struct SSpeedState
   {
     double lastpts{0.0}; // holds last display pts during ff/rw operations
@@ -562,7 +605,26 @@ protected:
   std::unordered_map<int64_t, std::shared_ptr<CDVDDemux>> m_subtitleDemuxerMap;
   std::unique_ptr<CDVDDemuxCC> m_pCCDemuxer;
 
+  std::multimap<double, DemuxPacket*> m_subtitleSeekCache;
+  std::vector<std::pair<double, double>> m_subtitleSeekCovered;
+  std::vector<std::pair<double, int>> m_subtitleReinjectedPts;
+  bool m_subtitleSeekNewRun{true};
+  int m_subtitleSeekCurRun{-1};
+  int m_subtitleSeekCacheStreamId{-1};
+  int64_t m_subtitleSeekCacheDemuxerId{-1};
+  size_t m_subtitleSeekCacheBytes{0};
+  bool m_subtitleSeekRecallFromFile{false};
+  std::shared_ptr<CDVDInputStream> m_pSubtitleCatchupInput;
+  std::shared_ptr<CDVDDemux> m_pSubtitleCatchupDemuxer;
+
   CRenderManager m_renderManager;
+
+  std::unique_ptr<CVideoPlayerHwRenderThread> m_hwRenderThread;
+  CCriticalSection m_hwRenderThreadSection;
+  std::atomic_bool m_asyncVideoRenderLatched{false};
+  std::atomic_bool m_asyncVideoWorkerLive{false};
+  void StartHwVideoRenderThread();
+  void StopHwVideoRenderThread(bool unlatch);
 
   struct SDVDInfo
   {
@@ -591,16 +653,29 @@ protected:
   SPlayerState m_State;
   mutable CCriticalSection m_StateSection;
   XbmcThreads::EndTime<> m_syncTimer;
+  // XbmcThreads::EndTime<> m_subtitleSeekGate;
 
   CEdl m_Edl;
   bool m_SkipCommercials;
 
   bool m_HasVideo;
   bool m_HasAudio;
+  bool m_bdFeatureTagsFired = false;
+  double m_bdFeatureActiveSince = 0.0;
+  bool m_bdFeatureStable = false;
+  bool m_bdStreamReuse = false;
 
   bool m_UpdateStreamDetails;
 
   std::atomic<bool> m_displayLost;
 
   double m_messageQueueTimeSize{0.0};
+  bool m_menuDomainLowLatency{false};
+  bool m_menuDomainClampPending{false};
+  bool m_menuDomainSegment{false};
+  bool m_menuDomainFillPending{false};
+  double m_menuDomainRampCap{0.0};
+  std::chrono::steady_clock::time_point m_menuDomainRampLast{};
+  std::chrono::steady_clock::time_point m_menuDomainEvalLast{};
+  std::chrono::steady_clock::time_point m_menuDomainStarveStart{};
 };

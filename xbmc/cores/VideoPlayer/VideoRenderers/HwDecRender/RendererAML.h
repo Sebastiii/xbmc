@@ -10,6 +10,8 @@
 
 #include "cores/VideoPlayer/VideoRenderers/BaseRenderer.h"
 
+#include <atomic>
+
 class CRendererAML : public CBaseRenderer
 {
 public:
@@ -36,12 +38,24 @@ public:
   // Player functions
   virtual bool IsGuiLayer() override { return false; };
 
+  bool SupportsAsyncVideoLayerRender() const override { return true; }
+  int GetAsyncRenderIndex() override { return m_asyncRenderIndex.load(); }
+  void BeginAsyncVideoLayerRender(int idx) override;
+  void EndAsyncVideoLayerRender(int idx) override;
+  void PrepareVideoLayer() override { ManageRenderArea(); }
+  void RenderVideoLayerCommit(int idx, const CRect& src, const CRect& dst) override
+  {
+    CommitVideoLayer(idx, src, dst);
+  }
+  int PollVideoLayer() override;
+
   // Feature support
   virtual bool Supports(ESCALINGMETHOD method) const override { return false; };
   virtual bool Supports(ERENDERFEATURE feature) const override;
 
 private:
   void Reset();
+  void CommitVideoLayer(int index, CRect src, CRect dst);
 
   static const int m_numRenderBuffers = NUM_BUFFERS;
 
@@ -54,4 +68,6 @@ private:
 
   uint64_t m_prevVPts;
   bool m_bConfigured;
+  std::atomic_int m_asyncRenderIndex{-1};
+  CVideoBuffer* m_asyncPinnedBuffer = nullptr;
 };

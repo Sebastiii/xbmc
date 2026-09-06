@@ -513,7 +513,31 @@ void CGUIDialogSettingsBase::OnSettingChanged(const std::shared_ptr<const CSetti
       setting->GetType() == SettingType::Action)
     return;
 
-  UpdateSettingControl(setting->GetId(), true);
+  for (const auto& control : m_settingControls)
+  {
+    if (!control || control == m_delayedSetting)
+      continue;
+
+    const auto& controlSetting = control->GetSetting();
+    if (!controlSetting)
+      continue;
+
+    if (controlSetting == setting)
+    {
+      UpdateSettingControl(control, false);
+      continue;
+    }
+
+    const auto& deps = controlSetting->GetDependencies();
+    for (const auto& dep : deps)
+    {
+      if (dep.GetSettings().count(setting->GetId()) > 0)
+      {
+        UpdateSettingControl(control, true);
+        break;
+      }
+    }
+  }
 }
 
 void CGUIDialogSettingsBase::OnSettingPropertyChanged(

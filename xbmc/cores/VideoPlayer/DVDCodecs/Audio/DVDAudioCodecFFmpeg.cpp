@@ -16,7 +16,10 @@
 #include "settings/AdvancedSettings.h"
 #include "settings/Settings.h"
 #include "settings/SettingsComponent.h"
+#include "utils/AudioDelayTrace.h"
 #include "utils/log.h"
+
+#include <cstring>
 
 extern "C" {
 #include <libavutil/opt.h>
@@ -114,10 +117,7 @@ bool CDVDAudioCodecFFmpeg::Open(CDVDStreamInfo &hints, CDVDCodecOptions &options
     }
   }
 
-  float applyDrc = CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_audioApplyDrc;
-  if (applyDrc >= 0.0f)
-    av_opt_set_double(m_pCodecContext, "drc_scale", static_cast<double>(applyDrc),
-                      AV_OPT_SEARCH_CHILDREN);
+  ApplyDrcScale();
 
   if (avcodec_open2(m_pCodecContext, pCodec, nullptr) < 0)
   {
@@ -142,6 +142,28 @@ bool CDVDAudioCodecFFmpeg::Open(CDVDStreamInfo &hints, CDVDCodecOptions &options
   CLog::Log(LOGINFO, "CDVDAudioCodecFFmpeg::Open() Successful opened audio decoder {}",
             m_pCodecContext->codec->name);
 
+  m_audioDelayFrameCounter = 0;
+  m_audioDelayFirstAfterReset = true;
+
+  if (AUDIODELAY_ENABLED())
+  {
+    AUDIODELAY_LOG("VPA.FFmpegOpen",
+                   "codec={} codecId={} profile={} sampleRate={} sampleFmt={} channels={} "
+                   "delay={} initialPadding={} frameSize={} capDelay={} bitRate={} extraSize={}",
+                   m_pCodecContext->codec->name,
+                   static_cast<int>(m_pCodecContext->codec->id),
+                   m_pCodecContext->profile,
+                   m_pCodecContext->sample_rate,
+                   static_cast<int>(m_pCodecContext->sample_fmt),
+                   m_pCodecContext->ch_layout.nb_channels,
+                   m_pCodecContext->delay,
+                   m_pCodecContext->initial_padding,
+                   m_pCodecContext->frame_size,
+                   (m_pCodecContext->codec->capabilities & AV_CODEC_CAP_DELAY) ? 1 : 0,
+                   static_cast<long>(m_pCodecContext->bit_rate),
+                   m_pCodecContext->extradata_size);
+  }
+
   return true;
 }
 
@@ -164,8 +186,8 @@ bool CDVDAudioCodecFFmpeg::AddData(const DemuxPacket &packet)
   AVPacket* avpkt = av_packet_alloc();
   if (!avpkt)
   {
-    CLog::Log(LOGERROR, "CDVDAudioCodecFFmpeg::{} - av_packet_alloc failed: {}", __FUNCTION__,
-              strerror(errno));
+    logM(LOGERROR, "CDVDAudioCodecFFmpeg::{} - av_packet_alloc failed: {}", __FUNCTION__,
+         strerror(errno));
     return false;
   }
 
@@ -243,6 +265,7 @@ void CDVDAudioCodecFFmpeg::GetData(DVDAudioFrame &frame)
   if (frame.hasDownmix)
   {
     frame.centerMixLevel = m_downmixInfo.center_mix_level;
+    frame.surroundMixLevel = m_downmixInfo.surround_mix_level;
   }
 }
 
@@ -251,6 +274,8 @@ int CDVDAudioCodecFFmpeg::GetData(uint8_t** dst)
   int ret = avcodec_receive_frame(m_pCodecContext, m_pFrame);
   if (!ret)
   {
+    int32_t audioDelaySkipStart = -1;
+    int32_t audioDelaySkipEnd = -1;
     if (m_pFrame->nb_side_data)
     {
       for (int i = 0; i < m_pFrame->nb_side_data; i++)
@@ -264,10 +289,42 @@ int CDVDAudioCodecFFmpeg::GetData(uint8_t** dst)
           }
           else if (sd->type == AV_FRAME_DATA_DOWNMIX_INFO)
           {
-            m_downmixInfo = *(AVDownmixInfo*)sd->data;
-            m_hasDownmix = true;
+            if (!CServiceBroker::GetSettingsComponent()->GetSettings()->GetBool(
+                    CSettings::SETTING_AUDIOOUTPUT_IGNOREDOWNMIXMETADATA))
+            {
+              m_downmixInfo = *(AVDownmixInfo*)sd->data;
+              m_hasDownmix = true;
+            }
+          }
+          else if (sd->type == AV_FRAME_DATA_SKIP_SAMPLES && sd->size >= 8)
+          {
+            std::memcpy(&audioDelaySkipStart, sd->data, 4);
+            std::memcpy(&audioDelaySkipEnd, sd->data + 4, 4);
           }
         }
+      }
+    }
+
+    if (AUDIODELAY_ENABLED())
+    {
+      ++m_audioDelayFrameCounter;
+      if (m_audioDelayFirstAfterReset || m_audioDelayFrameCounter <= 5 ||
+          (m_audioDelayFrameCounter % 50) == 0 ||
+          audioDelaySkipStart > 0 || audioDelaySkipEnd > 0)
+      {
+        AUDIODELAY_LOG("VPA.FFmpegDecode",
+                       "frame={} firstAfterReset={} nbSamples={} pts={} bestPts={} sampleRate={} "
+                       "decodeErrorFlags={} skipStart={} skipEnd={}",
+                       m_audioDelayFrameCounter,
+                       m_audioDelayFirstAfterReset ? 1 : 0,
+                       m_pFrame->nb_samples,
+                       static_cast<long long>(m_pFrame->pts),
+                       static_cast<long long>(m_pFrame->best_effort_timestamp),
+                       m_pFrame->sample_rate,
+                       m_pFrame->decode_error_flags,
+                       audioDelaySkipStart,
+                       audioDelaySkipEnd);
+        m_audioDelayFirstAfterReset = false;
       }
     }
 
@@ -289,10 +346,34 @@ int CDVDAudioCodecFFmpeg::GetData(uint8_t** dst)
   return 0;
 }
 
+void CDVDAudioCodecFFmpeg::ApplyDrcScale()
+{
+  if (!m_pCodecContext)
+    return;
+
+  float applyDrc = CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_audioApplyDrc;
+  if (applyDrc < 0.0f)
+    applyDrc = CServiceBroker::GetSettingsComponent()->GetSettings()->GetInt(
+                   CSettings::SETTING_AUDIOOUTPUT_DRC) /
+               100.0f;
+  av_opt_set_double(m_pCodecContext, "drc_scale", static_cast<double>(applyDrc),
+                    AV_OPT_SEARCH_CHILDREN);
+}
+
 void CDVDAudioCodecFFmpeg::Reset()
 {
+  if (AUDIODELAY_ENABLED())
+  {
+    AUDIODELAY_LOG("VPA.FFmpegReset",
+                   "codec={} frameCountBeforeReset={}",
+                   m_pCodecContext ? m_pCodecContext->codec->name : "none",
+                   m_audioDelayFrameCounter);
+  }
   if (m_pCodecContext) avcodec_flush_buffers(m_pCodecContext);
   m_eof = false;
+  ApplyDrcScale();
+  m_audioDelayFrameCounter = 0;
+  m_audioDelayFirstAfterReset = true;
 }
 
 int CDVDAudioCodecFFmpeg::GetChannels() const {
@@ -409,9 +490,9 @@ void CDVDAudioCodecFFmpeg::BuildChannelMap()
   if (layout & AV_CH_TOP_FRONT_LEFT       ) m_channelLayout += AE_CH_TFL ;
   if (layout & AV_CH_TOP_FRONT_CENTER     ) m_channelLayout += AE_CH_TFC ;
   if (layout & AV_CH_TOP_FRONT_RIGHT      ) m_channelLayout += AE_CH_TFR ;
-  if (layout & AV_CH_TOP_BACK_LEFT        ) m_channelLayout += AE_CH_BL  ;
-  if (layout & AV_CH_TOP_BACK_CENTER      ) m_channelLayout += AE_CH_BC  ;
-  if (layout & AV_CH_TOP_BACK_RIGHT       ) m_channelLayout += AE_CH_BR  ;
+  if (layout & AV_CH_TOP_BACK_LEFT        ) m_channelLayout += AE_CH_TBL ;
+  if (layout & AV_CH_TOP_BACK_CENTER      ) m_channelLayout += AE_CH_TBC ;
+  if (layout & AV_CH_TOP_BACK_RIGHT       ) m_channelLayout += AE_CH_TBR ;
 
   m_channels = codecChannels;
 }

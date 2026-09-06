@@ -37,16 +37,21 @@
 #include "pictures/GUIWindowSlideShow.h"
 #include "profiles/windows/GUIWindowSettingsProfile.h"
 #include "programs/GUIWindowPrograms.h"
+#include "rendering/RenderSystem.h"
 #include "settings/AdvancedSettings.h"
 #include "settings/SettingsComponent.h"
 #include "settings/windows/GUIWindowSettings.h"
 #include "settings/windows/GUIWindowSettingsCategory.h"
 #include "settings/windows/GUIWindowSettingsScreenCalibration.h"
+#include "threads/Event.h"
 #include "threads/SingleLock.h"
+#include "threads/Thread.h"
 #include "utils/AMLUtils.h"
 #include "utils/StringUtils.h"
+#include "windowing/WinSystem.h"
 #include "utils/URIUtils.h"
 #include "utils/Variant.h"
+#include "utils/LogThrottle.h"
 #include "utils/log.h"
 #include "video/dialogs/GUIDialogVideoInfo.h"
 #include "video/dialogs/GUIDialogVideoManagerExtras.h"
@@ -68,7 +73,11 @@
 #include "windows/GUIWindowSystemInfo.h"
 
 #include <algorithm>
+#include <cmath>
+#include <fstream>
 #include <mutex>
+#include <thread>
+#include <unordered_set>
 
 // Dialog includes
 #include "music/dialogs/GUIDialogMusicOSD.h"
@@ -170,8 +179,6 @@ CGUIWindowManager::CGUIWindowManager()
   m_iNested = 0;
   m_initialized = false;
 }
-
-CGUIWindowManager::~CGUIWindowManager() = default;
 
 void CGUIWindowManager::Initialize()
 {
@@ -299,6 +306,9 @@ void CGUIWindowManager::CreateWindows()
   Add(new CGUIDialogVideoManagerExtras);
   Add(new CGUIDialogSelect(WINDOW_DIALOG_SELECT_VIDEO_VERSION));
   Add(new CGUIDialogSelect(WINDOW_DIALOG_SELECT_VIDEO_EXTRA));
+  Add(new CGUIDialogSelect(WINDOW_DIALOG_SELECT_VIDEO_STREAM));
+  Add(new CGUIDialogSelect(WINDOW_DIALOG_SELECT_AUDIO_STREAM));
+  Add(new CGUIDialogSelect(WINDOW_DIALOG_SELECT_SUBTITLE_STREAM));
 
   Add(new CGUIDialogTextViewer);
   Add(new CGUIWindowFullScreen);
@@ -386,6 +396,9 @@ bool CGUIWindowManager::DestroyWindows()
     DestroyWindow(WINDOW_DIALOG_SLIDER);
     DestroyWindow(WINDOW_DIALOG_MEDIA_FILTER);
     DestroyWindow(WINDOW_DIALOG_SUBTITLES);
+    DestroyWindow(WINDOW_DIALOG_SELECT_VIDEO_STREAM);
+    DestroyWindow(WINDOW_DIALOG_SELECT_AUDIO_STREAM);
+    DestroyWindow(WINDOW_DIALOG_SELECT_SUBTITLE_STREAM);
     DestroyWindow(WINDOW_DIALOG_COLOR_PICKER);
 
     /* Delete PVR related windows and dialogs */
@@ -482,14 +495,13 @@ bool CGUIWindowManager::DestroyWindows()
 
 void CGUIWindowManager::DestroyWindow(int id)
 {
-  std::lock_guard lock(CServiceBroker::GetWinSystem()->GetGfxContext());
-
-  CGUIWindow *pWindow = GetWindow(id);
-  if (pWindow)
+  std::unique_lock<CCriticalSection> lock(CServiceBroker::GetWinSystem()->GetGfxContext());
+  auto it = m_mapWindows.find(id);
+  if (it != m_mapWindows.end())
   {
+    std::shared_ptr<CGUIWindow> pWindow = it->second;
     Remove(id);
     pWindow->FreeResources(true);
-    delete pWindow;
   }
 }
 
@@ -520,7 +532,9 @@ bool CGUIWindowManager::SendMessage(CGUIMessage& message)
   {
     std::lock_guard lock(CServiceBroker::GetWinSystem()->GetGfxContext());
 
-    for (auto it = m_activeDialogs.rbegin(); it != m_activeDialogs.rend(); ++it)
+    // make copy of vector as OnMessage may modify m_activeDialogs (e.g., via DeInit)
+    auto activeDialogs = m_activeDialogs;
+    for (auto it = activeDialogs.rbegin(); it != activeDialogs.rend(); ++it)
     {
       (*it)->OnMessage(message);
     }
@@ -547,8 +561,7 @@ bool CGUIWindowManager::SendMessage(CGUIMessage& message)
   size_t topWindow = m_activeDialogs.size();
   while (topWindow)
   {
-    CGUIWindow* dialog = m_activeDialogs[--topWindow];
-
+    auto dialog = m_activeDialogs[--topWindow];
     if (!modalAcceptedMessage && dialog->IsModalDialog())
     { // modal window
       hasModalDialog = true;
@@ -614,15 +627,16 @@ void CGUIWindowManager::AddUniqueInstance(CGUIWindow *window)
   Add(window);
 }
 
-void CGUIWindowManager::Add(CGUIWindow* pWindow)
+bool CGUIWindowManager::Add(CGUIWindow* pWindow)
 {
   if (!pWindow)
   {
     CLog::Log(LOGERROR, "Attempted to add a NULL window pointer to the window manager.");
-    return;
+    return false;
   }
   // push back all the windows if there are more than one covered by this class
-  std::lock_guard lock(CServiceBroker::GetWinSystem()->GetGfxContext());
+  std::unique_lock lock(CServiceBroker::GetWinSystem()->GetGfxContext());
+  std::shared_ptr<CGUIWindow> windowPtr(pWindow);
 
   for (int id : pWindow->GetIDRange())
   {
@@ -633,19 +647,34 @@ void CGUIWindowManager::Add(CGUIWindow* pWindow)
                 "Error, trying to add a second window with id {} "
                 "to the window manager",
                 id);
-      return;
+      return false;
     }
 
-    m_mapWindows.insert(std::make_pair(id, pWindow));
+    m_mapWindows.insert(std::make_pair(id, windowPtr));
   }
+
+  // Keep a dedicated list of dialog-like windows for per-frame processing.
+  // Note: Python WindowXMLDialog instances live in the WINDOW_PYTHON_* range but
+  // may not report IsDialog()==true (they are mapped to CGUIMediaWindow).
+  if (pWindow->IsDialog() || IsPythonWindow(pWindow->GetID()))
+    m_dialogWindows.emplace_back(windowPtr);
+
+  return true;
 }
 
 void CGUIWindowManager::AddCustomWindow(CGUIWindow* pWindow)
 {
-  std::lock_guard lock(CServiceBroker::GetWinSystem()->GetGfxContext());
+  if (!pWindow)
+    return;
 
-  Add(pWindow);
-  m_vecCustomWindows.emplace_back(pWindow);
+  std::unique_lock lock(CServiceBroker::GetWinSystem()->GetGfxContext());
+  int windowId = pWindow->GetID(); // Get ID before Add() takes ownership
+  if (!Add(pWindow))
+    return; // Add() failed, window was deleted
+
+  auto it = m_mapWindows.find(windowId);
+  if (it != m_mapWindows.end())
+    m_vecCustomWindows.emplace_back(it->second);
 }
 
 void CGUIWindowManager::RegisterDialog(CGUIWindow* dialog)
@@ -658,7 +687,11 @@ void CGUIWindowManager::RegisterDialog(CGUIWindow* dialog)
     if (window->GetID() == dialog->GetID())
       return;
   }
-  m_activeDialogs.emplace_back(dialog);
+  auto it = m_mapWindows.find(dialog->GetID());
+  if (it != m_mapWindows.end())
+  {
+    m_activeDialogs.emplace_back(it->second);
+  }
 }
 
 void CGUIWindowManager::Remove(int id)
@@ -668,15 +701,21 @@ void CGUIWindowManager::Remove(int id)
   auto it = m_mapWindows.find(id);
   if (it != m_mapWindows.end())
   {
-    CGUIWindow *window = it->second;
+    CGUIWindow* window = it->second.get();
     m_windowHistory.erase(std::remove_if(m_windowHistory.begin(),
                                          m_windowHistory.end(),
                                          [id](int winId){ return winId == id; }),
                           m_windowHistory.end());
-    m_activeDialogs.erase(std::remove_if(m_activeDialogs.begin(),
-                                         m_activeDialogs.end(),
-                                         [window](CGUIWindow* w){ return w == window; }),
+    m_activeDialogs.erase(std::remove_if(m_activeDialogs.begin(), m_activeDialogs.end(),
+                                         [window](const std::shared_ptr<CGUIWindow>& w)
+                                         { return w.get() == window; }),
                           m_activeDialogs.end());
+
+    m_dialogWindows.erase(std::remove_if(m_dialogWindows.begin(), m_dialogWindows.end(),
+                                         [window](const std::shared_ptr<CGUIWindow>& w)
+                                         { return w.get() == window; }),
+                          m_dialogWindows.end());
+
     m_mapWindows.erase(it);
   }
   else
@@ -693,13 +732,13 @@ void CGUIWindowManager::Remove(int id)
 // ownership to CGUIWindowManager via Add.
 void CGUIWindowManager::Delete(int id)
 {
-  std::lock_guard lock(CServiceBroker::GetWinSystem()->GetGfxContext());
-
-  CGUIWindow *pWindow = GetWindow(id);
-  if (pWindow)
+  std::unique_lock<CCriticalSection> lock(CServiceBroker::GetWinSystem()->GetGfxContext());
+  auto it = m_mapWindows.find(id);
+  if (it != m_mapWindows.end())
   {
+    std::shared_ptr<CGUIWindow> pWindow = it->second;
     Remove(id);
-    m_deleteWindows.emplace_back(pWindow);
+    m_deleteWindows.emplace_back(std::move(pWindow));
   }
 }
 
@@ -1188,7 +1227,7 @@ bool CGUIWindowManager::HandleAction(CAction const& action) const
   size_t topmost = m_activeDialogs.size();
   while (topmost)
   {
-    CGUIWindow *dialog = m_activeDialogs[--topmost];
+    auto dialog = m_activeDialogs[--topmost];
     lock.unlock();
     if (dialog->IsModalDialog())
     { // we have the topmost modal dialog
@@ -1223,10 +1262,600 @@ bool CGUIWindowManager::HandleAction(CAction const& action) const
   return false;
 }
 
-bool RenderOrderSortFunction(CGUIWindow *first, CGUIWindow *second)
+namespace
+{
+constexpr int WINDOW_SKIN_OSD_TOPBAR_OVERLAY = WINDOW_HOME + 1109;
+bool IsAsyncFullscreenOverlayDialog(int id)
+{
+  switch (id & WINDOW_ID_MASK)
+  {
+    case WINDOW_DIALOG_PLAYER_PROCESS_INFO:
+    case WINDOW_DIALOG_VIDEO_OSD:
+    case WINDOW_DIALOG_VIDEO_OSD_SETTINGS:
+    case WINDOW_DIALOG_AUDIO_OSD_SETTINGS:
+    case WINDOW_DIALOG_SUBTITLE_OSD_SETTINGS:
+      return true;
+    case WINDOW_DIALOG_SEEK_BAR:
+    case WINDOW_SKIN_OSD_TOPBAR_OVERLAY:
+      return CServiceBroker::GetWinSystem()->GetGfxContext().GetGuiHdr() != GuiHdr::SDR;
+    default:
+      return false;
+  }
+}
+bool IsWorkerEligibleAsyncFullscreenOverlayDialog(int id)
+{
+  const int maskedId = id & WINDOW_ID_MASK;
+  if (maskedId == WINDOW_DIALOG_SEEK_BAR || maskedId == WINDOW_SKIN_OSD_TOPBAR_OVERLAY)
+    return CServiceBroker::GetWinSystem()->GetGfxContext().GetGuiHdr() != GuiHdr::SDR;
+  return maskedId == WINDOW_DIALOG_VIDEO_OSD;
+}
+constexpr auto FULLSCREEN_OVERLAY_CACHE_INTERVAL = std::chrono::milliseconds(167);
+constexpr auto FULLSCREEN_OVERLAY_RELEASE_TIMEOUT = std::chrono::seconds(3);
+constexpr auto FULLSCREEN_OVERLAY_QUIESCE_TIMEOUT = std::chrono::milliseconds(500);
+constexpr auto FULLSCREEN_OVERLAY_SOFT_QUIESCE = std::chrono::milliseconds(100);
+constexpr auto FULLSCREEN_OVERLAY_FENCE_AGE_LIMIT = std::chrono::milliseconds(500);
+constexpr int FULLSCREEN_OVERLAY_FENCE_NR_LIMIT = 30;
+constexpr uint64_t FULLSCREEN_OVERLAY_FENCE_WAIT_BOUND_NS = 8000000;
+constexpr size_t FULLSCREEN_OVERLAY_MAX_CONTENT_RECTS = 4;
+constexpr float FULLSCREEN_OVERLAY_CONTENT_PADDING = 1.0f;
+static_assert(FULLSCREEN_OVERLAY_MAX_CONTENT_RECTS <= CGUIRenderTargetFBO::MAX_CONTENT_RECTS);
+constexpr float BUF_AGE_SNAP_GRID = 16.0f;
+constexpr uint32_t BUF_AGE_EMIT_TOLERANCE = 2;
+constexpr auto BUF_AGE_EMIT_FLOOR = std::chrono::seconds(10);
+
+CRect PadContentRect(const CRect& region, float scaleX, float scaleY)
+{
+  const float padX = scaleX > 0.0f
+                         ? std::max(FULLSCREEN_OVERLAY_CONTENT_PADDING, 1.0f / scaleX)
+                         : FULLSCREEN_OVERLAY_CONTENT_PADDING;
+  const float padY = scaleY > 0.0f
+                         ? std::max(FULLSCREEN_OVERLAY_CONTENT_PADDING, 1.0f / scaleY)
+                         : FULLSCREEN_OVERLAY_CONTENT_PADDING;
+  return CRect(region.x1 - padX, region.y1 - padY, region.x2 + padX, region.y2 + padY);
+}
+
+double ContentCoveragePct(const std::vector<CRect>& rects, unsigned int width, unsigned int height)
+{
+  const double viewport = static_cast<double>(width) * static_cast<double>(height);
+  if (viewport <= 0.0)
+    return 0.0;
+  if (rects.empty() || rects.size() > CGUIRenderTargetFBO::MAX_CONTENT_RECTS)
+    return 100.0;
+  const CRect bounds(0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height));
+  double area = 0.0;
+  for (const CRect& rect : rects)
+  {
+    CRect clipped = rect;
+    clipped.Intersect(bounds);
+    if (clipped.IsEmpty())
+      continue;
+    area += static_cast<double>(clipped.Width()) * static_cast<double>(clipped.Height());
+  }
+  if (area <= 0.0)
+    return 100.0;
+  return area * 100.0 / viewport;
+}
+
+CRect WindowDrawnBounds(const CGUIWindow& window)
+{
+  CRect region = window.GetRenderRegion();
+  const CRect drawn = window.GetVisibleControlBounds();
+  if (drawn.IsEmpty())
+    return region;
+  if (region.IsEmpty())
+    return drawn;
+  CRect inside = drawn;
+  inside.Intersect(region);
+  if (!(inside == drawn))
+    region.Union(drawn);
+  return region;
+}
+
+void AppendWindowContentRects(std::vector<CRect>& rects,
+                              const CGUIWindow& window,
+                              float scaleX,
+                              float scaleY,
+                              const CRect& viewport,
+                              int& widenedWindowId)
+{
+  const CRect& region = window.GetRenderRegion();
+  const bool haveReported = !region.IsEmpty();
+  CRect reported;
+  if (haveReported)
+  {
+    reported = PadContentRect(region, scaleX, scaleY);
+    reported.Intersect(viewport);
+    if (!reported.IsEmpty())
+      rects.push_back(reported);
+  }
+
+  CRect drawn = window.GetVisibleControlBounds();
+  if (drawn.IsEmpty())
+    return;
+  drawn = PadContentRect(drawn, scaleX, scaleY);
+  drawn.Intersect(viewport);
+  if (drawn.IsEmpty())
+    return;
+
+  if (haveReported)
+  {
+    CRect inside = drawn;
+    inside.Intersect(reported);
+    if (inside == drawn)
+      return;
+  }
+
+  rects.push_back(drawn);
+  widenedWindowId = window.GetID() & WINDOW_ID_MASK;
+}
+
+std::string FormatRectList(const std::vector<CRect>& rects)
+{
+  std::string out;
+  for (const CRect& rect : rects)
+    out += StringUtils::Format("{:.0f},{:.0f}-{:.0f},{:.0f} ", rect.x1, rect.y1, rect.x2, rect.y2);
+  return out;
+}
+
+std::string FormatAnimFlags(CGUIWindow& window)
+{
+  std::string out;
+  if (window.IsAnimating(ANIM_TYPE_WINDOW_OPEN))
+    out += 'O';
+  if (window.IsAnimating(ANIM_TYPE_WINDOW_CLOSE))
+    out += 'C';
+  if (window.IsAnimating(ANIM_TYPE_VISIBLE))
+    out += 'V';
+  if (window.IsAnimating(ANIM_TYPE_HIDDEN))
+    out += 'H';
+  if (window.IsAnimating(ANIM_TYPE_FOCUS))
+    out += 'F';
+  if (window.IsAnimating(ANIM_TYPE_UNFOCUS))
+    out += 'U';
+  if (window.IsAnimating(ANIM_TYPE_CONDITIONAL))
+    out += 'N';
+  if (out.empty())
+    out = "-";
+  return out;
+}
+
+std::vector<CRect> DisjointContentRects(std::vector<CRect> rects)
+{
+  for (bool merged = true; merged;)
+  {
+    merged = false;
+    for (size_t i = 0; i < rects.size() && !merged; ++i)
+    {
+      for (size_t j = i + 1; j < rects.size(); ++j)
+      {
+        if (!rects[i].Intersects(rects[j]))
+          continue;
+        rects[i].Union(rects[j]);
+        rects.erase(rects.begin() + static_cast<std::ptrdiff_t>(j));
+        merged = true;
+        break;
+      }
+    }
+  }
+  if (rects.size() > FULLSCREEN_OVERLAY_MAX_CONTENT_RECTS)
+  {
+    CRect all;
+    for (const CRect& rect : rects)
+      all.Union(rect);
+    rects.assign(1, all);
+  }
+  return rects;
+}
+
+int ReadSysfsInt(const char* path)
+{
+  std::ifstream file(path);
+  int value = -1;
+  if (!(file >> value))
+    return -1;
+  return value;
+}
+}
+
+bool RenderOrderSortFunction(const std::shared_ptr<CGUIWindow>& first,
+                             const std::shared_ptr<CGUIWindow>& second)
 {
   return first->GetRenderOrder() < second->GetRenderOrder();
 }
+
+namespace
+{
+class CFillStateRestore
+{
+public:
+  CFillStateRestore(CGraphicContext& gfx, CRenderSystemBase* renderSystem)
+    : m_gfx(gfx), m_renderSystem(renderSystem)
+  {
+    m_renderOrder = m_gfx.GetRenderOrder();
+    m_clipDepth = m_gfx.GetClipRegionDepth();
+    m_viewDepth = m_gfx.GetViewPortDepth();
+    m_layer = m_gfx.GetLayer();
+    m_scissors = m_gfx.GetScissors();
+    if (m_renderSystem)
+      m_renderSystem->GetViewPort(m_viewPort);
+  }
+
+  ~CFillStateRestore()
+  {
+    while (m_gfx.GetClipRegionDepth() > m_clipDepth)
+      m_gfx.RestoreClipRegion();
+    while (m_gfx.GetViewPortDepth() > m_viewDepth && m_gfx.GetViewPortDepth() > 1)
+      m_gfx.RestoreViewPort();
+    m_gfx.SetRenderOrder(m_renderOrder);
+    m_gfx.SetLayer(m_layer);
+    if (m_renderSystem)
+      m_renderSystem->SetViewPort(m_viewPort);
+    m_gfx.SetScissors(m_scissors);
+  }
+
+private:
+  CGraphicContext& m_gfx;
+  CRenderSystemBase* m_renderSystem;
+  RENDER_ORDER m_renderOrder;
+  size_t m_clipDepth;
+  size_t m_viewDepth;
+  uint32_t m_layer;
+  CRect m_scissors;
+  CRect m_viewPort;
+};
+}
+
+class CFullscreenOverlayRenderThread : public CThread
+{
+public:
+  explicit CFullscreenOverlayRenderThread(CGUIWindowManager& manager)
+    : CThread("GUIOverlayFBO"), m_manager(manager)
+  {
+  }
+
+  void QueueRender(std::vector<std::shared_ptr<CGUIWindow>> renderList,
+                   CGUIWindowManager::AsyncFullscreenOverlaySignature signature,
+                   int targetIndex)
+  {
+    {
+      std::lock_guard lock(m_stateMutex);
+      m_renderList = std::move(renderList);
+      m_signature = std::move(signature);
+      m_renderTargetIndex = targetIndex;
+      m_hasPendingRender = true;
+    }
+    m_renderRequested.Set();
+  }
+
+  bool IsBusy()
+  {
+    std::lock_guard lock(m_stateMutex);
+    return m_hasPendingRender || m_renderActive;
+  }
+
+  void Wake() { m_renderRequested.Set(); }
+
+protected:
+  void Process() override;
+
+private:
+  void RunPendingFill(const std::vector<std::shared_ptr<CGUIWindow>>& renderList,
+                      const CGUIWindowManager::AsyncFullscreenOverlaySignature& signature,
+                      int targetIndex);
+  void ReleaseTargetsOnContext(bool force);
+
+  CGUIWindowManager& m_manager;
+  CEvent m_renderRequested;
+  std::mutex m_stateMutex;
+  std::vector<std::shared_ptr<CGUIWindow>> m_renderList;
+  CGUIWindowManager::AsyncFullscreenOverlaySignature m_signature;
+  int m_renderTargetIndex{-1};
+  bool m_hasPendingRender{false};
+  bool m_renderActive{false};
+  bool m_contextCreated{false};
+};
+
+void CFullscreenOverlayRenderThread::Process()
+{
+  CServiceBroker::GetRenderSystem()->SetThreadGuiShaderScope(true);
+  while (!m_bStop)
+  {
+    AbortableWait(m_renderRequested);
+    if (m_bStop)
+      break;
+    m_renderRequested.Reset();
+
+    std::vector<std::shared_ptr<CGUIWindow>> renderList;
+    CGUIWindowManager::AsyncFullscreenOverlaySignature signature;
+    int targetIndex = -1;
+    bool havePending = false;
+    {
+      std::lock_guard lock(m_stateMutex);
+      if (m_hasPendingRender)
+      {
+        havePending = true;
+        renderList = std::move(m_renderList);
+        m_renderList.clear();
+        signature = std::move(m_signature);
+        targetIndex = m_renderTargetIndex;
+        m_hasPendingRender = false;
+        m_renderActive = true;
+      }
+    }
+
+    if (havePending)
+    {
+      try
+      {
+        RunPendingFill(renderList, signature, targetIndex);
+      }
+      catch (...)
+      {
+        CServiceBroker::GetWinSystem()->UnbindOverlayContext();
+        m_manager.m_fullscreenOverlayRenderThreadDisabled.store(true, std::memory_order_relaxed);
+        logM(LOGERROR, "async fullscreen OSD worker: exception during fill, disabled");
+      }
+      {
+        std::lock_guard lock(m_stateMutex);
+        m_renderActive = false;
+      }
+      {
+        std::lock_guard lock(m_manager.m_fullscreenOverlayStateSection);
+        if (m_manager.m_fullscreenOverlayReleaseRequested ||
+            m_manager.m_fullscreenOverlayRetryRequested)
+          m_renderRequested.Set();
+      }
+      continue;
+    }
+
+    bool releaseRequested = false;
+    {
+      std::lock_guard lock(m_manager.m_fullscreenOverlayStateSection);
+      releaseRequested = m_manager.m_fullscreenOverlayReleaseRequested;
+      if (m_manager.m_fullscreenOverlayRetryRequested)
+      {
+        m_manager.m_fullscreenOverlayRetryRequested = false;
+        if (m_manager.m_preparedFullscreenOverlayFence && m_contextCreated &&
+            CServiceBroker::GetWinSystem()->BindOverlayContext())
+        {
+          CServiceBroker::GetRenderSystem()->WaitGuiRenderFence(
+              m_manager.m_preparedFullscreenOverlayFence, true);
+          CServiceBroker::GetWinSystem()->UnbindOverlayContext();
+        }
+      }
+    }
+
+    if (releaseRequested)
+      ReleaseTargetsOnContext(false);
+  }
+
+  ReleaseTargetsOnContext(true);
+  auto* winSystem = CServiceBroker::GetWinSystem();
+  if (m_contextCreated && winSystem)
+  {
+    if (winSystem->BindOverlayContext())
+    {
+      CServiceBroker::GetRenderSystem()->ReleaseThreadGuiShaders();
+      winSystem->UnbindOverlayContext();
+    }
+    winSystem->DestroyOverlayContext();
+    m_contextCreated = false;
+  }
+}
+
+void CFullscreenOverlayRenderThread::RunPendingFill(
+    const std::vector<std::shared_ptr<CGUIWindow>>& renderList,
+    const CGUIWindowManager::AsyncFullscreenOverlaySignature& signature,
+    int targetIndex)
+{
+  const bool diag = m_manager.m_fullscreenOverlayDiagEnabled.load(std::memory_order_relaxed);
+  std::chrono::steady_clock::time_point start;
+  if (diag)
+    start = std::chrono::steady_clock::now();
+  auto* winSystem = CServiceBroker::GetWinSystem();
+  auto* renderSystem = CServiceBroker::GetRenderSystem();
+  if (!winSystem || !renderSystem || targetIndex < 0 ||
+      targetIndex >= static_cast<int>(CGUIWindowManager::FULLSCREEN_OVERLAY_RENDER_TARGET_COUNT))
+    return;
+  if (m_manager.m_fullscreenOverlayRenderThreadDisabled.load(std::memory_order_relaxed))
+    return;
+
+  std::unique_lock<CCriticalSection> exclusion(m_manager.m_guiRenderExclusion);
+
+  if (!m_contextCreated)
+  {
+    if (!winSystem->CreateOverlayContext())
+    {
+      m_manager.m_fullscreenOverlayRenderThreadDisabled.store(true, std::memory_order_relaxed);
+      logM(LOGERROR, "async fullscreen OSD worker: overlay context creation failed, disabled");
+      return;
+    }
+    m_contextCreated = true;
+  }
+
+  if (!winSystem->BindOverlayContext())
+  {
+    m_manager.m_fullscreenOverlayRenderThreadDisabled.store(true, std::memory_order_relaxed);
+    logM(LOGERROR, "async fullscreen OSD worker: overlay context bind failed, disabled");
+    return;
+  }
+
+  void* fence = nullptr;
+  bool filled = false;
+  int fillIndex = targetIndex;
+  {
+    auto& gfx = winSystem->GetGfxContext();
+    std::unique_lock<CCriticalSection> gfxLock(gfx);
+    CFillStateRestore stateRestore(gfx, renderSystem);
+    const unsigned int width = gfx.GetWidth();
+    const unsigned int height = gfx.GetHeight();
+    renderSystem->EstablishGuiRenderBaseline(width, height);
+    gfx.SetLayer(m_manager.m_fullscreenOverlayDepthLayer.load(std::memory_order_relaxed));
+    gfx.ResetScissors();
+
+    std::unique_ptr<CGUIRenderTargetFBO> target;
+    void* oldFence = nullptr;
+    {
+      std::lock_guard lock(m_manager.m_fullscreenOverlayStateSection);
+      if (m_manager.m_displayedFullscreenOverlayRenderTargetIndex == fillIndex)
+        fillIndex = fillIndex == 0 ? 1 : 0;
+      oldFence = m_manager.m_preparedFullscreenOverlayFence;
+      m_manager.m_preparedFullscreenOverlayFence = nullptr;
+      m_manager.m_preparedFullscreenOverlayRenderTargetIndex = -1;
+      target = std::move(m_manager.m_fullscreenOverlayRenderTargets[fillIndex]);
+    }
+    if (oldFence)
+      renderSystem->DeleteGuiRenderFence(oldFence);
+    if (!target || target->GetWidth() != width || target->GetHeight() != height)
+    {
+      target.reset();
+      target = renderSystem->CreateGuiRenderTarget(width, height);
+    }
+    if (target && renderSystem->BeginGuiRenderTarget(*target))
+    {
+      if (diag)
+      {
+        uint64_t elapsedNs = 0;
+        if (renderSystem->PollGuiRenderTimerNs(elapsedNs))
+        {
+          const double gpuMs = static_cast<double>(elapsedNs) / 1000000.0;
+          std::lock_guard gpuLock(m_manager.m_fullscreenOverlayStateSection);
+          ++m_manager.m_fullscreenOverlayWorkerCounters.gpuSamples;
+          if (elapsedNs == 0)
+            ++m_manager.m_fullscreenOverlayWorkerCounters.gpuZeroSamples;
+          m_manager.m_fullscreenOverlayWorkerCounters.gpuMsTotal += gpuMs;
+          if (gpuMs > m_manager.m_fullscreenOverlayWorkerCounters.gpuMsMax)
+            m_manager.m_fullscreenOverlayWorkerCounters.gpuMsMax = gpuMs;
+        }
+        renderSystem->BeginGuiRenderTimer();
+      }
+      const auto fillSettingsComponent = CServiceBroker::GetSettingsComponent();
+      const auto fillAdvancedSettings =
+          fillSettingsComponent ? fillSettingsComponent->GetAdvancedSettings() : nullptr;
+      if (fillAdvancedSettings && fillAdvancedSettings->m_guiFrontToBackRendering)
+      {
+        gfx.SetRenderOrder(RENDER_ORDER_FRONT_TO_BACK);
+        for (auto it = renderList.rbegin(); it != renderList.rend(); ++it)
+          (*it)->DoRender();
+        gfx.SetRenderOrder(RENDER_ORDER_BACK_TO_FRONT);
+      }
+      else
+      {
+        gfx.SetRenderOrder(RENDER_ORDER_ALL_BACK_TO_FRONT);
+      }
+      for (const auto& window : renderList)
+        window->DoRender();
+      std::vector<CRect> contentRects;
+      contentRects.reserve(renderList.size() * 2);
+      float scaleX = 1.0f;
+      float scaleY = 1.0f;
+      int scaledWidth = 0;
+      int scaledHeight = 0;
+      const CRect workerViewport(0.0f, 0.0f, static_cast<float>(target->GetWidth()),
+                                 static_cast<float>(target->GetHeight()));
+      int workerWidenedWindowId = 0;
+      for (const auto& window : renderList)
+      {
+        const auto& coordsRes = window->GetCoordsRes();
+        if (coordsRes.iWidth != scaledWidth || coordsRes.iHeight != scaledHeight)
+        {
+          gfx.GetGUIScaling(coordsRes, scaleX, scaleY);
+          scaledWidth = coordsRes.iWidth;
+          scaledHeight = coordsRes.iHeight;
+        }
+        AppendWindowContentRects(contentRects, *window, scaleX, scaleY, workerViewport,
+                                 workerWidenedWindowId);
+      }
+      if (workerWidenedWindowId)
+        LOG_THROTTLE_PERIODIC(LOGDEBUG, LOGWINDOWING, 1000,
+                              "osdcov: worker window {} draws outside its render region, composite "
+                              "coverage widened",
+                              workerWidenedWindowId);
+      target->SetContentRects(DisjointContentRects(std::move(contentRects)));
+      if (m_manager.m_osdTraceArmed.load(std::memory_order_relaxed))
+      {
+        std::string workerFocus;
+        for (const auto& window : renderList)
+          workerFocus += StringUtils::Format("{}:{} ", window->GetID() & WINDOW_ID_MASK,
+                                             window->GetFocusedControlID());
+        logComponentM(LOGDEBUG, LOGWINDOWING, "osdwfill: idx={} members={} focus=[{}] cov=[{}]",
+                      fillIndex, renderList.size(), workerFocus,
+                      FormatRectList(target->GetContentRects()));
+      }
+      renderSystem->EndGuiRenderTarget(*target);
+      if (diag)
+        renderSystem->EndGuiRenderTimer();
+      fence = renderSystem->CreateGuiRenderFence();
+      filled = fence != nullptr;
+    }
+    {
+      std::lock_guard lock(m_manager.m_fullscreenOverlayStateSection);
+      m_manager.m_fullscreenOverlayRenderTargets[fillIndex] = std::move(target);
+    }
+  }
+
+  winSystem->UnbindOverlayContext();
+
+  if (!filled)
+    return;
+
+  const double prepMs =
+      diag ? std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
+                 .count()
+           : 0.0;
+  std::lock_guard lock(m_manager.m_fullscreenOverlayStateSection);
+  m_manager.m_preparedFullscreenOverlayRenderTargetIndex = fillIndex;
+  m_manager.m_preparedFullscreenOverlaySignature = signature;
+  m_manager.m_preparedFullscreenOverlayFence = fence;
+  m_manager.m_preparedFullscreenOverlayPublishTime = std::chrono::steady_clock::now();
+  ++m_manager.m_fullscreenOverlayWorkerCounters.prep;
+  m_manager.m_fullscreenOverlayWorkerCounters.prepMsTotal += prepMs;
+}
+
+void CFullscreenOverlayRenderThread::ReleaseTargetsOnContext(bool force)
+{
+  std::array<std::unique_ptr<CGUIRenderTargetFBO>,
+             CGUIWindowManager::FULLSCREEN_OVERLAY_RENDER_TARGET_COUNT>
+      targets;
+  void* fence = nullptr;
+  {
+    std::lock_guard lock(m_manager.m_fullscreenOverlayStateSection);
+    if (!force && !m_manager.m_fullscreenOverlayReleaseRequested)
+      return;
+    for (size_t i = 0; i < targets.size(); ++i)
+      targets[i] = std::move(m_manager.m_fullscreenOverlayRenderTargets[i]);
+    fence = m_manager.m_preparedFullscreenOverlayFence;
+    m_manager.m_preparedFullscreenOverlayFence = nullptr;
+    m_manager.m_preparedFullscreenOverlayRenderTargetIndex = -1;
+    m_manager.m_displayedFullscreenOverlayRenderTargetIndex = -1;
+    m_manager.m_preparedFullscreenOverlaySignature = {};
+    m_manager.m_displayedFullscreenOverlaySignature = {};
+    m_manager.m_fullscreenOverlayReleaseRequested = false;
+  }
+
+  if (!fence && !targets[0] && !targets[1])
+    return;
+
+  auto* winSystem = CServiceBroker::GetWinSystem();
+  if (!m_contextCreated || !winSystem || !winSystem->BindOverlayContext())
+  {
+    for (auto& target : targets)
+      static_cast<void>(target.release());
+    m_manager.m_fullscreenOverlayRenderThreadDisabled.store(true, std::memory_order_relaxed);
+    logM(LOGERROR,
+         "async fullscreen OSD worker: release without context, targets and fence leaked");
+    return;
+  }
+
+  auto* renderSystem = CServiceBroker::GetRenderSystem();
+  if (fence && renderSystem)
+    renderSystem->DeleteGuiRenderFence(fence);
+  for (auto& target : targets)
+    target.reset();
+  winSystem->UnbindOverlayContext();
+}
+
+CGUIWindowManager::~CGUIWindowManager() = default;
 
 void CGUIWindowManager::Process(unsigned int currentTime)
 {
@@ -1240,12 +1869,28 @@ void CGUIWindowManager::Process(unsigned int currentTime)
     pWindow->DoProcess(currentTime, m_dirtyregions);
 
   // process all dialogs - visibility may change etc.
-  for (const auto& entry : m_mapWindows)
+  // copy shared_ptrs to ensure dialogs stay alive during iteration even if internal containers are modified
+  auto dialogs = m_dialogWindows;
+  for (const auto& window : dialogs)
   {
-    CGUIWindow *pWindow = entry.second;
-    if (pWindow && pWindow->IsDialog())
-      pWindow->DoProcess(currentTime, m_dirtyregions);
+    if (window && (window->IsDialog() || IsPythonWindow(window->GetID())))
+      window->DoProcess(currentTime, m_dirtyregions);
   }
+
+  // assign depth values to all active controls
+  if (pWindow)
+    pWindow->AssignDepth();
+
+  auto activeDialogs = m_activeDialogs;
+  stable_sort(activeDialogs.begin(), activeDialogs.end(), RenderOrderSortFunction);
+  for (const auto& window : activeDialogs)
+  {
+    if (window->IsDialogRunning())
+      window->AssignDepth();
+  }
+
+  m_fullscreenOverlayDepthLayer.store(
+      CServiceBroker::GetWinSystem()->GetGfxContext().GetLayer(), std::memory_order_relaxed);
 
   for (auto& itr : m_dirtyregions)
     m_tracker.MarkDirtyRegion(itr);
@@ -1254,6 +1899,11 @@ void CGUIWindowManager::Process(unsigned int currentTime)
 void CGUIWindowManager::MarkDirty()
 {
   MarkDirty(CRect(0, 0, float(CServiceBroker::GetWinSystem()->GetGfxContext().GetWidth()), float(CServiceBroker::GetWinSystem()->GetGfxContext().GetHeight())));
+}
+
+void CGUIWindowManager::MarkDirtyRegionOnly(const CRect& rect)
+{
+  m_tracker.MarkDirtyRegion(CDirtyRegion(rect));
 }
 
 void CGUIWindowManager::MarkDirty(const CRect& rect)
@@ -1271,8 +1921,1033 @@ void CGUIWindowManager::MarkDirty(const CRect& rect)
       window->MarkDirtyRegion();
 }
 
+void CGUIWindowManager::UpdateFullscreenOverlayRenderTarget() const
+{
+  m_fullscreenOverlayComposite = false;
+  m_fullscreenOverlayCompositeIds.clear();
+  const auto now = std::chrono::steady_clock::now();
+
+  static std::chrono::steady_clock::time_point s_statWindow{};
+  static int s_frames = 0;
+  static int s_composites = 0;
+  static int s_fills = 0;
+  static int s_creates = 0;
+  static int s_releases = 0;
+  static int s_declines = 0;
+  static const char* s_lastReason = "none";
+  static unsigned int s_fboW = 0;
+  static unsigned int s_fboH = 0;
+  if (now - s_statWindow >= std::chrono::seconds(1))
+  {
+    logComponentM(LOGDEBUG, LOGWINDOWING,
+                  "asyncosd: frames={} composites={} fills={} create={} release={} decline={} "
+                  "lastReason={} fbo={}x{}",
+                  s_frames, s_composites, s_fills, s_creates, s_releases, s_declines, s_lastReason,
+                  s_fboW, s_fboH);
+    s_statWindow = now;
+    s_frames = s_composites = s_fills = s_creates = s_releases = s_declines = 0;
+  }
+  ++s_frames;
+
+  FullscreenOverlayFillStats stats;
+  const bool composite = FillFullscreenOverlayTarget(stats, now);
+  s_composites += stats.composites;
+  s_fills += stats.fills;
+  s_creates += stats.creates;
+  s_releases += stats.releases;
+  s_declines += stats.declines;
+  if (stats.lastReason)
+    s_lastReason = stats.lastReason;
+  if (stats.fboW >= 0)
+  {
+    s_fboW = static_cast<unsigned int>(stats.fboW);
+    s_fboH = static_cast<unsigned int>(stats.fboH);
+  }
+  m_fullscreenOverlayComposite = composite;
+  m_osdTraceReason = composite ? "sync" : (stats.lastReason ? stats.lastReason : "decline");
+}
+
+bool CGUIWindowManager::FillFullscreenOverlayTarget(FullscreenOverlayFillStats& stats,
+                                                    std::chrono::steady_clock::time_point now) const
+{
+  if (m_fullscreenOverlayRenderTarget &&
+      (now - m_fullscreenOverlayLastActiveTime) >= FULLSCREEN_OVERLAY_RELEASE_TIMEOUT)
+  {
+    m_fullscreenOverlayRenderTarget.reset();
+    ++stats.releases;
+    stats.fboW = 0;
+    stats.fboH = 0;
+  }
+
+  auto* renderSystem = CServiceBroker::GetRenderSystem();
+  if (!renderSystem || !renderSystem->SupportsGuiRenderTargets())
+    return false;
+
+  auto& gfx = CServiceBroker::GetWinSystem()->GetGfxContext();
+  if (gfx.GetStereoMode() != RENDER_STEREO_MODE_OFF)
+  {
+    stats.lastReason = "stereo";
+    ++stats.declines;
+    return false;
+  }
+
+  CGUIWindow* pWindow = GetWindow(GetActiveWindow());
+  if (!pWindow || ((pWindow->GetID() & WINDOW_ID_MASK) != WINDOW_FULLSCREEN_VIDEO))
+  {
+    stats.lastReason = "not-fullscreen";
+    return false;
+  }
+
+  auto renderList = m_activeDialogs;
+  stable_sort(renderList.begin(), renderList.end(), RenderOrderSortFunction);
+
+  std::vector<CGUIWindow*> whitelisted;
+  bool haveBand = false;
+  int whitelistMin = 0;
+  int whitelistMax = 0;
+  bool anyAnimating = false;
+  bool anyControlDirty = false;
+  size_t signature = 0;
+  for (const auto& window : renderList)
+  {
+    if (!window->IsDialogRunning())
+      continue;
+    if (!IsAsyncFullscreenOverlayDialog(window->GetID() & WINDOW_ID_MASK))
+      continue;
+    whitelisted.push_back(window.get());
+    const int order = window->GetRenderOrder();
+    if (!haveBand)
+    {
+      whitelistMin = order;
+      haveBand = true;
+    }
+    whitelistMax = order;
+    signature = signature * 31 + static_cast<size_t>(window->GetID() & WINDOW_ID_MASK);
+    signature = signature * 31 + static_cast<size_t>(window->GetFocusedControlID());
+    if (window->IsControlDirty())
+      anyControlDirty = true;
+    if (window->IsAnimating(ANIM_TYPE_WINDOW_OPEN) || window->IsAnimating(ANIM_TYPE_WINDOW_CLOSE) ||
+        window->IsAnimating(ANIM_TYPE_VISIBLE) || window->IsAnimating(ANIM_TYPE_HIDDEN) ||
+        window->IsAnimating(ANIM_TYPE_FOCUS) || window->IsAnimating(ANIM_TYPE_UNFOCUS) ||
+        window->IsAnimating(ANIM_TYPE_CONDITIONAL))
+      anyAnimating = true;
+  }
+  if (whitelisted.empty())
+  {
+    stats.lastReason = "no-whitelisted";
+    return false;
+  }
+  bool interleaved = false;
+  for (const auto& window : renderList)
+  {
+    if (!window->IsDialogRunning())
+      continue;
+    if (IsAsyncFullscreenOverlayDialog(window->GetID() & WINDOW_ID_MASK))
+      continue;
+    const int order = window->GetRenderOrder();
+    if (order >= whitelistMin && order <= whitelistMax)
+    {
+      interleaved = true;
+      break;
+    }
+  }
+  int guestCount = 0;
+  if (interleaved)
+  {
+    const auto guestSettingsComponent = CServiceBroker::GetSettingsComponent();
+    const auto guestAdvancedSettings =
+        guestSettingsComponent ? guestSettingsComponent->GetAdvancedSettings() : nullptr;
+    if (!guestAdvancedSettings || !guestAdvancedSettings->m_guiOsdGuestComposite)
+    {
+      stats.lastReason = "interleave";
+      ++stats.declines;
+      return false;
+    }
+    whitelisted.clear();
+    signature = 0;
+    anyAnimating = false;
+    anyControlDirty = false;
+    for (const auto& window : renderList)
+    {
+      if (!window->IsDialogRunning())
+        continue;
+      const int id = window->GetID() & WINDOW_ID_MASK;
+      const int order = window->GetRenderOrder();
+      if (!IsAsyncFullscreenOverlayDialog(id) &&
+          !(order >= whitelistMin && order <= whitelistMax))
+        continue;
+      if (!IsAsyncFullscreenOverlayDialog(id))
+        ++guestCount;
+      whitelisted.push_back(window.get());
+      signature = signature * 31 + static_cast<size_t>(id);
+      signature = signature * 31 + static_cast<size_t>(window->GetFocusedControlID());
+      if (window->IsControlDirty())
+        anyControlDirty = true;
+      if (window->IsAnimating(ANIM_TYPE_WINDOW_OPEN) ||
+          window->IsAnimating(ANIM_TYPE_WINDOW_CLOSE) ||
+          window->IsAnimating(ANIM_TYPE_VISIBLE) || window->IsAnimating(ANIM_TYPE_HIDDEN) ||
+          window->IsAnimating(ANIM_TYPE_FOCUS) || window->IsAnimating(ANIM_TYPE_UNFOCUS) ||
+          window->IsAnimating(ANIM_TYPE_CONDITIONAL))
+        anyAnimating = true;
+    }
+  }
+
+  const unsigned int width = gfx.GetWidth();
+  const unsigned int height = gfx.GetHeight();
+  bool recreated = false;
+  if (!m_fullscreenOverlayRenderTarget ||
+      m_fullscreenOverlayRenderTarget->GetWidth() != width ||
+      m_fullscreenOverlayRenderTarget->GetHeight() != height)
+  {
+    m_fullscreenOverlayRenderTarget = renderSystem->CreateGuiRenderTarget(width, height);
+    recreated = true;
+    ++stats.creates;
+    stats.fboW = static_cast<int>(width);
+    stats.fboH = static_cast<int>(height);
+  }
+  if (!m_fullscreenOverlayRenderTarget)
+  {
+    stats.lastReason = "create-failed";
+    ++stats.declines;
+    return false;
+  }
+
+  if (!anyControlDirty)
+    m_fullscreenOverlayDirtyEpisodeFilled = false;
+
+  const bool fillDiag = CServiceBroker::GetLogging().IsLogLevelLogged(LOGDEBUG) &&
+                        CServiceBroker::GetLogging().CanLogComponent(LOGWINDOWING);
+  std::vector<std::pair<int, int>> currentFocus;
+  if (fillDiag)
+  {
+    currentFocus.reserve(whitelisted.size());
+    for (auto* window : whitelisted)
+      currentFocus.emplace_back(window->GetID() & WINDOW_ID_MASK, window->GetFocusedControlID());
+  }
+  const bool sigChanged = signature != m_fullscreenOverlaySignature;
+  const bool dirtyDue = anyControlDirty && !m_fullscreenOverlayDirtyEpisodeFilled;
+  const bool intervalDue =
+      (now - m_fullscreenOverlayLastFillTime) >= FULLSCREEN_OVERLAY_CACHE_INTERVAL;
+  const auto sinceFillMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               now - m_fullscreenOverlayLastFillTime)
+                               .count();
+  const bool needFill = recreated || sigChanged || anyAnimating || dirtyDue || intervalDue;
+  const char* fillReason = "none";
+  m_osdTraceFill = "none";
+  if (needFill)
+  {
+    if (recreated || sigChanged)
+    {
+      fillReason = "sig";
+      ++stats.fillSig;
+    }
+    else if (anyAnimating)
+    {
+      fillReason = "anim";
+      ++stats.fillAnim;
+    }
+    else if (dirtyDue)
+    {
+      fillReason = "dirty";
+      ++stats.fillDirty;
+    }
+    else
+    {
+      fillReason = "interval";
+      ++stats.fillInterval;
+    }
+  }
+  else
+  {
+    if (anyControlDirty)
+      ++stats.fillSuppressed;
+    if (fillDiag && currentFocus != m_fullscreenOverlayFilledFocus)
+      ++stats.staleFocus;
+  }
+  m_osdTraceFill = fillReason;
+  if (needFill)
+  {
+    CFillStateRestore stateRestore(gfx, renderSystem);
+    if (!renderSystem->BeginGuiRenderTarget(*m_fullscreenOverlayRenderTarget))
+    {
+      stats.lastReason = "begin-failed";
+      ++stats.declines;
+      return false;
+    }
+    const auto fillSettingsComponent = CServiceBroker::GetSettingsComponent();
+    const auto fillAdvancedSettings =
+        fillSettingsComponent ? fillSettingsComponent->GetAdvancedSettings() : nullptr;
+    if (fillAdvancedSettings && fillAdvancedSettings->m_guiFrontToBackRendering)
+    {
+      gfx.SetRenderOrder(RENDER_ORDER_FRONT_TO_BACK);
+      for (auto it = whitelisted.rbegin(); it != whitelisted.rend(); ++it)
+        (*it)->DoRender();
+      gfx.SetRenderOrder(RENDER_ORDER_BACK_TO_FRONT);
+    }
+    else
+    {
+      gfx.SetRenderOrder(RENDER_ORDER_ALL_BACK_TO_FRONT);
+    }
+    for (auto* window : whitelisted)
+      window->DoRender();
+    std::vector<CRect> contentRects;
+    contentRects.reserve(whitelisted.size() * 2);
+    float scaleX = 1.0f;
+    float scaleY = 1.0f;
+    int scaledWidth = 0;
+    int scaledHeight = 0;
+    const CRect viewport(0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height));
+    int widenedWindowId = 0;
+    for (auto* window : whitelisted)
+    {
+      const auto& coordsRes = window->GetCoordsRes();
+      if (coordsRes.iWidth != scaledWidth || coordsRes.iHeight != scaledHeight)
+      {
+        gfx.GetGUIScaling(coordsRes, scaleX, scaleY);
+        scaledWidth = coordsRes.iWidth;
+        scaledHeight = coordsRes.iHeight;
+      }
+      AppendWindowContentRects(contentRects, *window, scaleX, scaleY, viewport, widenedWindowId);
+    }
+    if (widenedWindowId)
+      LOG_THROTTLE_PERIODIC(LOGDEBUG, LOGWINDOWING, 1000,
+                            "osdcov: window {} draws outside its render region, composite "
+                            "coverage widened",
+                            widenedWindowId);
+    m_fullscreenOverlayRenderTarget->SetContentRects(DisjointContentRects(std::move(contentRects)));
+    renderSystem->EndGuiRenderTarget(*m_fullscreenOverlayRenderTarget);
+    m_fullscreenOverlayLastFillTime = now;
+    m_fullscreenOverlaySignature = signature;
+    if (anyControlDirty)
+      m_fullscreenOverlayDirtyEpisodeFilled = true;
+    ++stats.fills;
+    if (fillDiag)
+    {
+      std::string focusNow;
+      for (const auto& entry : currentFocus)
+        focusNow += StringUtils::Format("{}:{} ", entry.first, entry.second);
+      std::string focusPrev;
+      for (const auto& entry : m_fullscreenOverlayFilledFocus)
+        focusPrev += StringUtils::Format("{}:{} ", entry.first, entry.second);
+      logComponentM(LOGDEBUG, LOGWINDOWING,
+                    "osdfill: reason={} members={} guests={} sinceMs={} dirty={} focus=[{}] prev=[{}]",
+                    fillReason, whitelisted.size(), guestCount, sinceFillMs,
+                    anyControlDirty ? 1 : 0, focusNow, focusPrev);
+      m_fullscreenOverlayFilledFocus = currentFocus;
+    }
+  }
+
+  m_fullscreenOverlayCompositeIds.clear();
+  m_fullscreenOverlayCompositeIds.reserve(whitelisted.size());
+  for (auto* window : whitelisted)
+    m_fullscreenOverlayCompositeIds.push_back(window->GetID() & WINDOW_ID_MASK);
+  if (guestCount > 0)
+    LOG_THROTTLE_PERIODIC(LOGDEBUG, LOGWINDOWING, 1000, "osdguest: members={} guests={}",
+                          whitelisted.size(), guestCount);
+
+  m_fullscreenOverlayLastActiveTime = now;
+  ++stats.composites;
+  return true;
+}
+
+void CGUIWindowManager::SelectFullscreenOverlayCompositeSource() const
+{
+  const auto now = std::chrono::steady_clock::now();
+
+  const bool diag = CServiceBroker::GetLogging().IsLogLevelLogged(LOGDEBUG) &&
+                    CServiceBroker::GetLogging().CanLogComponent(LOGWINDOWING);
+  m_fullscreenOverlayDiagEnabled.store(diag, std::memory_order_relaxed);
+
+  static std::chrono::steady_clock::time_point s_statWindow{};
+  if (diag && now - s_statWindow >= std::chrono::seconds(1))
+  {
+    FullscreenOverlayWorkerCounters window;
+    {
+      std::lock_guard lock(m_fullscreenOverlayStateSection);
+      window = m_fullscreenOverlayWorkerCounters;
+      m_fullscreenOverlayWorkerCounters = {};
+    }
+    s_statWindow = now;
+    if (HasFullscreenOverlayWorkerActivity(window))
+    {
+      if (!m_fullscreenOverlayDiagConfigLogged)
+      {
+        const auto cfgSettingsComponent = CServiceBroker::GetSettingsComponent();
+        const auto cfgAdvanced =
+            cfgSettingsComponent ? cfgSettingsComponent->GetAdvancedSettings() : nullptr;
+        auto* cfgWinSystem = CServiceBroker::GetWinSystem();
+        auto* cfgRenderSystem = CServiceBroker::GetRenderSystem();
+        if (cfgAdvanced && cfgWinSystem && cfgRenderSystem)
+        {
+          m_fullscreenOverlayDiagConfigLogged = true;
+          auto& cfgGfx = cfgWinSystem->GetGfxContext();
+          logComponentM(LOGDEBUG, LOGWINDOWING,
+                        "asyncosdCfg: fbo={}x{} bufferAgePartial={} dirtyAlgo={} maxDirty={} "
+                        "waitVsync={} waitGpu={} skipSleep={} gpuTimer={}",
+                        cfgGfx.GetWidth(), cfgGfx.GetHeight(),
+                        cfgAdvanced->m_guiBufferAgePartialRedraw,
+                        cfgAdvanced->m_guiAlgorithmDirtyRegions, cfgAdvanced->m_guiMaxDirtyRegions,
+                        cfgAdvanced->m_guiWaitVsyncBeforeSwap, cfgAdvanced->m_guiWaitGpuBeforeSwap,
+                        cfgAdvanced->m_guiSkipSleepActiveWindow,
+                        cfgRenderSystem->SupportsGuiRenderTimer());
+        }
+      }
+      const int avgPrepMs =
+          window.prep > 0 ? static_cast<int>(window.prepMsTotal / window.prep) : 0;
+      const bool gpuTimerUseless = window.gpuSamples > 0 && window.gpuMsMax <= 0.0;
+      const int avgGpuUs =
+          (window.gpuSamples > 0 && !gpuTimerUseless)
+              ? static_cast<int>(window.gpuMsTotal * 1000.0 / window.gpuSamples)
+              : -1;
+      const int maxGpuUs = (window.gpuSamples > 0 && !gpuTimerUseless)
+                               ? static_cast<int>(window.gpuMsMax * 1000.0)
+                               : -1;
+      const int avgContentPct =
+          window.contentSamples > 0
+              ? static_cast<int>(window.contentPctTotal / window.contentSamples)
+              : -1;
+      const int maxContentPct =
+          window.contentSamples > 0 ? static_cast<int>(window.contentPctMax) : -1;
+      logComponentM(LOGDEBUG, LOGWINDOWING,
+                    "asyncosdC: prep={} promo={} stale={} fenceNR={} fenceNRMax={} fenceWait={} "
+                    "wdRetry={} "
+                    "wdDemote={} busySkip={} pendSkip={} stall={} relReq={} inline={} avgPrepMs={} mode={} "
+                    "excl={} compNone={} gpuN={} gpuZero={} gpuAvgUs={} gpuMaxUs={} syncComposites={} "
+                    "syncFills={} syncCreate={} syncRelease={} syncDecline={} contentN={} "
+                    "contentPct={} contentMaxPct={} syncLastReason={}",
+                    window.prep, window.promo, window.stale, window.fenceNR, window.fenceNRMax,
+                    window.fenceWait,
+                    window.wdRetry, window.wdDemote, window.busySkip, window.pendSkip, window.stall,
+                    window.relReq,
+                    window.inlineFill, avgPrepMs, 2, window.excl, window.compNone,
+                    window.gpuSamples, window.gpuZeroSamples, avgGpuUs, maxGpuUs,
+                    window.syncComposites, window.syncFills, window.syncCreates,
+                    window.syncReleases, window.syncDeclines, window.contentSamples,
+                    avgContentPct, maxContentPct,
+                    window.syncLastReason ? window.syncLastReason : "none");
+      logComponentM(LOGDEBUG, LOGWINDOWING,
+                    "osdfresh: fillSig={} fillAnim={} fillDirty={} fillInterval={} "
+                    "suppressed={} staleFocusFrames={}",
+                    window.fillSig, window.fillAnim, window.fillDirty, window.fillInterval,
+                    window.fillSuppressed, window.staleFocus);
+    }
+  }
+
+  {
+    std::lock_guard lock(m_fullscreenOverlayStateSection);
+    m_fullscreenOverlayCompositeSource = FullscreenOverlayCompositeSource::NONE;
+  }
+  m_fullscreenOverlayCompositeIds.clear();
+  m_osdTraceReason = "none";
+
+  const auto guestSettingsComponent = CServiceBroker::GetSettingsComponent();
+  const auto guestAdvancedSettings =
+      guestSettingsComponent ? guestSettingsComponent->GetAdvancedSettings() : nullptr;
+  const bool guestComposite = guestAdvancedSettings && guestAdvancedSettings->m_guiOsdGuestComposite;
+  for (const auto& window : m_activeDialogs)
+  {
+    if (!window->IsDialogRunning())
+      continue;
+    if (!guestComposite && !IsAsyncFullscreenOverlayDialog(window->GetID() & WINDOW_ID_MASK))
+      continue;
+    if (window->IsAnimating(ANIM_TYPE_WINDOW_OPEN) || window->IsAnimating(ANIM_TYPE_WINDOW_CLOSE) ||
+        window->IsAnimating(ANIM_TYPE_VISIBLE) || window->IsAnimating(ANIM_TYPE_HIDDEN))
+    {
+      std::lock_guard lock(m_fullscreenOverlayStateSection);
+      if (m_preparedFullscreenOverlayRenderTargetIndex >= 0 || m_preparedFullscreenOverlayFence)
+      {
+        auto* renderSystem = CServiceBroker::GetRenderSystem();
+        if (m_preparedFullscreenOverlayFence && renderSystem)
+        {
+          renderSystem->DeleteGuiRenderFence(m_preparedFullscreenOverlayFence);
+          m_preparedFullscreenOverlayFence = nullptr;
+        }
+        m_preparedFullscreenOverlayRenderTargetIndex = -1;
+        m_fullscreenOverlayFenceNRStreak = 0;
+        m_fullscreenOverlayRetryAttempted = false;
+      }
+      m_displayedFullscreenOverlayRenderTargetIndex = -1;
+      m_osdTraceReason = "anim-disengage";
+      return;
+    }
+  }
+
+  const AsyncFullscreenOverlaySignature current = BuildAsyncFullscreenOverlaySignature();
+  const FullscreenOverlayPromoteResult promoted =
+      PromotePreparedFullscreenOverlayRenderTarget(current);
+  if (promoted != FullscreenOverlayPromoteResult::NONE)
+  {
+    m_fullscreenOverlayCompositeIds = current.dialogIds;
+    m_osdTraceReason = promoted == FullscreenOverlayPromoteResult::PROMOTED ? "promoted" : "kept";
+    std::lock_guard lock(m_fullscreenOverlayStateSection);
+    m_fullscreenOverlayCompositeSource = FullscreenOverlayCompositeSource::WORKER_FBO;
+    return;
+  }
+
+  FullscreenOverlayFillStats stats;
+  const bool filled = FillFullscreenOverlayTarget(stats, now);
+  m_osdTraceReason = filled ? "sync" : (stats.lastReason ? stats.lastReason : "decline");
+  if (filled)
+  {
+    std::lock_guard lock(m_fullscreenOverlayStateSection);
+    m_fullscreenOverlayCompositeSource = FullscreenOverlayCompositeSource::SYNC_TARGET;
+    if (diag)
+    {
+      AccumulateSyncFillStats(stats);
+      ++m_fullscreenOverlayWorkerCounters.inlineFill;
+    }
+  }
+  else if (diag && !current.dialogIds.empty())
+  {
+    std::lock_guard lock(m_fullscreenOverlayStateSection);
+    AccumulateSyncFillStats(stats);
+    ++m_fullscreenOverlayWorkerCounters.compNone;
+  }
+}
+
+bool CGUIWindowManager::HasFullscreenOverlayWorkerActivity(
+    const FullscreenOverlayWorkerCounters& counters)
+{
+  return counters.prep || counters.promo || counters.stale || counters.fenceNR ||
+         counters.fenceWait || counters.pendSkip ||
+         counters.wdRetry || counters.wdDemote || counters.busySkip || counters.stall ||
+         counters.relReq || counters.inlineFill || counters.excl || counters.compNone ||
+         counters.syncComposites || counters.syncFills || counters.syncCreates ||
+         counters.syncReleases || counters.syncDeclines || counters.contentSamples ||
+         counters.gpuSamples || counters.syncLastReason;
+}
+
+void CGUIWindowManager::AccumulateSyncFillStats(const FullscreenOverlayFillStats& stats) const
+{
+  auto& counters = m_fullscreenOverlayWorkerCounters;
+  counters.syncComposites += stats.composites;
+  counters.syncFills += stats.fills;
+  counters.syncCreates += stats.creates;
+  counters.syncReleases += stats.releases;
+  counters.syncDeclines += stats.declines;
+  counters.fillSig += stats.fillSig;
+  counters.fillAnim += stats.fillAnim;
+  counters.fillDirty += stats.fillDirty;
+  counters.fillInterval += stats.fillInterval;
+  counters.fillSuppressed += stats.fillSuppressed;
+  counters.staleFocus += stats.staleFocus;
+  if (stats.lastReason)
+    counters.syncLastReason = stats.lastReason;
+}
+
+bool CGUIWindowManager::WaitPreparedFullscreenOverlayFence(CRenderSystemBase* renderSystem) const
+{
+  if (renderSystem->WaitGuiRenderFence(m_preparedFullscreenOverlayFence, true))
+    return true;
+  if (!renderSystem->WaitGuiRenderFenceBounded(m_preparedFullscreenOverlayFence,
+                                               FULLSCREEN_OVERLAY_FENCE_WAIT_BOUND_NS))
+    return false;
+  ++m_fullscreenOverlayWorkerCounters.fenceWait;
+  return true;
+}
+
+CGUIWindowManager::FullscreenOverlayPromoteResult CGUIWindowManager::
+    PromotePreparedFullscreenOverlayRenderTarget(const AsyncFullscreenOverlaySignature& current) const
+{
+  auto* renderSystem = CServiceBroker::GetRenderSystem();
+  std::lock_guard lock(m_fullscreenOverlayStateSection);
+  auto& counters = m_fullscreenOverlayWorkerCounters;
+
+  if (m_fullscreenOverlayRenderThreadDisabled.load(std::memory_order_relaxed))
+    return FullscreenOverlayPromoteResult::NONE;
+
+  if (current.dialogIds.empty())
+  {
+    m_displayedFullscreenOverlayRenderTargetIndex = -1;
+    return FullscreenOverlayPromoteResult::NONE;
+  }
+
+  for (int id : current.dialogIds)
+  {
+    if (!IsWorkerEligibleAsyncFullscreenOverlayDialog(id))
+    {
+      m_displayedFullscreenOverlayRenderTargetIndex = -1;
+      return FullscreenOverlayPromoteResult::NONE;
+    }
+  }
+
+  if (m_preparedFullscreenOverlayRenderTargetIndex >= 0 && renderSystem &&
+      !current.dialogIds.empty())
+  {
+    if (!(m_preparedFullscreenOverlaySignature == current))
+    {
+      ++counters.stale;
+      if (m_preparedFullscreenOverlayFence)
+      {
+        renderSystem->DeleteGuiRenderFence(m_preparedFullscreenOverlayFence);
+        m_preparedFullscreenOverlayFence = nullptr;
+      }
+      m_preparedFullscreenOverlayRenderTargetIndex = -1;
+      m_fullscreenOverlayFenceNRStreak = 0;
+      m_fullscreenOverlayRetryAttempted = false;
+    }
+    else if (WaitPreparedFullscreenOverlayFence(renderSystem))
+    {
+      if (m_preparedFullscreenOverlayFence)
+      {
+        renderSystem->DeleteGuiRenderFence(m_preparedFullscreenOverlayFence);
+        m_preparedFullscreenOverlayFence = nullptr;
+      }
+      m_displayedFullscreenOverlayRenderTargetIndex = m_preparedFullscreenOverlayRenderTargetIndex;
+      m_displayedFullscreenOverlaySignature = m_preparedFullscreenOverlaySignature;
+      m_preparedFullscreenOverlayRenderTargetIndex = -1;
+      m_fullscreenOverlayFenceNRStreak = 0;
+      m_fullscreenOverlayRetryAttempted = false;
+      ++counters.promo;
+      auto* self = const_cast<CGUIWindowManager*>(this);
+      const auto promoteSettingsComponent = CServiceBroker::GetSettingsComponent();
+      const auto promoteAdvancedSettings =
+          promoteSettingsComponent ? promoteSettingsComponent->GetAdvancedSettings() : nullptr;
+      if (promoteAdvancedSettings && promoteAdvancedSettings->m_guiBufferAgePartialRedraw >= 1)
+      {
+        std::vector<CRect> regions;
+        for (const auto& window : m_activeDialogs)
+        {
+          if (!window->IsDialogRunning())
+            continue;
+          if (!IsAsyncFullscreenOverlayDialog(window->GetID() & WINDOW_ID_MASK))
+            continue;
+          const CRect region = WindowDrawnBounds(*window);
+          if (!region.IsEmpty())
+            regions.push_back(region);
+        }
+        if (regions.empty() && m_lastPromotedRegions.empty())
+          self->MarkDirty();
+        else
+        {
+          for (const auto& region : regions)
+            self->MarkDirtyRegionOnly(region);
+          for (const auto& region : m_lastPromotedRegions)
+            self->MarkDirtyRegionOnly(region);
+        }
+        self->m_lastPromotedRegions = std::move(regions);
+      }
+      else
+      {
+        self->MarkDirty();
+      }
+      return FullscreenOverlayPromoteResult::PROMOTED;
+    }
+    else
+    {
+      ++counters.fenceNR;
+      if (m_fullscreenOverlayFenceNRIndex != m_preparedFullscreenOverlayRenderTargetIndex ||
+          m_fullscreenOverlayFenceNRPublishTime != m_preparedFullscreenOverlayPublishTime)
+      {
+        m_fullscreenOverlayFenceNRIndex = m_preparedFullscreenOverlayRenderTargetIndex;
+        m_fullscreenOverlayFenceNRPublishTime = m_preparedFullscreenOverlayPublishTime;
+        m_fullscreenOverlayFenceNRStreak = 0;
+      }
+      ++m_fullscreenOverlayFenceNRStreak;
+      if (m_fullscreenOverlayFenceNRStreak > counters.fenceNRMax)
+        counters.fenceNRMax = m_fullscreenOverlayFenceNRStreak;
+      const bool aged = (std::chrono::steady_clock::now() - m_preparedFullscreenOverlayPublishTime) >
+                        FULLSCREEN_OVERLAY_FENCE_AGE_LIMIT;
+      if (aged || m_fullscreenOverlayFenceNRStreak >= FULLSCREEN_OVERLAY_FENCE_NR_LIMIT)
+      {
+        if (!m_fullscreenOverlayRetryAttempted)
+        {
+          m_fullscreenOverlayRetryAttempted = true;
+          m_fullscreenOverlayRetryRequested = true;
+          m_preparedFullscreenOverlayPublishTime = std::chrono::steady_clock::now();
+          m_fullscreenOverlayFenceNRStreak = 0;
+          ++counters.wdRetry;
+          if (m_fullscreenOverlayRenderThread)
+            m_fullscreenOverlayRenderThread->Wake();
+        }
+        else
+        {
+          ++counters.wdDemote;
+          m_fullscreenOverlayRenderThreadDisabled.store(true, std::memory_order_relaxed);
+          if (m_preparedFullscreenOverlayFence)
+          {
+            renderSystem->DeleteGuiRenderFence(m_preparedFullscreenOverlayFence);
+            m_preparedFullscreenOverlayFence = nullptr;
+          }
+          m_preparedFullscreenOverlayRenderTargetIndex = -1;
+          m_displayedFullscreenOverlayRenderTargetIndex = -1;
+          m_fullscreenOverlayReleaseRequested = true;
+          if (m_fullscreenOverlayRenderThread)
+            m_fullscreenOverlayRenderThread->Wake();
+          logM(LOGERROR,
+               "async fullscreen OSD worker: fence never signaled, demoted to sync fallback");
+          const auto demoteSettingsComponent = CServiceBroker::GetSettingsComponent();
+          const auto demoteAdvancedSettings =
+              demoteSettingsComponent ? demoteSettingsComponent->GetAdvancedSettings() : nullptr;
+          if (demoteAdvancedSettings &&
+              demoteAdvancedSettings->m_guiBufferAgePartialRedraw >= 1)
+            const_cast<CGUIWindowManager*>(this)->MarkDirty();
+        }
+      }
+    }
+  }
+
+  if (m_displayedFullscreenOverlayRenderTargetIndex >= 0 && !current.dialogIds.empty() &&
+      m_displayedFullscreenOverlaySignature == current)
+    return FullscreenOverlayPromoteResult::KEEP_DISPLAYED;
+
+  return FullscreenOverlayPromoteResult::NONE;
+}
+
+CGUIWindowManager::AsyncFullscreenOverlaySignature CGUIWindowManager::
+    BuildAsyncFullscreenOverlaySignature() const
+{
+  AsyncFullscreenOverlaySignature signature;
+
+  CGUIWindow* pWindow = GetWindow(GetActiveWindow());
+  if (!pWindow || ((pWindow->GetID() & WINDOW_ID_MASK) != WINDOW_FULLSCREEN_VIDEO))
+    return signature;
+
+  auto& gfx = CServiceBroker::GetWinSystem()->GetGfxContext();
+  if (gfx.GetStereoMode() != RENDER_STEREO_MODE_OFF)
+    return signature;
+  signature.activeWindowID = pWindow->GetID() & WINDOW_ID_MASK;
+  signature.width = gfx.GetWidth();
+  signature.height = gfx.GetHeight();
+  auto* renderSystem = CServiceBroker::GetRenderSystem();
+  signature.shaderEpoch = renderSystem ? renderSystem->GetGuiShaderEpoch() : 0;
+
+  auto renderList = m_activeDialogs;
+  stable_sort(renderList.begin(), renderList.end(), RenderOrderSortFunction);
+  bool haveBand = false;
+  int whitelistMin = 0;
+  int whitelistMax = 0;
+  for (const auto& window : renderList)
+  {
+    if (!window->IsDialogRunning())
+      continue;
+    if (!IsAsyncFullscreenOverlayDialog(window->GetID() & WINDOW_ID_MASK))
+      continue;
+    signature.dialogIds.push_back(window->GetID() & WINDOW_ID_MASK);
+    signature.focusIds.push_back(window->GetFocusedControlID());
+    const int order = window->GetRenderOrder();
+    if (!haveBand)
+    {
+      whitelistMin = order;
+      haveBand = true;
+    }
+    whitelistMax = order;
+  }
+  bool interleaved = false;
+  for (const auto& window : renderList)
+  {
+    if (!window->IsDialogRunning())
+      continue;
+    if (IsAsyncFullscreenOverlayDialog(window->GetID() & WINDOW_ID_MASK))
+      continue;
+    const int order = window->GetRenderOrder();
+    if (haveBand && order >= whitelistMin && order <= whitelistMax)
+    {
+      interleaved = true;
+      break;
+    }
+  }
+  if (interleaved)
+  {
+    const auto settingsComponent = CServiceBroker::GetSettingsComponent();
+    const auto advancedSettings =
+        settingsComponent ? settingsComponent->GetAdvancedSettings() : nullptr;
+    signature.dialogIds.clear();
+    signature.focusIds.clear();
+    if (advancedSettings && advancedSettings->m_guiOsdGuestComposite)
+    {
+      for (const auto& window : renderList)
+      {
+        if (!window->IsDialogRunning())
+          continue;
+        const int id = window->GetID() & WINDOW_ID_MASK;
+        const int order = window->GetRenderOrder();
+        if (IsAsyncFullscreenOverlayDialog(id) ||
+            (order >= whitelistMin && order <= whitelistMax))
+        {
+          signature.dialogIds.push_back(id);
+          signature.focusIds.push_back(window->GetFocusedControlID());
+        }
+      }
+    }
+  }
+  return signature;
+}
+
+const CGUIRenderTargetFBO* CGUIWindowManager::GetFullscreenOverlayCompositeTarget() const
+{
+  const auto settingsComponent = CServiceBroker::GetSettingsComponent();
+  const auto advancedSettings = settingsComponent ? settingsComponent->GetAdvancedSettings() : nullptr;
+  const int mode = advancedSettings ? advancedSettings->m_videoAsyncFullscreenOSD : 0;
+  if (mode == 1)
+  {
+    if (m_fullscreenOverlayComposite && m_fullscreenOverlayRenderTarget)
+      return m_fullscreenOverlayRenderTarget.get();
+    return nullptr;
+  }
+  if (mode == 2)
+  {
+    std::lock_guard lock(m_fullscreenOverlayStateSection);
+    if (m_fullscreenOverlayCompositeSource == FullscreenOverlayCompositeSource::SYNC_TARGET &&
+        m_fullscreenOverlayRenderTarget)
+      return m_fullscreenOverlayRenderTarget.get();
+    if (m_fullscreenOverlayCompositeSource == FullscreenOverlayCompositeSource::WORKER_FBO &&
+        m_displayedFullscreenOverlayRenderTargetIndex >= 0)
+      return m_fullscreenOverlayRenderTargets[m_displayedFullscreenOverlayRenderTargetIndex].get();
+  }
+  return nullptr;
+}
+
+void CGUIWindowManager::QuiesceFullscreenOverlayWorker()
+{
+  if (!m_fullscreenOverlayRenderThread)
+    return;
+  if (m_fullscreenOverlayRenderThreadDisabled.load(std::memory_order_relaxed))
+    return;
+  if (!m_fullscreenOverlayRenderThread->IsBusy())
+    return;
+
+  if (m_fullscreenOverlayDiagEnabled.load(std::memory_order_relaxed))
+  {
+    std::lock_guard lock(m_fullscreenOverlayStateSection);
+    ++m_fullscreenOverlayWorkerCounters.stall;
+  }
+  CSingleExit exitGfx(CServiceBroker::GetWinSystem()->GetGfxContext());
+  const auto deadline = std::chrono::steady_clock::now() + FULLSCREEN_OVERLAY_SOFT_QUIESCE;
+  while (m_fullscreenOverlayRenderThread->IsBusy())
+  {
+    if (std::chrono::steady_clock::now() >= deadline)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+}
+
+bool CGUIWindowManager::BeginRenderExclusion()
+{
+  if (!m_fullscreenOverlayRenderThread)
+    return true;
+
+  {
+    CSingleExit exitGfx(CServiceBroker::GetWinSystem()->GetGfxContext());
+    if (m_guiRenderExclusion.try_lock())
+    {
+      m_renderExclusionHeld = true;
+      return true;
+    }
+    if (m_fullscreenOverlayDiagEnabled.load(std::memory_order_relaxed))
+    {
+      std::lock_guard lock(m_fullscreenOverlayStateSection);
+      ++m_fullscreenOverlayWorkerCounters.excl;
+    }
+    const auto deadline = std::chrono::steady_clock::now() + FULLSCREEN_OVERLAY_QUIESCE_TIMEOUT;
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+      if (m_guiRenderExclusion.try_lock())
+      {
+        m_renderExclusionHeld = true;
+        return true;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  }
+
+  const bool firstFailure =
+      !m_fullscreenOverlayRenderThreadDisabled.exchange(true, std::memory_order_relaxed);
+  {
+    std::lock_guard lock(m_fullscreenOverlayStateSection);
+    m_preparedFullscreenOverlayRenderTargetIndex = -1;
+    m_displayedFullscreenOverlayRenderTargetIndex = -1;
+    m_fullscreenOverlayReleaseRequested = true;
+    ++m_fullscreenOverlayWorkerCounters.wdDemote;
+  }
+  m_fullscreenOverlayRenderThread->Wake();
+  if (firstFailure)
+    logM(LOGERROR,
+         "async fullscreen OSD worker held the render exclusion beyond its budget, disabled");
+  const auto demoteSettingsComponent = CServiceBroker::GetSettingsComponent();
+  const auto demoteAdvancedSettings =
+      demoteSettingsComponent ? demoteSettingsComponent->GetAdvancedSettings() : nullptr;
+  if (demoteAdvancedSettings && demoteAdvancedSettings->m_guiBufferAgePartialRedraw >= 1)
+    MarkDirty();
+  return false;
+}
+
+void CGUIWindowManager::EndRenderExclusion()
+{
+  if (!m_renderExclusionHeld)
+    return;
+  m_renderExclusionHeld = false;
+  m_guiRenderExclusion.unlock();
+}
+
+void CGUIWindowManager::ScheduleAsyncFullscreenOverlayRender()
+{
+  if (m_fullscreenOverlayRenderThreadDisabled.load(std::memory_order_relaxed))
+    return;
+
+  const auto now = std::chrono::steady_clock::now();
+  AsyncFullscreenOverlaySignature signature = BuildAsyncFullscreenOverlaySignature();
+  if (signature.activeWindowID == 0 || signature.dialogIds.empty())
+  {
+    bool wake = false;
+    {
+      std::lock_guard lock(m_fullscreenOverlayStateSection);
+      bool haveTargets = false;
+      for (const auto& target : m_fullscreenOverlayRenderTargets)
+      {
+        if (target)
+        {
+          haveTargets = true;
+          break;
+        }
+      }
+      if (haveTargets && !m_fullscreenOverlayReleaseRequested &&
+          (now - m_fullscreenOverlayWorkerLastActivity) >= FULLSCREEN_OVERLAY_RELEASE_TIMEOUT)
+      {
+        m_fullscreenOverlayReleaseRequested = true;
+        ++m_fullscreenOverlayWorkerCounters.relReq;
+        wake = true;
+      }
+    }
+    if (wake && m_fullscreenOverlayRenderThread)
+      m_fullscreenOverlayRenderThread->Wake();
+    return;
+  }
+
+  m_fullscreenOverlayWorkerLastActivity = now;
+
+  for (int id : signature.dialogIds)
+  {
+    if (!IsWorkerEligibleAsyncFullscreenOverlayDialog(id))
+      return;
+  }
+
+  std::vector<std::shared_ptr<CGUIWindow>> workerList;
+  bool animatingOrDirty = false;
+  bool animTransition = false;
+  auto renderList = m_activeDialogs;
+  stable_sort(renderList.begin(), renderList.end(), RenderOrderSortFunction);
+  for (const auto& window : renderList)
+  {
+    if (!window->IsDialogRunning())
+      continue;
+    if (!IsAsyncFullscreenOverlayDialog(window->GetID() & WINDOW_ID_MASK))
+      continue;
+    workerList.push_back(window);
+    if (window->IsControlDirty())
+      animatingOrDirty = true;
+    if (window->IsAnimating(ANIM_TYPE_WINDOW_OPEN) || window->IsAnimating(ANIM_TYPE_WINDOW_CLOSE) ||
+        window->IsAnimating(ANIM_TYPE_VISIBLE) || window->IsAnimating(ANIM_TYPE_HIDDEN))
+    {
+      animatingOrDirty = true;
+      animTransition = true;
+    }
+    if (window->IsAnimating(ANIM_TYPE_FOCUS) || window->IsAnimating(ANIM_TYPE_UNFOCUS) ||
+        window->IsAnimating(ANIM_TYPE_CONDITIONAL))
+      animatingOrDirty = true;
+  }
+  if (workerList.empty() || animTransition)
+    return;
+
+  const bool signatureChanged = !(signature == m_pendingFullscreenOverlaySignature);
+  const bool refresh = (now - m_fullscreenOverlayLastQueueTime) >= FULLSCREEN_OVERLAY_CACHE_INTERVAL;
+  if (!signatureChanged && !animatingOrDirty && !refresh)
+    return;
+
+  if (m_fullscreenOverlayRenderThread && m_fullscreenOverlayRenderThread->IsBusy())
+  {
+    ++m_fullscreenOverlayWorkerCounters.busySkip;
+    return;
+  }
+
+  {
+    std::lock_guard lock(m_fullscreenOverlayStateSection);
+    if (m_preparedFullscreenOverlayRenderTargetIndex >= 0)
+    {
+      ++m_fullscreenOverlayWorkerCounters.pendSkip;
+      return;
+    }
+  }
+
+  if (!m_fullscreenOverlayRenderThread)
+  {
+    m_fullscreenOverlayRenderThread = std::make_unique<CFullscreenOverlayRenderThread>(*this);
+    m_fullscreenOverlayRenderThread->Create();
+  }
+
+  int targetIndex = 0;
+  {
+    std::lock_guard lock(m_fullscreenOverlayStateSection);
+    targetIndex = m_displayedFullscreenOverlayRenderTargetIndex == 0 ? 1 : 0;
+    m_fullscreenOverlayReleaseRequested = false;
+  }
+  m_pendingFullscreenOverlaySignature = signature;
+  m_fullscreenOverlayLastQueueTime = now;
+  m_fullscreenOverlayRenderThread->QueueRender(std::move(workerList), std::move(signature),
+                                               targetIndex);
+}
+
+void CGUIWindowManager::StopFullscreenOverlayRenderThread()
+{
+  if (!m_fullscreenOverlayRenderThread)
+    return;
+  m_fullscreenOverlayRenderThread->StopThread(false);
+  m_fullscreenOverlayRenderThread->Wake();
+  {
+    CSingleExit exitGfx(CServiceBroker::GetWinSystem()->GetGfxContext());
+    m_fullscreenOverlayRenderThread->StopThread(true);
+  }
+  m_fullscreenOverlayRenderThread.reset();
+
+  std::lock_guard lock(m_fullscreenOverlayStateSection);
+  if (m_preparedFullscreenOverlayFence)
+  {
+    auto* renderSystem = CServiceBroker::GetRenderSystem();
+    if (renderSystem)
+      renderSystem->DeleteGuiRenderFence(m_preparedFullscreenOverlayFence);
+    m_preparedFullscreenOverlayFence = nullptr;
+  }
+  m_preparedFullscreenOverlayRenderTargetIndex = -1;
+  m_displayedFullscreenOverlayRenderTargetIndex = -1;
+}
+
 void CGUIWindowManager::RenderPass() const
 {
+  const auto settingsComponent = CServiceBroker::GetSettingsComponent();
+  const auto advancedSettings = settingsComponent ? settingsComponent->GetAdvancedSettings() : nullptr;
+  const bool frontToBackRendering = advancedSettings && advancedSettings->m_guiFrontToBackRendering;
+
+  if (frontToBackRendering)
+    RenderPassDual();
+  else
+    RenderPassSingle();
+}
+
+void CGUIWindowManager::CompositeFullscreenOverlay(CRenderSystemBase* renderSystem,
+                                                   const CGUIRenderTargetFBO& target) const
+{
+  if (m_fullscreenOverlayDiagEnabled.load(std::memory_order_relaxed) &&
+      !m_fullscreenOverlayContentSampled)
+  {
+    m_fullscreenOverlayContentSampled = true;
+    const double coverage =
+        ContentCoveragePct(target.GetContentRects(), target.GetWidth(), target.GetHeight());
+    std::lock_guard contentLock(m_fullscreenOverlayStateSection);
+    ++m_fullscreenOverlayWorkerCounters.contentSamples;
+    m_fullscreenOverlayWorkerCounters.contentPctTotal += coverage;
+    if (coverage > m_fullscreenOverlayWorkerCounters.contentPctMax)
+      m_fullscreenOverlayWorkerCounters.contentPctMax = coverage;
+  }
+  ++m_osdTraceBlitCount;
+  renderSystem->RenderGuiRenderTarget(target);
+}
+
+void CGUIWindowManager::RenderPassSingle() const
+{
+  m_osdTracePass = 1;
+  m_osdTraceBlitIndex = -1;
+  m_osdTraceLiveAfterBlit = 0;
+  CServiceBroker::GetWinSystem()->GetGfxContext().SetRenderOrder(RENDER_ORDER_ALL_BACK_TO_FRONT);
   CGUIWindow* pWindow = GetWindow(GetActiveWindow());
   if (pWindow)
   {
@@ -1280,14 +2955,144 @@ void CGUIWindowManager::RenderPass() const
     pWindow->DoRender();
   }
 
-  // we render the dialogs based on their render order.
   auto renderList = m_activeDialogs;
   stable_sort(renderList.begin(), renderList.end(), RenderOrderSortFunction);
 
+  const CGUIRenderTargetFBO* compositeTarget = GetFullscreenOverlayCompositeTarget();
+  if (compositeTarget)
+  {
+    auto* renderSystem = CServiceBroker::GetRenderSystem();
+    const auto isComposited = [this](int id) {
+      if (!m_fullscreenOverlayCompositeIds.empty())
+        return std::find(m_fullscreenOverlayCompositeIds.begin(),
+                         m_fullscreenOverlayCompositeIds.end(),
+                         id) != m_fullscreenOverlayCompositeIds.end();
+      return IsAsyncFullscreenOverlayDialog(id);
+    };
+    bool composited = false;
+    int traceIndex = 0;
+    for (const auto& window : renderList)
+    {
+      if (!window->IsDialogRunning())
+        continue;
+      if (isComposited(window->GetID() & WINDOW_ID_MASK))
+      {
+        if (!composited && renderSystem)
+        {
+          m_osdTraceBlitIndex = traceIndex;
+          CompositeFullscreenOverlay(renderSystem, *compositeTarget);
+          composited = true;
+        }
+      }
+      else
+      {
+        window->DoRender();
+        if (composited)
+          ++m_osdTraceLiveAfterBlit;
+      }
+      ++traceIndex;
+    }
+    if (!composited && renderSystem)
+    {
+      m_osdTraceBlitIndex = traceIndex;
+      CompositeFullscreenOverlay(renderSystem, *compositeTarget);
+    }
+    return;
+  }
+
+  // we render the dialogs based on their render order.
   for (const auto& window : renderList)
   {
     if (window->IsDialogRunning())
       window->DoRender();
+  }
+}
+
+void CGUIWindowManager::RenderPassDual() const
+{
+  m_osdTracePass = 2;
+  m_osdTraceBlitIndex = -1;
+  m_osdTraceLiveAfterBlit = 0;
+  CGUIWindow* pWindow = GetWindow(GetActiveWindow());
+  if (pWindow)
+    pWindow->ClearBackground();
+
+  const CGUIRenderTargetFBO* compositeTarget = GetFullscreenOverlayCompositeTarget();
+
+  auto renderList = m_activeDialogs;
+  stable_sort(renderList.begin(), renderList.end(), RenderOrderSortFunction);
+
+  // first the opaque pass, rendering from front to back
+  CServiceBroker::GetWinSystem()->GetGfxContext().SetRenderOrder(RENDER_ORDER_FRONT_TO_BACK);
+  if (!compositeTarget)
+  {
+    for (auto it = renderList.rbegin(); it != renderList.rend(); ++it)
+    {
+      if ((*it)->IsDialogRunning())
+        (*it)->DoRender();
+    }
+  }
+
+  if (pWindow)
+    pWindow->DoRender();
+
+  // now we render all elements with transparency back to front
+  CServiceBroker::GetWinSystem()->GetGfxContext().SetRenderOrder(RENDER_ORDER_BACK_TO_FRONT);
+  if (pWindow)
+  {
+    pWindow->DoRender();
+  }
+
+  if (compositeTarget)
+  {
+    auto* renderSystem = CServiceBroker::GetRenderSystem();
+    const auto isComposited = [this](int id) {
+      if (!m_fullscreenOverlayCompositeIds.empty())
+        return std::find(m_fullscreenOverlayCompositeIds.begin(),
+                         m_fullscreenOverlayCompositeIds.end(),
+                         id) != m_fullscreenOverlayCompositeIds.end();
+      return IsAsyncFullscreenOverlayDialog(id);
+    };
+    bool composited = false;
+    int traceIndex = 0;
+    for (const auto& window : renderList)
+    {
+      if (!window->IsDialogRunning())
+        continue;
+      if (isComposited(window->GetID() & WINDOW_ID_MASK))
+      {
+        if (!composited && renderSystem)
+        {
+          m_osdTraceBlitIndex = traceIndex;
+          CompositeFullscreenOverlay(renderSystem, *compositeTarget);
+          composited = true;
+        }
+      }
+      else
+      {
+        auto& gfx = CServiceBroker::GetWinSystem()->GetGfxContext();
+        const RENDER_ORDER renderOrder = gfx.GetRenderOrder();
+        gfx.SetRenderOrder(RENDER_ORDER_ALL_BACK_TO_FRONT);
+        window->DoRender();
+        gfx.SetRenderOrder(renderOrder);
+        if (composited)
+          ++m_osdTraceLiveAfterBlit;
+      }
+      ++traceIndex;
+    }
+    if (!composited && renderSystem)
+    {
+      m_osdTraceBlitIndex = traceIndex;
+      CompositeFullscreenOverlay(renderSystem, *compositeTarget);
+    }
+  }
+  else
+  {
+    for (const auto& window : renderList)
+    {
+      if (window->IsDialogRunning())
+        window->DoRender();
+    }
   }
 }
 
@@ -1309,20 +3114,250 @@ void CGUIWindowManager::RenderEx() const
   */
 }
 
-bool CGUIWindowManager::Render() const {
+bool CGUIWindowManager::Render()
+{
   assert(CServiceBroker::GetAppMessenger()->IsProcessThread());
   CSingleExit lock(CServiceBroker::GetWinSystem()->GetGfxContext());
 
+  const auto settingsComponent = CServiceBroker::GetSettingsComponent();
+  const auto advancedSettings = settingsComponent ? settingsComponent->GetAdvancedSettings() : nullptr;
+
+  const int asyncOverlayMode = advancedSettings ? advancedSettings->m_videoAsyncFullscreenOSD : -1;
+
+  m_osdTraceArmed.store(advancedSettings && advancedSettings->m_guiOsdTrace != 0 &&
+                            CServiceBroker::GetLogging().IsLogLevelLogged(LOGDEBUG) &&
+                            CServiceBroker::GetLogging().CanLogComponent(LOGWINDOWING),
+                        std::memory_order_relaxed);
+  m_osdTraceFill = "n/a";
+  m_osdTraceBlitIndex = -1;
+  m_osdTraceLiveAfterBlit = 0;
+  m_osdTraceBlitCount = 0;
+  m_osdTracePass = 0;
+  m_osdTraceSkinRet = -1;
+
+  m_fullscreenOverlayContentSampled = false;
+  if (asyncOverlayMode != 2)
+    m_fullscreenOverlayDiagEnabled.store(false, std::memory_order_relaxed);
+
+  if (asyncOverlayMode == 1)
+    UpdateFullscreenOverlayRenderTarget();
+  else if (asyncOverlayMode == 2)
+    SelectFullscreenOverlayCompositeSource();
+  else
+  {
+    m_fullscreenOverlayCompositeIds.clear();
+    m_osdTraceReason = "mode0";
+  }
+
+  CRenderSystemBase* renderSystem = CServiceBroker::GetRenderSystem();
+  bool skinHdrWanted = false;
+  if (advancedSettings && advancedSettings->m_guiSkinHdrFbo && renderSystem)
+  {
+    auto& gfx = CServiceBroker::GetWinSystem()->GetGfxContext();
+    if (gfx.GetGuiHdr() != GuiHdr::SDR && gfx.GetStereoMode() == RENDER_STEREO_MODE_OFF)
+    {
+      const CGUIWindow* activeWindow = GetWindow(GetActiveWindow());
+      const int activeId = activeWindow ? (activeWindow->GetID() & WINDOW_ID_MASK) : 0;
+      skinHdrWanted = renderSystem->SupportsGuiRenderTargetConvert() &&
+                      activeId != WINDOW_FULLSCREEN_VIDEO && activeId != WINDOW_FULLSCREEN_GAME &&
+                      activeId != WINDOW_VISUALISATION && activeId != WINDOW_SLIDESHOW &&
+                      activeId != WINDOW_SCREENSAVER;
+    }
+    if (m_skinHdrRenderTarget && gfx.GetGuiHdr() == GuiHdr::SDR)
+    {
+      m_skinHdrRenderTarget.reset();
+      m_skinHdrTargetValid = false;
+    }
+  }
+  else if (m_skinHdrRenderTarget)
+  {
+    m_skinHdrRenderTarget.reset();
+    m_skinHdrTargetValid = false;
+  }
+  if (skinHdrWanted != m_skinHdrEngagedLastFrame)
+  {
+    m_skinHdrEngagedLastFrame = skinHdrWanted;
+    m_skinHdrTargetValid = false;
+    MarkDirty();
+  }
+
+  const bool visualizeDirtyRegions =
+      advancedSettings && advancedSettings->m_guiVisualizeDirtyRegions;
+  const int guiAlgorithmDirtyRegions =
+      advancedSettings ? advancedSettings->m_guiAlgorithmDirtyRegions
+                       : DIRTYREGION_SOLVER_FILL_VIEWPORT_ALWAYS;
+  const int bufferAgeLever =
+      advancedSettings ? advancedSettings->m_guiBufferAgePartialRedraw : 0;
+  const int maxDirtyRegions = advancedSettings ? advancedSettings->m_guiMaxDirtyRegions : 0;
+
+  if (bufferAgeLever >= 1)
+  {
+    const int stereoMode =
+        static_cast<int>(CServiceBroker::GetWinSystem()->GetGfxContext().GetStereoMode());
+    if (stereoMode != m_bufAgeLastStereoMode)
+    {
+      m_bufAgeLastStereoMode = stereoMode;
+      MarkDirty();
+    }
+  }
+
+  int bufferAge = CServiceBroker::GetWinSystem()->GetBufferAge();
+  const int realAge = bufferAge;
+  if (visualizeDirtyRegions)
+    bufferAge = 20;
+  if (bufferAge)
+    m_tracker.CleanMarkedRegions(bufferAge + 1);
+  else
+    m_tracker.CleanMarkedRegions(10);
+
   CDirtyRegionList dirtyRegions = m_tracker.GetDirtyRegions();
+  float frameSnapGrowth = 0.0f;
+  if (!dirtyRegions.empty())
+  {
+    const CRect viewWindow =
+        bufferAgeLever >= 1
+            ? CRect(0, 0, float(CServiceBroker::GetWinSystem()->GetGfxContext().GetWidth()),
+                    float(CServiceBroker::GetWinSystem()->GetGfxContext().GetHeight()))
+            : CServiceBroker::GetWinSystem()->GetGfxContext().GetViewWindow();
+    constexpr float dirtyRegionPadding = 1.0f;
+
+    for (auto& region : dirtyRegions)
+    {
+      region.x1 -= dirtyRegionPadding;
+      region.y1 -= dirtyRegionPadding;
+      region.x2 += dirtyRegionPadding;
+      region.y2 += dirtyRegionPadding;
+      region.Intersect(viewWindow);
+    }
+
+    if (bufferAgeLever >= 1)
+    {
+      for (auto& region : dirtyRegions)
+      {
+        if (region.IsEmpty())
+          continue;
+        frameSnapGrowth -= region.Area();
+        region.x1 = std::floor(region.x1 / BUF_AGE_SNAP_GRID) * BUF_AGE_SNAP_GRID;
+        region.y1 = std::floor(region.y1 / BUF_AGE_SNAP_GRID) * BUF_AGE_SNAP_GRID;
+        region.x2 = std::ceil(region.x2 / BUF_AGE_SNAP_GRID) * BUF_AGE_SNAP_GRID;
+        region.y2 = std::ceil(region.y2 / BUF_AGE_SNAP_GRID) * BUF_AGE_SNAP_GRID;
+        region.Intersect(viewWindow);
+        frameSnapGrowth += region.Area();
+      }
+    }
+  }
 
   bool hasRendered = false;
+  bool renderedViaRegions = false;
+  uint32_t frameRects = 0;
+  uint32_t frameClip0 = 0;
+  float frameDirtyPx = 0.0f;
+  bool frameCapped = false;
+  const bool bufAgeDiag = CServiceBroker::GetLogging().IsLogLevelLogged(LOGDEBUG) &&
+                          CServiceBroker::GetLogging().CanLogComponent(LOGWINDOWING);
+  uint32_t frameMarkedRects = 0;
+  float frameMarkedPct = 0.0f;
+  if (bufAgeDiag && bufferAgeLever >= 1)
+  {
+    const CDirtyRegionList& markedRegions = m_tracker.GetMarkedRegions();
+    const float markedW = static_cast<float>(CServiceBroker::GetWinSystem()->GetGfxContext().GetWidth());
+    const float markedH = static_cast<float>(CServiceBroker::GetWinSystem()->GetGfxContext().GetHeight());
+    uint64_t rowMask[36] = {};
+    for (const auto& r : markedRegions)
+    {
+      if (r.IsEmpty() || markedW <= 0.0f || markedH <= 0.0f)
+        continue;
+      if (r.x2 <= 0.0f || r.y2 <= 0.0f || r.x1 >= markedW || r.y1 >= markedH)
+        continue;
+      ++frameMarkedRects;
+      const int c0 = std::clamp(static_cast<int>(r.x1 * 64.0f / markedW), 0, 63);
+      const int c1 = std::clamp(static_cast<int>((r.x2 - 1.0f) * 64.0f / markedW), c0, 63);
+      const int r0 = std::clamp(static_cast<int>(r.y1 * 36.0f / markedH), 0, 35);
+      const int r1 = std::clamp(static_cast<int>((r.y2 - 1.0f) * 36.0f / markedH), r0, 35);
+      const uint64_t colMask = (c1 - c0 == 63) ? ~uint64_t(0)
+                                               : (((uint64_t(1) << (c1 - c0 + 1)) - 1) << c0);
+      for (int row = r0; row <= r1; ++row)
+        rowMask[row] |= colMask;
+    }
+    int covered = 0;
+    for (uint64_t m : rowMask)
+      covered += __builtin_popcountll(m);
+    frameMarkedPct = covered * 100.0f / (64.0f * 36.0f);
+  }
+
+  const auto renderDirtyRegions = [&]() {
+    bool rendered = false;
+    CDirtyRegionList damageRegions;
+    damageRegions.reserve(dirtyRegions.size());
+    for (const auto& i : dirtyRegions)
+    {
+      if (i.IsEmpty())
+        ++frameClip0;
+      else
+        damageRegions.push_back(i);
+    }
+    if (maxDirtyRegions > 0 && damageRegions.size() > static_cast<size_t>(maxDirtyRegions))
+    {
+      RenderPass();
+      frameRects = static_cast<uint32_t>(damageRegions.size());
+      frameCapped = true;
+      renderedViaRegions = false;
+      return true;
+    }
+    for (const auto& i : damageRegions)
+    {
+      if (!rendered)
+        CServiceBroker::GetWinSystem()->SetDirtyRegions(damageRegions);
+
+      if (bufAgeDiag)
+        frameDirtyPx += i.Area();
+
+      CServiceBroker::GetWinSystem()->GetGfxContext().SetScissors(i);
+      RenderPass();
+      rendered = true;
+    }
+    CServiceBroker::GetWinSystem()->GetGfxContext().ResetScissors();
+
+    frameRects = static_cast<uint32_t>(damageRegions.size());
+    renderedViaRegions = rendered;
+    return rendered;
+  };
+
+  bool skinHdrBegun = false;
+  if (skinHdrWanted && renderSystem)
+  {
+    auto& gfx = CServiceBroker::GetWinSystem()->GetGfxContext();
+    const unsigned int fboWidth = static_cast<unsigned int>(gfx.GetWidth());
+    const unsigned int fboHeight = static_cast<unsigned int>(gfx.GetHeight());
+    if (!m_skinHdrRenderTarget || m_skinHdrRenderTarget->GetWidth() != fboWidth ||
+        m_skinHdrRenderTarget->GetHeight() != fboHeight)
+    {
+      m_skinHdrRenderTarget = renderSystem->CreateGuiRenderTarget(fboWidth, fboHeight);
+      m_skinHdrTargetValid = false;
+    }
+    if (m_skinHdrRenderTarget)
+      skinHdrBegun =
+          renderSystem->BeginGuiRenderTargetPersistent(*m_skinHdrRenderTarget, !m_skinHdrTargetValid);
+  }
+  const bool skinHdrForceFull = skinHdrBegun && !m_skinHdrTargetValid;
+
+  if (skinHdrBegun != m_skinHdrEngagedLogged)
+  {
+    m_skinHdrEngagedLogged = skinHdrBegun;
+    logM(LOGINFO, "skin HDR composite target {} ({}x{})", skinHdrBegun ? "engaged" : "released",
+         m_skinHdrRenderTarget ? m_skinHdrRenderTarget->GetWidth() : 0,
+         m_skinHdrRenderTarget ? m_skinHdrRenderTarget->GetHeight() : 0);
+  }
+
   // If we visualize the regions we will always render the entire viewport
-  if (CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_guiVisualizeDirtyRegions || CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_guiAlgorithmDirtyRegions == DIRTYREGION_SOLVER_FILL_VIEWPORT_ALWAYS)
+  // If the buffer age is zero, the current content is undefined and has to be rendered
+  if (visualizeDirtyRegions || bufferAge == 0 || skinHdrForceFull ||
+      guiAlgorithmDirtyRegions == DIRTYREGION_SOLVER_FILL_VIEWPORT_ALWAYS)
   {
     RenderPass();
     hasRendered = true;
   }
-  else if (CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_guiAlgorithmDirtyRegions == DIRTYREGION_SOLVER_FILL_VIEWPORT_ON_CHANGE)
+  else if (guiAlgorithmDirtyRegions == DIRTYREGION_SOLVER_FILL_VIEWPORT_ON_CHANGE)
   {
     if (!dirtyRegions.empty())
     {
@@ -1332,19 +3367,310 @@ bool CGUIWindowManager::Render() const {
   }
   else
   {
-    for (const auto& i : dirtyRegions)
-    {
-      if (i.IsEmpty())
-        continue;
+    hasRendered = renderDirtyRegions();
 
-      CServiceBroker::GetWinSystem()->GetGfxContext().SetScissors(i);
+    if (!hasRendered && !dirtyRegions.empty())
+    {
       RenderPass();
       hasRendered = true;
     }
-    CServiceBroker::GetWinSystem()->GetGfxContext().ResetScissors();
   }
 
-  if (CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_guiVisualizeDirtyRegions)
+  if (skinHdrBegun)
+  {
+    renderSystem->EndGuiRenderTarget(*m_skinHdrRenderTarget);
+    if (hasRendered)
+    {
+      m_skinHdrTargetValid = true;
+      std::vector<CRect> compositeRects;
+      if (renderedViaRegions)
+      {
+        compositeRects.reserve(dirtyRegions.size());
+        for (const auto& region : dirtyRegions)
+        {
+          if (!region.IsEmpty())
+            compositeRects.push_back(region);
+        }
+      }
+      m_skinHdrRenderTarget->SetContentRects(DisjointContentRects(std::move(compositeRects)));
+      CServiceBroker::GetWinSystem()->GetGfxContext().ResetScissors();
+      m_osdTraceSkinRet = renderSystem->RenderGuiRenderTarget(*m_skinHdrRenderTarget, true) ? 1 : 0;
+      std::string quadStr;
+      if (bufAgeDiag)
+      {
+        for (const auto& quad : m_skinHdrRenderTarget->GetContentRects())
+          quadStr += StringUtils::Format("{:.0f},{:.0f}-{:.0f},{:.0f} ", quad.x1, quad.y1, quad.x2,
+                                         quad.y2);
+      }
+      auto& logGfx = CServiceBroker::GetWinSystem()->GetGfxContext();
+      LOG_THROTTLE_PERIODIC(LOGDEBUG, LOGWINDOWING, 1000,
+                            "skinfbo: full={} rects={} forceFull={} age={} fbo={}x{} gui={}x{} "
+                            "q=[{}]",
+                            hasRendered && !renderedViaRegions ? 1 : 0, frameRects,
+                            skinHdrForceFull ? 1 : 0, realAge, m_skinHdrRenderTarget->GetWidth(),
+                            m_skinHdrRenderTarget->GetHeight(), logGfx.GetWidth(),
+                            logGfx.GetHeight(), quadStr);
+    }
+    else
+    {
+      LOG_THROTTLE_PERIODIC(LOGDEBUG, LOGWINDOWING, 1000,
+                            "skinfbo: composite skipped, nothing rendered this frame");
+    }
+  }
+
+  if (bufAgeDiag)
+  {
+    int animOpen = 0;
+    int animClose = 0;
+    std::string animIds;
+    CGUIWindow* animActiveWindow = GetWindow(GetActiveWindow());
+    if (animActiveWindow &&
+        ((animActiveWindow->GetID() & WINDOW_ID_MASK) == WINDOW_FULLSCREEN_VIDEO))
+    {
+      for (const auto& window : m_activeDialogs)
+      {
+        if (!window->IsDialogRunning())
+          continue;
+        const bool opening = window->IsAnimating(ANIM_TYPE_WINDOW_OPEN);
+        const bool closing = window->IsAnimating(ANIM_TYPE_WINDOW_CLOSE);
+        if (!opening && !closing)
+          continue;
+        if (opening)
+          ++animOpen;
+        if (closing)
+          ++animClose;
+        if (!animIds.empty())
+          animIds += ',';
+        animIds += std::to_string(window->GetID() & WINDOW_ID_MASK);
+      }
+    }
+    static auto s_animLastFrame = std::chrono::steady_clock::now();
+    static bool s_wasAnimating = false;
+    if (animOpen || animClose)
+    {
+      const auto animNow = std::chrono::steady_clock::now();
+      const auto animGapUs =
+          std::chrono::duration_cast<std::chrono::microseconds>(animNow - s_animLastFrame).count();
+      int animSrc = 0;
+      {
+        std::lock_guard animLock(m_fullscreenOverlayStateSection);
+        animSrc = static_cast<int>(m_fullscreenOverlayCompositeSource);
+      }
+      LOG_THROTTLE_PERIODIC(LOGDEBUG, LOGWINDOWING, 1000,
+                    "osdanim: ids={} open={} close={} gapMs={:.1f} full={} partial={} rects={} "
+                    "dirtyPx={:.0f} src={}",
+                    animIds, animOpen, animClose, s_wasAnimating ? animGapUs / 1000.0 : 0.0,
+                    hasRendered && !renderedViaRegions ? 1 : 0, renderedViaRegions ? 1 : 0,
+                    frameRects, frameDirtyPx, animSrc);
+      s_animLastFrame = animNow;
+      s_wasAnimating = true;
+    }
+    else
+      s_wasAnimating = false;
+  }
+
+  if (m_osdTraceArmed.load(std::memory_order_relaxed))
+  {
+    ++m_osdTraceFrame;
+    CGUIWindow* traceActive = GetWindow(GetActiveWindow());
+    const int traceActiveId = traceActive ? (traceActive->GetID() & WINDOW_ID_MASK) : 0;
+    const char* rendKind = renderedViaRegions ? "partial" : (hasRendered ? "full" : "none");
+
+    if (traceActiveId == WINDOW_FULLSCREEN_VIDEO)
+    {
+      int traceSrc = 0;
+      {
+        std::lock_guard lock(m_fullscreenOverlayStateSection);
+        traceSrc = static_cast<int>(m_fullscreenOverlayCompositeSource);
+      }
+      const CGUIRenderTargetFBO* traceTarget = GetFullscreenOverlayCompositeTarget();
+      std::string members;
+      for (int id : m_fullscreenOverlayCompositeIds)
+        members += StringUtils::Format("{} ", id);
+      std::string running;
+      std::string focus;
+      std::string regions;
+      std::string focusRegion;
+      for (const auto& window : m_activeDialogs)
+      {
+        if (!window->IsDialogRunning())
+          continue;
+        const int id = window->GetID() & WINDOW_ID_MASK;
+        running += StringUtils::Format("{}:{}:{} ", id, window->GetRenderOrder(),
+                                       FormatAnimFlags(*window));
+        CGUIControl* focused = window->GetFocusedControl();
+        focus += StringUtils::Format("{}:{} ", id, focused ? focused->GetID() : 0);
+        const CRect& windowRegion = window->GetRenderRegion();
+        regions += StringUtils::Format("{}:{:.0f},{:.0f}-{:.0f},{:.0f} ", id, windowRegion.x1,
+                                       windowRegion.y1, windowRegion.x2, windowRegion.y2);
+        if (focused)
+        {
+          const CRect& controlRegion = focused->GetRenderRegion();
+          focusRegion += StringUtils::Format("{}:{}:{:.0f},{:.0f}-{:.0f},{:.0f} ", id,
+                                             focused->GetID(), controlRegion.x1, controlRegion.y1,
+                                             controlRegion.x2, controlRegion.y2);
+        }
+      }
+      std::string coverage = "null";
+      if (traceTarget)
+        coverage = StringUtils::Format("[{}]", FormatRectList(traceTarget->GetContentRects()));
+      std::string damage;
+      for (const auto& region : dirtyRegions)
+      {
+        if (!region.IsEmpty())
+          damage += StringUtils::Format("{:.0f},{:.0f}-{:.0f},{:.0f} ", region.x1, region.y1,
+                                        region.x2, region.y2);
+      }
+      bool overlayAnimated = false;
+      uint64_t overlaySig = 0;
+      const auto& appComponents = CServiceBroker::GetAppComponents();
+      const auto tracePlayer = appComponents.GetComponent<CApplicationPlayer>();
+      if (tracePlayer)
+        overlaySig = tracePlayer->GetVisibleOverlaySetSignature(overlayAnimated);
+      logComponentM(LOGDEBUG, LOGWINDOWING,
+                    "osdtrace: f={} pass={} src={} prev={} why={} fill={} blit={}+{} blits={} "
+                    "mem=[{}] run=[{}] focus=[{}] cov={} rend={} rects={} dirtyPx={:.0f} clip0={} "
+                    "capped={} age={} ovl={}:{}",
+                    m_osdTraceFrame, m_osdTracePass, traceSrc, m_osdTracePrevSource,
+                    m_osdTraceReason, m_osdTraceFill, m_osdTraceBlitIndex, m_osdTraceLiveAfterBlit,
+                    m_osdTraceBlitCount, members, running, focus, coverage, rendKind, frameRects,
+                    frameDirtyPx, frameClip0, frameCapped ? 1 : 0, realAge, overlaySig,
+                    overlayAnimated ? 1 : 0);
+      logComponentM(LOGDEBUG, LOGWINDOWING, "osdgeom: f={} dirty=[{}] rgn=[{}] focusRgn=[{}]",
+                    m_osdTraceFrame, damage, regions, focusRegion);
+      m_osdTracePrevSource = traceSrc;
+    }
+
+    if (advancedSettings && advancedSettings->m_guiSkinHdrFbo)
+    {
+      auto& traceGfx = CServiceBroker::GetWinSystem()->GetGfxContext();
+      const char* skinWhy = "ok";
+      if (traceGfx.GetGuiHdr() == GuiHdr::SDR)
+        skinWhy = "sdr";
+      else if (traceGfx.GetStereoMode() != RENDER_STEREO_MODE_OFF)
+        skinWhy = "stereo";
+      else if (!renderSystem)
+        skinWhy = "no-rendersystem";
+      else if (!renderSystem->SupportsGuiRenderTargetConvert())
+        skinWhy = "unsupported";
+      else if (!skinHdrWanted)
+        skinWhy = "window";
+      std::string quads;
+      unsigned int fboWidth = 0;
+      unsigned int fboHeight = 0;
+      if (m_skinHdrRenderTarget)
+      {
+        quads = FormatRectList(m_skinHdrRenderTarget->GetContentRects());
+        fboWidth = m_skinHdrRenderTarget->GetWidth();
+        fboHeight = m_skinHdrRenderTarget->GetHeight();
+      }
+      logComponentM(LOGDEBUG, LOGWINDOWING,
+                    "skinhdr: f={} want={} why={} begun={} valid={} forceFull={} rend={} rects={} "
+                    "dirtyPx={:.0f} age={} win={} fbo={}x{} gui={}x{} convert={} ret={} q=[{}]",
+                    m_osdTraceFrame, skinHdrWanted ? 1 : 0, skinWhy, skinHdrBegun ? 1 : 0,
+                    m_skinHdrTargetValid ? 1 : 0, skinHdrForceFull ? 1 : 0, rendKind, frameRects,
+                    frameDirtyPx, realAge, traceActiveId, fboWidth, fboHeight, traceGfx.GetWidth(),
+                    traceGfx.GetHeight(),
+                    renderSystem && renderSystem->SupportsGuiRenderTargetConvert() ? 1 : 0,
+                    m_osdTraceSkinRet, quads);
+    }
+  }
+
+  static uint32_t s_bufAgeFull = 0, s_bufAgePartial = 0, s_bufAgeSkip = 0;
+  static uint32_t s_bufAgeRects = 0, s_bufAgeClip0 = 0, s_bufAgeMeasured = 0;
+  static uint32_t s_bufAgeMarkedRects = 0;
+  static float s_bufAgeMarkedPct = 0.0f;
+  static float s_bufAgeSnapGrowth = 0.0f;
+  static float s_bufAgeDirtyPx = 0.0f;
+  static uint32_t s_bufAgeCapped = 0;
+  static uint32_t s_bufAgeHist[4] = {};
+  static auto s_bufAgeWindow = std::chrono::steady_clock::now();
+
+  if (bufferAgeLever >= 1 && bufAgeDiag)
+  {
+  ++s_bufAgeHist[realAge == 0 ? 0 : (realAge == 1 ? 1 : (realAge <= 3 ? 2 : 3))];
+  if (frameMarkedRects)
+  {
+    ++s_bufAgeMeasured;
+    s_bufAgeMarkedRects += frameMarkedRects;
+    s_bufAgeMarkedPct += frameMarkedPct;
+  }
+  if (frameCapped)
+    ++s_bufAgeCapped;
+  if (renderedViaRegions)
+  {
+    ++s_bufAgePartial;
+    s_bufAgeRects += frameRects;
+    s_bufAgeClip0 += frameClip0;
+    s_bufAgeSnapGrowth += frameSnapGrowth;
+    s_bufAgeDirtyPx += frameDirtyPx;
+  }
+  else if (hasRendered)
+    ++s_bufAgeFull;
+  else
+    ++s_bufAgeSkip;
+
+  const auto bufAgeNow = std::chrono::steady_clock::now();
+  if (bufAgeNow - s_bufAgeWindow >= std::chrono::seconds(1))
+  {
+    static uint32_t s_bufAgeLastEmitted[7] = {};
+    static bool s_bufAgeEverEmitted = false;
+    static auto s_bufAgeLastEmitTime = std::chrono::steady_clock::now();
+    const uint32_t bufAgeCurrent[7] = {s_bufAgeHist[0], s_bufAgeHist[1], s_bufAgeHist[2],
+                                       s_bufAgeHist[3], s_bufAgeFull,    s_bufAgePartial,
+                                       s_bufAgeSkip};
+    bool bufAgeChanged = !s_bufAgeEverEmitted;
+    for (size_t i = 0; i < 7 && !bufAgeChanged; ++i)
+    {
+      const uint32_t delta = bufAgeCurrent[i] > s_bufAgeLastEmitted[i]
+                                 ? bufAgeCurrent[i] - s_bufAgeLastEmitted[i]
+                                 : s_bufAgeLastEmitted[i] - bufAgeCurrent[i];
+      bufAgeChanged = delta > BUF_AGE_EMIT_TOLERANCE;
+    }
+    if (bufAgeChanged || bufAgeNow - s_bufAgeLastEmitTime >= BUF_AGE_EMIT_FLOOR)
+    {
+      const int gpuUtil = ReadSysfsInt("/sys/class/mpgpu/utilization");
+      const int gpuUtilGl = ReadSysfsInt("/sys/class/mpgpu/util_gl");
+      const int gpuUtilCl = ReadSysfsInt("/sys/class/mpgpu/util_cl");
+      const int gpuFreq = ReadSysfsInt("/sys/class/mpgpu/cur_freq");
+      const float rectsMean =
+          s_bufAgePartial ? static_cast<float>(s_bufAgeRects) / s_bufAgePartial : 0.0f;
+      const float snapMean = s_bufAgePartial ? s_bufAgeSnapGrowth / s_bufAgePartial : 0.0f;
+      const float dirtyMean = s_bufAgePartial ? s_bufAgeDirtyPx / s_bufAgePartial : 0.0f;
+      const float markedRectsMean =
+          s_bufAgeMeasured ? static_cast<float>(s_bufAgeMarkedRects) / s_bufAgeMeasured : 0.0f;
+      const float markedPctMean = s_bufAgeMeasured ? s_bufAgeMarkedPct / s_bufAgeMeasured : 0.0f;
+      const float viewportPx =
+          static_cast<float>(CServiceBroker::GetWinSystem()->GetGfxContext().GetWidth()) *
+          static_cast<float>(CServiceBroker::GetWinSystem()->GetGfxContext().GetHeight());
+      const float dirtyPct = viewportPx > 0.0f ? (dirtyMean / viewportPx) * 100.0f : 0.0f;
+      logComponentM(LOGDEBUG, LOGWINDOWING,
+                    "bufage: algo={} lever={} age={} hist={}/{}/{}/{} full={} partial={} skip={} measured={} "
+                    "rects={:.2f} clip0={} snapPx={:.0f} dirtyPx={:.0f} dirtyPct={:.1f} capped={} "
+                    "markedRects={:.2f} markedPct={:.1f} "
+                    "gpu={}%(gl{}/cl{})@{}",
+                    guiAlgorithmDirtyRegions, bufferAgeLever, realAge, s_bufAgeHist[0], s_bufAgeHist[1], s_bufAgeHist[2],
+                    s_bufAgeHist[3], s_bufAgeFull, s_bufAgePartial, s_bufAgeSkip, s_bufAgeMeasured, rectsMean,
+                    s_bufAgeClip0, snapMean, dirtyMean, dirtyPct, s_bufAgeCapped, markedRectsMean,
+                    markedPctMean, gpuUtil,
+                    gpuUtilGl, gpuUtilCl, gpuFreq);
+      for (size_t i = 0; i < 7; ++i)
+        s_bufAgeLastEmitted[i] = bufAgeCurrent[i];
+      s_bufAgeEverEmitted = true;
+      s_bufAgeLastEmitTime = bufAgeNow;
+    }
+    s_bufAgeWindow = bufAgeNow;
+    s_bufAgeFull = s_bufAgePartial = s_bufAgeSkip = s_bufAgeRects = s_bufAgeClip0 = 0;
+    s_bufAgeMeasured = s_bufAgeMarkedRects = 0;
+    s_bufAgeMarkedPct = 0.0f;
+    s_bufAgeSnapGrowth = 0.0f;
+    s_bufAgeDirtyPx = 0.0f;
+    s_bufAgeCapped = 0;
+    s_bufAgeHist[0] = s_bufAgeHist[1] = s_bufAgeHist[2] = s_bufAgeHist[3] = 0;
+  }
+  }
+
+  if (visualizeDirtyRegions)
   {
     CServiceBroker::GetWinSystem()->GetGfxContext().SetRenderingResolution(CServiceBroker::GetWinSystem()->GetGfxContext().GetResInfo(), false);
     const CDirtyRegionList &markedRegions  = m_tracker.GetMarkedRegions();
@@ -1359,11 +3685,18 @@ bool CGUIWindowManager::Render() const {
 
 void CGUIWindowManager::AfterRender()
 {
-  m_tracker.CleanMarkedRegions();
-
+  CServiceBroker::GetWinSystem()->GetGfxContext().ResetDepth();
   CGUIWindow* pWindow = GetWindow(GetActiveWindow());
   if (pWindow)
     pWindow->AfterRender();
+
+  const auto settingsComponent = CServiceBroker::GetSettingsComponent();
+  const auto advancedSettings =
+      settingsComponent ? settingsComponent->GetAdvancedSettings() : nullptr;
+  const bool scopedOsdRemark =
+      advancedSettings && advancedSettings->m_guiBufferAgePartialRedraw >= 1 &&
+      advancedSettings->m_guiBufferAgeAfterRenderScope && pWindow &&
+      (pWindow->GetID() & WINDOW_ID_MASK) == WINDOW_FULLSCREEN_VIDEO;
 
   // make copy of vector as we may remove items from it as we go
   auto activeDialogs = m_activeDialogs;
@@ -1373,13 +3706,13 @@ void CGUIWindowManager::AfterRender()
     {
       window->AfterRender();
       // Dialog state can affect visibility states
-      if (pWindow && window->IsControlDirty())
+      if (pWindow && window->IsControlDirty() &&
+          (!scopedOsdRemark || window->IsAnimating(ANIM_TYPE_WINDOW_OPEN) ||
+           window->IsAnimating(ANIM_TYPE_WINDOW_CLOSE) ||
+           window->IsAnimating(ANIM_TYPE_VISIBLE) || window->IsAnimating(ANIM_TYPE_HIDDEN)))
         pWindow->MarkDirtyRegion();
     }
   }
-
-  // Inform AMLogic kernel if OSD is displaying
-  aml_dv_set_xbmc_osd();
 }
 
 void CGUIWindowManager::FrameMove()
@@ -1394,7 +3727,6 @@ void CGUIWindowManager::FrameMove()
     {
       // Free any window resources
       window->FreeResources(true);
-      delete window;
     }
     m_deleteWindows.clear();
   }
@@ -1430,7 +3762,7 @@ CGUIWindow* CGUIWindowManager::GetWindow(int id) const
 
   auto it = m_mapWindows.find(id);
   if (it != m_mapWindows.end())
-    return it->second;
+    return it->second.get();
   return nullptr;
 }
 
@@ -1464,14 +3796,20 @@ void CGUIWindowManager::SetCallback(IWindowManagerCallback& callback)
 
 void CGUIWindowManager::DeInitialize()
 {
+  StopFullscreenOverlayRenderThread();
+
   std::lock_guard lock(CServiceBroker::GetWinSystem()->GetGfxContext());
 
   // Need a copy because addon-dialogs removes itself on Close()
-  std::unordered_map<int, CGUIWindow*> closeMap(m_mapWindows);
-  for (const auto& entry : closeMap)
+  // Copy shared_ptrs to keep windows alive during cleanup
+  std::vector<std::shared_ptr<CGUIWindow>> windowsCopy;
+  windowsCopy.reserve(m_mapWindows.size());
+  for (const auto& entry : m_mapWindows)
+    windowsCopy.emplace_back(entry.second);
+
+  for (const auto& pWindow : windowsCopy)
   {
-    CGUIWindow* pWindow = entry.second;
-    if (IsWindowActive(entry.first, false))
+    if (IsWindowActive(pWindow->GetID(), false))
     {
       pWindow->DisableAnimations();
       pWindow->Close(true);
@@ -1484,12 +3822,10 @@ void CGUIWindowManager::DeInitialize()
   m_vecMsgTargets.erase( m_vecMsgTargets.begin(), m_vecMsgTargets.end() );
 
   // destroy our custom windows...
-  for (int i = 0; i < int(m_vecCustomWindows.size()); i++)
+  for (const auto& pWindow : m_vecCustomWindows)
   {
-    CGUIWindow *pWindow = m_vecCustomWindows[i];
     RemoveFromWindowHistory(pWindow->GetID());
     Remove(pWindow->GetID());
-    delete pWindow;
   }
 
   // clear our vectors of windows
@@ -1503,12 +3839,11 @@ void CGUIWindowManager::DeInitialize()
 /// \param id ID of the window routed
 void CGUIWindowManager::RemoveDialog(int id)
 {
-  std::lock_guard lock(CServiceBroker::GetWinSystem()->GetGfxContext());
-
-  m_activeDialogs.erase(std::remove_if(m_activeDialogs.begin(),
-                                       m_activeDialogs.end(),
-                                       [id](CGUIWindow* dialog) { return dialog->GetID() == id; }),
-                         m_activeDialogs.end());
+  std::unique_lock<CCriticalSection> lock(CServiceBroker::GetWinSystem()->GetGfxContext());
+  m_activeDialogs.erase(std::remove_if(m_activeDialogs.begin(), m_activeDialogs.end(),
+                                       [id](const std::shared_ptr<CGUIWindow>& dialog)
+                                       { return dialog->GetID() == id; }),
+                        m_activeDialogs.end());
 }
 
 bool CGUIWindowManager::HasModalDialog(bool ignoreClosing) const
@@ -1527,6 +3862,20 @@ bool CGUIWindowManager::HasModalDialog(bool ignoreClosing) const
   return false;
 }
 
+bool CGUIWindowManager::HasVisibleDialogContentInRegions(const std::vector<CRect>& regions) const
+{
+  std::lock_guard lock(CServiceBroker::GetWinSystem()->GetGfxContext());
+
+  for (const auto& window : m_activeDialogs)
+  {
+    if (window->IsAnimating(ANIM_TYPE_WINDOW_CLOSE))
+      continue;
+    if (window->HasVisibleControlInRegions(regions))
+      return true;
+  }
+  return false;
+}
+
 bool CGUIWindowManager::HasVisibleModalDialog() const
 {
   return HasModalDialog(false);
@@ -1538,9 +3887,9 @@ int CGUIWindowManager::GetTopmostDialog(bool modal, bool ignoreClosing) const
 
   for (auto it = m_activeDialogs.rbegin(); it != m_activeDialogs.rend(); ++it)
   {
-    CGUIWindow *dialog = *it;
-    if ((!modal || dialog->IsModalDialog()) && (!ignoreClosing || !dialog->IsAnimating(ANIM_TYPE_WINDOW_CLOSE)))
-      return dialog->GetID();
+    if ((!modal || (*it)->IsModalDialog()) &&
+        (!ignoreClosing || !(*it)->IsAnimating(ANIM_TYPE_WINDOW_CLOSE)))
+      return (*it)->GetID();
   }
   return WINDOW_INVALID;
 }
@@ -1583,54 +3932,96 @@ void CGUIWindowManager::DispatchThreadMessages()
   // 5. If possible, queued messages can be removed by certain filter condition
   //    and not break above.
 
-  std::unique_lock lock(m_critSection);
-
-  while (!m_vecThreadMessages.empty())
   {
-    // pop up one message per time to make messages be processed by order.
-    // this will ensure rule No.2 & No.3
-    CGUIMessage *pMsg = m_vecThreadMessages.front().first;
-    int window = m_vecThreadMessages.front().second;
-    m_vecThreadMessages.pop_front();
+    std::unique_lock lock(m_critSection);
 
-    // Check for duplicate messages that would be superseded by later messages
-    // Only deduplicate label/text messages where the final value wins
-    // GUI_MSG_ITEM_SELECT is excluded because param1 specifies which item,
-    // and skipping intermediate selections could lose important state changes
-    const int msgType = pMsg->GetMessage();
-    if (msgType == GUI_MSG_LABEL_SET || msgType == GUI_MSG_LABEL2_SET ||
-        msgType == GUI_MSG_SET_TEXT)
+    // Optimize: Remove redundant messages for idempotent operations
+    // Only keep the latest message for each (message_type, window, control) tuple
+    // for message types where only the final value matters
+    if (m_vecThreadMessages.size() > 1)
     {
-      const int controlId = pMsg->GetControlId();
-      // Check if there's a later message of same type to same control
-      const bool hasDuplicate = std::any_of(
-          m_vecThreadMessages.begin(), m_vecThreadMessages.end(),
-          [msgType, controlId, window](const auto& queued) {
-            return queued.first->GetMessage() == msgType &&
-                   queued.first->GetControlId() == controlId && queued.second == window;
-          });
-      if (hasDuplicate)
+      struct MsgKey
       {
-        // Skip this message, a later one will supersede it
-        delete pMsg;
-        pMsg = nullptr;
+        int message;
+        int window;
+        int control;
+      };
+
+      struct MsgKeyHash
+      {
+        size_t operator()(const MsgKey& key) const noexcept
+        {
+          size_t h = std::hash<int>{}(key.message);
+          h ^= (std::hash<int>{}(key.window) + 0x9e3779b9 + (h << 6) + (h >> 2));
+          h ^= (std::hash<int>{}(key.control) + 0x9e3779b9 + (h << 6) + (h >> 2));
+          return h;
+        }
+      };
+
+      struct MsgKeyEq
+      {
+        bool operator()(const MsgKey& a, const MsgKey& b) const noexcept
+        {
+          return a.message == b.message && a.window == b.window && a.control == b.control;
+        }
+      };
+
+      const auto shouldDedupe = [](int message)
+      {
+        return message == GUI_MSG_LABEL_SET || message == GUI_MSG_LABEL2_SET;
+      };
+
+      // Iterate from newest -> oldest and drop older duplicates (keep latest).
+      std::unordered_set<MsgKey, MsgKeyHash, MsgKeyEq> seen;
+      for (auto it = m_vecThreadMessages.rbegin(); it != m_vecThreadMessages.rend();)
+      {
+        CGUIMessage* msg = it->first;
+        const int win = it->second;
+        const int message = msg->GetMessage();
+
+        if (shouldDedupe(message))
+        {
+          MsgKey key{message, win, msg->GetControlId()};
+          if (!seen.insert(key).second)
+          {
+            delete msg;
+            auto forwardIt = std::prev(it.base());
+            auto nextForward = m_vecThreadMessages.erase(forwardIt);
+            it = std::make_reverse_iterator(nextForward);
+            continue;
+          }
+        }
+
+        ++it;
       }
     }
 
-    if (pMsg)
-    {
-      lock.unlock();
+  }
 
-      // XXX: during SendMessage(), there could be a deeper 'xbmc main loop' inited by e.g. doModal
-      //      which may loop there and callback to DispatchThreadMessages() multiple times.
-      if (window)
-        SendMessage(*pMsg, window);
-      else
-        SendMessage(*pMsg);
-      delete pMsg;
+  std::unique_lock lock(m_critSection);
 
-      lock.lock();
-    }
+  for (auto msgCount = m_vecThreadMessages.size(); msgCount > 0; --msgCount)
+  {
+    if (m_vecThreadMessages.empty())
+      break;
+
+    // pop up one message per time to make messages be processed by order.
+    // this will ensure rule No.2 & No.3
+    CGUIMessage* pMsg = m_vecThreadMessages.front().first;
+    int window = m_vecThreadMessages.front().second;
+    m_vecThreadMessages.pop_front();
+
+    lock.unlock();
+
+    // XXX: during SendMessage(), there could be a deeper 'xbmc main loop' inited by e.g. doModal
+    //      which may loop there and callback to DispatchThreadMessages() multiple times.
+    if (window)
+      SendMessage(*pMsg, window);
+    else
+      SendMessage(*pMsg);
+    delete pMsg;
+
+    lock.lock();
   }
 }
 
@@ -1739,7 +4130,7 @@ void CGUIWindowManager::LoadNotOnDemandWindows() const {
 
   for (const auto& entry : m_mapWindows)
   {
-    CGUIWindow *pWindow = entry.second;
+    const auto& pWindow = entry.second;
     if (pWindow->GetLoadType() == CGUIWindow::LOAD_ON_GUI_INIT)
     {
       pWindow->FreeResources(true);
@@ -1753,7 +4144,7 @@ void CGUIWindowManager::UnloadNotOnDemandWindows() const {
 
   for (const auto& entry : m_mapWindows)
   {
-    CGUIWindow *pWindow = entry.second;
+    const auto& pWindow = entry.second;
     if (pWindow->GetLoadType() == CGUIWindow::LOAD_ON_GUI_INIT ||
         pWindow->GetLoadType() == CGUIWindow::KEEP_IN_MEMORY)
     {

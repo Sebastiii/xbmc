@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <mutex>
 
 using namespace KODI::SUBTITLES::STYLE;
@@ -39,6 +40,17 @@ constexpr int ASS_BORDER_STYLE_SQUARE_BOX = 4; // Square box + outline
 COLOR::Color ConvColor(COLOR::Color argbColor, int opacity = 100)
 {
   return COLOR::ConvertToRGBA(COLOR::ChangeOpacity(argbColor, (100.0f - opacity) / 100.0f));
+}
+
+bool RenderOptsEqual(const renderOpts& a, const renderOpts& b)
+{
+  return a.frameWidth == b.frameWidth && a.frameHeight == b.frameHeight &&
+         a.videoWidth == b.videoWidth && a.videoHeight == b.videoHeight &&
+         a.sourceWidth == b.sourceWidth && a.sourceHeight == b.sourceHeight &&
+         a.m_par == b.m_par && a.marginsMode == b.marginsMode && a.position == b.position &&
+         a.horizontalAlignment == b.horizontalAlignment &&
+         a.activeAreaTopOffsetPx == b.activeAreaTopOffsetPx &&
+         a.activeAreaBottomOffsetPx == b.activeAreaBottomOffsetPx;
 }
 
 } // namespace
@@ -165,8 +177,10 @@ bool CDVDSubtitlesLibass::DecodeHeader(char* data, int size)
 
   CLog::Log(LOGINFO, "CDVDSubtitlesLibass: Creating new ASS track");
   m_track = ass_new_track(m_library);
+  InvalidateRenderCache();
 
   ass_process_codec_private(m_track, data, size);
+
   return true;
 }
 
@@ -182,6 +196,10 @@ bool CDVDSubtitlesLibass::DecodeDemuxPkt(const char* data, int size, double star
   //! @bug libass isn't const correct
   ass_process_chunk(m_track, const_cast<char*>(data), size, DVD_TIME_TO_MSEC(start),
                     DVD_TIME_TO_MSEC(duration));
+
+  if (m_renderCacheValid && DVD_TIME_TO_MSEC(start) < m_cacheValidUntil)
+    InvalidateRenderCache();
+
   return true;
 }
 
@@ -202,6 +220,7 @@ bool CDVDSubtitlesLibass::CreateTrack()
     CLog::Log(LOGERROR, "{} - Failed to allocate ASS track.", __FUNCTION__);
     return false;
   }
+  InvalidateRenderCache();
 
   m_track->track_type = m_track->TRACK_TYPE_ASS;
   m_track->Timer = 100.;
@@ -252,6 +271,7 @@ bool CDVDSubtitlesLibass::CreateTrack(char* buf, size_t size)
   m_track = ass_read_memory(m_library, buf, size, nullptr);
   if (m_track == nullptr)
     return false;
+  InvalidateRenderCache();
 
   return true;
 }
@@ -276,7 +296,18 @@ ASS_Image* CDVDSubtitlesLibass::RenderImage(double pts,
     return nullptr;
   }
 
-  if (updateStyle || m_currentDefaultStyleId == ASS_NO_ID)
+  const int64_t ptsMs = DVD_TIME_TO_MSEC(pts);
+  const bool styleChanged = updateStyle || m_currentDefaultStyleId == ASS_NO_ID;
+
+  if (!styleChanged && m_renderCacheValid && RenderOptsEqual(opts, m_lastOpts) &&
+      ptsMs >= m_cacheValidFrom && ptsMs < m_cacheValidUntil)
+  {
+    if (changes)
+      *changes = 0;
+    return m_lastImages;
+  }
+
+  if (styleChanged)
   {
     ApplyStyle(subStyle, opts);
   }
@@ -296,37 +327,86 @@ ASS_Image* CDVDSubtitlesLibass::RenderImage(double pts,
   {
     ass_set_storage_size(m_renderer, static_cast<int>(opts.sourceWidth),
                          static_cast<int>(opts.sourceHeight));
-    useFrameMargins =
-        opts.marginsMode == MarginsMode::DISABLED || opts.marginsMode == MarginsMode::INSIDE_VIDEO;
+    useFrameMargins = opts.marginsMode == MarginsMode::INSIDE_VIDEO ||
+                      opts.marginsMode == MarginsMode::INSIDE_ACTIVE_AREA;
   }
   else
   {
     // Keep storage to default to keep consistent subtitles effects
     // (like borders) when video resolution change while in playback
     ass_set_storage_size(m_renderer, 0, 0);
-    useFrameMargins = opts.marginsMode == MarginsMode::INSIDE_VIDEO;
+    useFrameMargins = opts.marginsMode == MarginsMode::INSIDE_VIDEO ||
+                      opts.marginsMode == MarginsMode::INSIDE_ACTIVE_AREA;
   }
 
-  int marginTop{0};
+  int marginTopVal{0};
+  int marginBottomVal{0};
   int marginLeft{0};
   if (useFrameMargins)
   {
-    marginTop =
+    int marginBase =
         static_cast<int>((opts.frameHeight - std::min(opts.videoHeight, opts.frameHeight)) / 2);
+    marginTopVal = marginBase;
+    marginBottomVal = marginBase;
     marginLeft =
         static_cast<int>((opts.frameWidth - std::min(opts.videoWidth, opts.frameWidth)) / 2);
+
+    if (opts.marginsMode == MarginsMode::INSIDE_ACTIVE_AREA)
+    {
+      marginTopVal += opts.activeAreaTopOffsetPx;
+      marginBottomVal += opts.activeAreaBottomOffsetPx;
+    }
+
+    int maxTotalMargin = static_cast<int>(opts.frameHeight * 0.75f);
+    int totalMargin = marginTopVal + marginBottomVal;
+    if (totalMargin > maxTotalMargin && totalMargin > 0)
+    {
+      float clampScale = static_cast<float>(maxTotalMargin) / totalMargin;
+      marginTopVal = static_cast<int>(marginTopVal * clampScale);
+      marginBottomVal = static_cast<int>(marginBottomVal * clampScale);
+    }
   }
 
-  ass_set_margins(m_renderer, marginTop, marginTop, marginLeft, marginLeft);
+  ass_set_margins(m_renderer, marginTopVal, marginBottomVal, marginLeft, marginLeft);
   ass_set_use_margins(m_renderer, 0);
 
   float fontScale{1.0f};
-  if (opts.marginsMode == MarginsMode::INSIDE_VIDEO)
+  if (opts.marginsMode == MarginsMode::INSIDE_VIDEO ||
+      opts.marginsMode == MarginsMode::INSIDE_ACTIVE_AREA)
   {
-    // Make font size relative to window size instead of video,
-    // to show same font size even if the video do not cover in full the
-    // window (e.g. cropped videos, zoom effect) and player add black bars.
     fontScale *= std::max(opts.frameHeight / opts.videoHeight, 1.0f);
+
+    float contentHeight = opts.frameHeight - marginTopVal - marginBottomVal;
+    if (contentHeight > 0)
+      fontScale *= opts.frameHeight / contentHeight;
+  }
+
+  {
+    static int s_lastT = -1, s_lastB = -1, s_lastL = -1, s_lastType = -1, s_lastMM = -1;
+    static float s_lastFontScale = -1.f;
+    static double s_lastPos = -1.0;
+    if (marginTopVal != s_lastT || marginBottomVal != s_lastB || marginLeft != s_lastL ||
+        fontScale != s_lastFontScale || opts.position != s_lastPos ||
+        static_cast<int>(m_subtitleType) != s_lastType ||
+        static_cast<int>(opts.marginsMode) != s_lastMM)
+    {
+      logComponentM(LOGDEBUG, LOGVIDEO,
+                    "libass render type={} marginsMode={} useFrameMargins={} frame={:.0f}x{:.0f} "
+                    "video={:.0f}x{:.0f} source={:.0f}x{:.0f} aaOff={}/{} marginT={} marginB={} "
+                    "marginL={} fontScale={:.3f} pos={:.1f} playResY={}",
+                    static_cast<int>(m_subtitleType), static_cast<int>(opts.marginsMode),
+                    useFrameMargins, opts.frameWidth, opts.frameHeight, opts.videoWidth,
+                    opts.videoHeight, opts.sourceWidth, opts.sourceHeight,
+                    opts.activeAreaTopOffsetPx, opts.activeAreaBottomOffsetPx, marginTopVal,
+                    marginBottomVal, marginLeft, fontScale, opts.position, GetPlayResY());
+      s_lastT = marginTopVal;
+      s_lastB = marginBottomVal;
+      s_lastL = marginLeft;
+      s_lastFontScale = fontScale;
+      s_lastPos = opts.position;
+      s_lastType = static_cast<int>(m_subtitleType);
+      s_lastMM = static_cast<int>(opts.marginsMode);
+    }
   }
 
   ass_set_font_scale(m_renderer, static_cast<double>(fontScale));
@@ -337,7 +417,102 @@ ASS_Image* CDVDSubtitlesLibass::RenderImage(double pts,
   // if the playback occurs in sequence (without seeks) the overlapped subtitles lines will be rendered in right order
   // if you seek forward/backward the video, the overlapped subtitles lines could be rendered in the wrong order
   // this is a known side effect from libass devs and not a bug from our part
-  return ass_render_frame(m_renderer, m_track, DVD_TIME_TO_MSEC(pts), changes);
+  int localChanges = 0;
+  m_lastImages = ass_render_frame(m_renderer, m_track, ptsMs, &localChanges);
+  if (changes)
+    *changes = localChanges;
+
+  m_lastOpts = opts;
+  UpdateRenderCache(ptsMs);
+
+  return m_lastImages;
+}
+
+bool CDVDSubtitlesLibass::IsDynamicEvent(const ASS_Event* assEvent) const
+{
+  if (assEvent->Effect && assEvent->Effect[0])
+  {
+    std::string effect = assEvent->Effect;
+    StringUtils::ToLower(effect);
+    if (effect.find("scroll") != std::string::npos || effect.find("banner") != std::string::npos)
+      return true;
+  }
+
+  const char* text = assEvent->Text;
+  if (!text)
+    return false;
+
+  return std::strstr(text, "\\t") || std::strstr(text, "\\move") ||
+         std::strstr(text, "\\fad") || std::strstr(text, "\\k") || std::strstr(text, "\\K");
+}
+
+void CDVDSubtitlesLibass::UpdateRenderCache(int64_t ptsMs)
+{
+  if (!m_track)
+  {
+    m_renderCacheValid = false;
+    return;
+  }
+
+  int64_t from = std::numeric_limits<int64_t>::min();
+  int64_t until = std::numeric_limits<int64_t>::max();
+  bool dynamic = false;
+
+  for (int i = 0; i < m_track->n_events; i++)
+  {
+    const ASS_Event* assEvent = m_track->events + i;
+    const int64_t start = assEvent->Start;
+    const int64_t end = assEvent->Start + assEvent->Duration;
+    if (end <= start)
+      continue;
+
+    if (start <= ptsMs && end > ptsMs)
+    {
+      if (end < until)
+        until = end;
+      if (start > from)
+        from = start;
+      if (IsDynamicEvent(assEvent))
+        dynamic = true;
+    }
+    else if (start > ptsMs)
+    {
+      if (start < until)
+        until = start;
+    }
+    else
+    {
+      if (end > from)
+        from = end;
+    }
+  }
+
+  if (dynamic || until <= ptsMs || until == std::numeric_limits<int64_t>::max())
+  {
+    m_renderCacheValid = false;
+  }
+  else
+  {
+    m_cacheValidFrom = from;
+    m_cacheValidUntil = until;
+    m_renderCacheValid = true;
+  }
+}
+
+bool CDVDSubtitlesLibass::NeedsRerender(double pts) const
+{
+  std::lock_guard lock(m_section);
+  if (!m_renderCacheValid)
+    return true;
+
+  const int64_t ptsMs = DVD_TIME_TO_MSEC(pts);
+  return ptsMs < m_cacheValidFrom || ptsMs >= m_cacheValidUntil;
+}
+
+void CDVDSubtitlesLibass::InvalidateRenderCache() const
+{
+  m_renderCacheValid = false;
+  m_lastImages = nullptr;
 }
 
 void CDVDSubtitlesLibass::ApplyStyle(const std::shared_ptr<struct style>& subStyle, renderOpts opts)
@@ -603,11 +778,17 @@ void CDVDSubtitlesLibass::ConfigureAssOverride(const std::shared_ptr<struct styl
     {
       stylesFlags = ASS_OVERRIDE_BIT_COLORS | ASS_OVERRIDE_BIT_ATTRIBUTES |
                     ASS_OVERRIDE_BIT_BORDER | ASS_OVERRIDE_BIT_MARGINS;
+#if LIBASS_VERSION >= 0x01704000
+      stylesFlags |= ASS_OVERRIDE_BIT_BLUR;
+#endif
     }
     else if (subStyle->assOverrideStyles == OverrideStyles::STYLES_POSITIONS)
     {
       stylesFlags = ASS_OVERRIDE_BIT_COLORS | ASS_OVERRIDE_BIT_ATTRIBUTES |
                     ASS_OVERRIDE_BIT_BORDER | ASS_OVERRIDE_BIT_MARGINS | ASS_OVERRIDE_BIT_ALIGNMENT;
+#if LIBASS_VERSION >= 0x01704000
+      stylesFlags |= ASS_OVERRIDE_BIT_BLUR;
+#endif
     }
     else if (subStyle->assOverrideStyles == OverrideStyles::POSITIONS)
     {
@@ -683,6 +864,7 @@ int CDVDSubtitlesLibass::AddEvent(const char* text,
       event->MarginR = opts->marginRight;
       event->MarginV = opts->marginVertical;
     }
+    InvalidateRenderCache();
     return eventId;
   }
   else
@@ -719,6 +901,7 @@ void CDVDSubtitlesLibass::AppendTextToEvent(int eventId, const char* text) const
     free(assEvent->Text);
     assEvent->Text = strdup(appendedText);
     delete[] appendedText;
+    InvalidateRenderCache();
   }
 }
 
@@ -743,7 +926,10 @@ void CDVDSubtitlesLibass::ChangeEventStopTime(int eventId, double stopTime) cons
 
   ASS_Event* assEvent = (assEvents + eventId);
   if (assEvent)
+  {
     assEvent->Duration = (DVD_TIME_TO_MSEC(stopTime) - assEvent->Start);
+    InvalidateRenderCache();
+  }
 }
 
 void CDVDSubtitlesLibass::FlushEvents() const {
@@ -756,6 +942,7 @@ void CDVDSubtitlesLibass::FlushEvents() const {
   }
 
   ass_flush_events(m_track);
+  InvalidateRenderCache();
 }
 
 int CDVDSubtitlesLibass::DeleteEvents(int nEvents, int threshold) const {
@@ -774,6 +961,7 @@ int CDVDSubtitlesLibass::DeleteEvents(int nEvents, int threshold) const {
 
   // Currently LibAss do not have delete event method we have to free the events
   // and reassign all events starting with the first empty position
+  InvalidateRenderCache();
   int n = 0;
   for (; n < nEvents; n++)
   {

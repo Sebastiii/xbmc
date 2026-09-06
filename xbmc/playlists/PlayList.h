@@ -61,6 +61,7 @@ public:
 
   void SetUnPlayable(int iItem);
   int GetPlayable() const { return m_iPlayableItems; }
+  unsigned int GetModCount() const { return m_iModCount; }
 
   void UpdateItem(const CFileItem *item);
 
@@ -71,6 +72,7 @@ protected:
   std::string m_strPlayListName;
   std::string m_strBasePath;
   int m_iPlayableItems;
+  unsigned int m_iModCount;
   bool m_bShuffled;
   bool m_bWasPlayed;
 

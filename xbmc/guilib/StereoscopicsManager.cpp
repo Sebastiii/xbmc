@@ -28,6 +28,7 @@
 #include "messaging/ApplicationMessenger.h"
 #include "rendering/RenderSystem.h"
 #include "settings/AdvancedSettings.h"
+#include "settings/DisplaySettings.h"
 #include "settings/Settings.h"
 #include "settings/SettingsComponent.h"
 #include "settings/lib/Setting.h"
@@ -37,6 +38,9 @@
 #include "utils/StringUtils.h"
 #include "utils/Variant.h"
 #include "utils/log.h"
+#include "windowing/GraphicContext.h"
+#include "windowing/Resolution.h"
+#include "windowing/WinSystem.h"
 
 #include <stdlib.h>
 
@@ -509,6 +513,24 @@ void CStereoscopicsManager::ApplyStereoMode(const RENDER_STEREO_MODE &mode, bool
     CServiceBroker::GetWinSystem()->GetGfxContext().SetStereoMode(mode);
     CLog::Log(LOGDEBUG, "StereoscopicsManager: stereo mode changed to {}",
               ConvertGuiStereoModeToString(mode));
+
+    const auto& components = CServiceBroker::GetAppComponents();
+    const auto appPlayer = components.GetComponent<CApplicationPlayer>();
+    if (!appPlayer->IsPlaying())
+    {
+      const RESOLUTION_INFO curInfo = CServiceBroker::GetWinSystem()->GetGfxContext().GetResInfo();
+      const bool is3D = (mode != RENDER_STEREO_MODE_OFF && mode != RENDER_STEREO_MODE_MONO);
+      RESOLUTION res = CResolutionUtils::ChooseBestResolution(
+          curInfo.fRefreshRate, curInfo.iScreenWidth, curInfo.iScreenHeight, is3D);
+      constexpr uint32_t modes3D =
+          D3DPRESENTFLAG_MODE3DSBS | D3DPRESENTFLAG_MODE3DTB | D3DPRESENTFLAG_MODE3DFP;
+      const bool targetHas3D =
+          (CServiceBroker::GetWinSystem()->GetGfxContext().GetResInfo(res).dwFlags & modes3D) != 0;
+      const bool currentHas3D = (curInfo.dwFlags & modes3D) != 0;
+      if (is3D ? targetHas3D : currentHas3D)
+        CServiceBroker::GetWinSystem()->GetGfxContext().SetVideoResolution(res, true);
+    }
+
     if (notify)
     {
       CGUIDialogKaiToast::QueueNotification(CGUIDialogKaiToast::Info, g_localizeStrings.Get(36501), GetLabelForStereoMode(mode));
@@ -640,7 +662,11 @@ void CStereoscopicsManager::OnPlaybackStopped(void)
   RENDER_STEREO_MODE mode = GetStereoMode();
 
   if (m_settings->GetBool(CSettings::SETTING_VIDEOPLAYER_QUITSTEREOMODEONSTOP) && mode != RENDER_STEREO_MODE_OFF)
+  {
     SetStereoMode(RENDER_STEREO_MODE_OFF);
+    CServiceBroker::GetWinSystem()->GetGfxContext().SetVideoResolution(
+        CDisplaySettings::GetInstance().GetCurrentResolution(), true);
+  }
 
   // reset user modes on playback end to start over new on next playback and not end up in a probably unwanted mode
   if (m_stereoModeSetByUser != RENDER_STEREO_MODE_OFF)

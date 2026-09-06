@@ -9,6 +9,8 @@
 #include "DisplaySettings.h"
 
 #include "ServiceBroker.h"
+#include "cores/DataCacheCore.h"
+#include "cores/VideoPlayer/Interface/StreamInfo.h"
 #include "cores/VideoPlayer/VideoRenderers/ColorManager.h"
 #include "dialogs/GUIDialogFileBrowser.h"
 #include "guilib/GUIComponent.h"
@@ -23,6 +25,9 @@
 #include "settings/lib/Setting.h"
 #include "settings/lib/SettingDefinitions.h"
 #include "storage/MediaManager.h"
+#include "threads/CriticalSection.h"
+#include "utils/AMLUtils.h"
+#include "utils/JobManager.h"
 #include "utils/StringUtils.h"
 #include "utils/Variant.h"
 #include "utils/XMLUtils.h"
@@ -31,12 +36,15 @@
 #include "windowing/WinSystem.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <float.h>
 #include <fstream>
+#include <iterator>
 #include <mutex>
 #include <string>
 #include <sys/mount.h>
+#include <sys/stat.h>
 #include <sys/statfs.h>
 #include <utility>
 #include <vector>
@@ -102,48 +110,307 @@ static std::string ModeFlagsToString(unsigned int flags, bool identifier)
   return res;
 }
 
-bool write_resolution_ini(RESOLUTION_INFO res)
+bool kernel_display_is_4k_50_60()
+{
+  CSysfsPath display_mode{"/sys/class/display/mode"};
+  if (!display_mode.Exists()) return false;
+  const std::string m = display_mode.Get<std::string>().value();
+  const bool is_4k = (m.find("2160p") != std::string::npos ||
+                      m.find("smpte") != std::string::npos);
+  const bool is_50_or_60hz = (m.find("60hz") != std::string::npos ||
+                              m.find("50hz") != std::string::npos);
+  return is_4k && is_50_or_60hz;
+}
+
+std::string compute_bandwidth_safe_fmt_attr(const RESOLUTION_INFO& res)
 {
   const std::shared_ptr<CSettings> settings = CServiceBroker::GetSettingsComponent()->GetSettings();
-  struct statfs fsInfo;
-  std::string aml_res_path = "/flash";
-  std::string aml_res_file = "resolution.ini";
-  std::string fmt_attr = ",";
-  std::string force_cs[] = { "rgb", "420", "422", "444" };
-  std::string limit_cd[] = { "8bit", "10bit", "12bit", "16bit" };
-  auto result = statfs(aml_res_path.c_str(), &fsInfo);
-  const bool nativeGui = settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DISABLEGUISCALING);
+  std::string force_cs_arr[] = { "rgb", "420", "422", "444" };
+  std::string limit_cd_arr[] = { "8bit", "10bit", "12bit", "16bit" };
 
-  if (!result && fsInfo.f_flags & MS_RDONLY)
-    result = mount(nullptr, aml_res_path.c_str(), nullptr, MS_NOATIME | MS_REMOUNT, nullptr);
-
-  if (!result && !res.strId.empty())
+  if (res.dwFlags & D3DPRESENTFLAG_MODE3DFP)
   {
-    std::string allfmt_names = "";
-    CSysfsPath amhdmitx0_allfmt_names{"/sys/class/amhdmitx/amhdmitx0/allfmt_names"};
-    if (amhdmitx0_allfmt_names.Exists())
-      allfmt_names = amhdmitx0_allfmt_names.Get<std::string>().value();
-    std::ofstream ofs(aml_res_path + "/" + aml_res_file, std::ofstream::out);
-    ofs << "# WARNING DO NOT MODIFY THIS FILE! ALL CHANGES WILL BE LOST!\n";
-    ofs << "kernel_hdmimode=" << res.strId.c_str() << "\n";
-    ofs << "frac_rate_policy=" << std::to_string((res.fRefreshRate == floor(res.fRefreshRate)) ? 0 : 1).c_str() << "\n";
-    ofs << "native_4k_gui=" << std::to_string(nativeGui).c_str() << "\n";
-    ofs << "hdmitx=";
-    if (settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_FORCE_CS) > 0)
-      fmt_attr += std::string(force_cs[settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_FORCE_CS) - 1] + ",").c_str();
-    if (settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_LIMIT_CD) > 0)
-      fmt_attr += limit_cd[settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_LIMIT_CD) - 1].c_str();
-    ofs << fmt_attr.c_str() << "\n";
-    CSysfsPath("/sys/class/amhdmitx/amhdmitx0/attr", fmt_attr);
-    ofs << "allfmt_names=" << allfmt_names.c_str() << "\n";
-    ofs.close();
-    CLog::Log(LOGDEBUG, "CDisplaySettings: Amlogic resolution got saved to {}/{}", aml_res_path.c_str(), aml_res_file.c_str());
+    std::string fp_attr = ",";
+    const int fp_force_cs = settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_FORCE_CS);
+    const int fp_limit_cd = settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_LIMIT_CD);
+    if (fp_force_cs > 0)
+      fp_attr += std::string(force_cs_arr[fp_force_cs - 1] + ",").c_str();
+    if (fp_limit_cd > 0)
+      fp_attr += limit_cd_arr[fp_limit_cd - 1].c_str();
+    logM(LOGDEBUG,
+         "compute_bandwidth_safe_fmt_attr frame-packed 3D: force_cs={} limit_cd={} fmt_attr={}",
+         fp_force_cs, fp_limit_cd, fp_attr);
+    return fp_attr;
   }
 
-  if (!result && fsInfo.f_flags & MS_RDONLY)
-    mount(nullptr, aml_res_path.c_str(), nullptr, MS_RDONLY | MS_NOATIME | MS_REMOUNT, nullptr);
+  if (aml_is_force_422_override_active())
+  {
+    logComponentM(LOGDEBUG, LOGVIDEO,
+                  "aml_is_force_422_override_active()=1 return=,422,12bit");
+    return ",422,12bit";
+  }
+
+  const bool dv_engine_on = aml_is_dv_enable();
+  const StreamHdrType current_hdr_type = CServiceBroker::GetDataCacheCore().GetVideoHdrType();
+  const int cur_force_cs = settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_FORCE_CS);
+  const int cur_limit_cd = settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_LIMIT_CD);
+  const bool prefer_12bit = settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_PREFER_12BIT);
+  const bool can_12bit = aml_display_support_12bit(cur_force_cs);
+
+  int target_cd = cur_limit_cd;
+  if (target_cd == 0)
+    target_cd = can_12bit ? 3 : 1;
+
+  const bool cs_forced = (cur_force_cs > 0);
+  const bool cd_forced = (cur_limit_cd > 0) || prefer_12bit;
+  const bool target_is_4k_50_60 = (res.iScreenWidth >= 3840 &&
+                                   res.iScreenHeight >= 2160 &&
+                                   res.fRefreshRate >= 49.9f);
+  const bool is_4k_50_60 = target_is_4k_50_60 || kernel_display_is_4k_50_60();
+  const bool unsafe_cs = (cur_force_cs == 0 || cur_force_cs == 1 || cur_force_cs == 4);
+  const bool unsafe_cd = (target_cd == 2 || target_cd == 3);
+  const bool guard_active = is_4k_50_60 && unsafe_cs && unsafe_cd;
+
+  int eff_force_cs = cur_force_cs;
+  int eff_limit_cd = target_cd;
+  if (guard_active)
+  {
+    if (cs_forced && !cd_forced)
+      eff_limit_cd = 1;
+    else
+      eff_force_cs = 3;
+  }
+
+  std::string fmt_attr = ",";
+  if (eff_force_cs > 0)
+    fmt_attr += std::string(force_cs_arr[eff_force_cs - 1] + ",").c_str();
+  else if (eff_limit_cd >= 2)
+    fmt_attr += is_4k_50_60 ? "422," : "422,";
+  if (eff_limit_cd > 0)
+    fmt_attr += limit_cd_arr[eff_limit_cd - 1].c_str();
+
+  logComponentM(LOGDEBUG, LOGVIDEO,
+       "compute_bandwidth_safe_fmt_attr prefer.12bit={} edid_12bit={} dv_enable={} hdr_type={} force_cs={} eff_force_cs={} limit_cd={} target_cd={} eff_limit_cd={} 4k_50_60={} cs_forced={} cd_forced={} guard_active={} fmt_attr={}",
+       prefer_12bit, can_12bit, dv_engine_on,
+       static_cast<int>(current_hdr_type),
+       cur_force_cs, eff_force_cs,
+       cur_limit_cd, target_cd, eff_limit_cd,
+       is_4k_50_60, cs_forced, cd_forced, guard_active, fmt_attr);
+
+  if (guard_active && eff_force_cs == 3)
+  {
+    static std::string s_last_logged_fmt_attr;
+    if (s_last_logged_fmt_attr != fmt_attr)
+    {
+      logM(LOGINFO,
+           "Colour space overridden to 4:2:2 at 4K@{:.2f}Hz to keep {}-bit (HDMI 2.0 cannot carry {} {}-bit at 4K@50/60Hz)",
+           res.fRefreshRate,
+           eff_limit_cd == 3 ? "12" : (eff_limit_cd == 2 ? "10" : "8"),
+           cur_force_cs == 1 ? "RGB" : (cur_force_cs == 4 ? "4:4:4" : "auto"),
+           target_cd == 3 ? "12" : (target_cd == 2 ? "10" : "8"));
+      s_last_logged_fmt_attr = fmt_attr;
+    }
+  }
+
+  return fmt_attr;
+}
+
+namespace
+{
+CCriticalSection g_resIniLock;
+std::string g_resIniDesired;
+std::string g_resIniOnDisk;
+bool g_resIniWriterActive = false;
+
+std::string read_text_file(const std::string& path)
+{
+  std::ifstream ifs(path, std::ios::in | std::ios::binary);
+  if (!ifs)
+    return "";
+  return std::string(std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>());
+}
+
+bool flash_write_resolution_ini(const std::string& content)
+{
+  const std::string dir = "/flash";
+  const std::string full = dir + "/resolution.ini";
+  struct statfs fsInfo;
+  if (statfs(dir.c_str(), &fsInfo))
+    return false;
+  if (read_text_file(full) == content)
+    return true;
+  const bool wasRO = (fsInfo.f_flags & MS_RDONLY);
+  struct stat flashStat{};
+  struct stat storageStat{};
+  const bool sharedFs = (stat(dir.c_str(), &flashStat) == 0 &&
+                         stat("/storage", &storageStat) == 0 &&
+                         flashStat.st_dev == storageStat.st_dev);
+  struct statfs storagePre;
+  const bool storageWasRO =
+      (statfs("/storage", &storagePre) == 0) && (storagePre.f_flags & MS_RDONLY);
+  int result = 0;
+  if (wasRO)
+    result = mount(nullptr, dir.c_str(), nullptr, MS_NOATIME | MS_REMOUNT, nullptr);
+  if (!result)
+  {
+    std::ofstream ofs(full, std::ofstream::out | std::ofstream::trunc);
+    ofs << content;
+    ofs.close();
+  }
+  if (wasRO && sharedFs)
+    logM(LOGDEBUG,
+         "flash_write_resolution_ini - flash shares a filesystem with storage, leaving it writable");
+  if (wasRO && !sharedFs)
+  {
+    mount(nullptr, dir.c_str(), nullptr, MS_RDONLY | MS_NOATIME | MS_REMOUNT, nullptr);
+    struct statfs storagePost;
+    const bool storageNowRO =
+        (statfs("/storage", &storagePost) == 0) && (storagePost.f_flags & MS_RDONLY);
+    if (storageNowRO && !storageWasRO)
+    {
+      mount(nullptr, dir.c_str(), nullptr, MS_NOATIME | MS_REMOUNT, nullptr);
+      logM(LOGWARNING,
+           "flash_write_resolution_ini - storage lost write access after flash read-only "
+           "restore, reverted flash to writable");
+    }
+  }
+  return result == 0;
+}
+
+void run_resolution_ini_writer()
+{
+  for (;;)
+  {
+    std::string target;
+    {
+      std::lock_guard<CCriticalSection> lock(g_resIniLock);
+      if (g_resIniDesired == g_resIniOnDisk)
+      {
+        g_resIniWriterActive = false;
+        return;
+      }
+      target = g_resIniDesired;
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool ok = flash_write_resolution_ini(target);
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+    logM(LOGDEBUG, "resolution.ini deferred persist {} in {}ms", ok ? "ok" : "failed", ms);
+    std::lock_guard<CCriticalSection> lock(g_resIniLock);
+    if (!ok)
+    {
+      g_resIniWriterActive = false;
+      return;
+    }
+    g_resIniOnDisk = target;
+  }
+}
+
+void queue_resolution_ini_persist(const std::string& content)
+{
+  bool startWriter = false;
+  {
+    std::lock_guard<CCriticalSection> lock(g_resIniLock);
+    if (content == g_resIniOnDisk)
+      return;
+    g_resIniDesired = content;
+    if (g_resIniWriterActive)
+      return;
+    g_resIniWriterActive = true;
+    startWriter = true;
+  }
+  if (!startWriter)
+    return;
+  const std::shared_ptr<CJobManager> jm = CServiceBroker::GetJobManager();
+  if (jm)
+    jm->Submit([]() { run_resolution_ini_writer(); }, CJob::PRIORITY_LOW);
+  else
+    run_resolution_ini_writer();
+}
+
+std::string build_resolution_ini_content(bool nativeGui, const std::string& fmt_attr)
+{
+  std::string allfmt_names;
+  CSysfsPath amhdmitx0_allfmt_names{"/sys/class/amhdmitx/amhdmitx0/allfmt_names"};
+  if (amhdmitx0_allfmt_names.Exists())
+    allfmt_names = amhdmitx0_allfmt_names.Get<std::string>().value();
+  const RESOLUTION_INFO desktop_info =
+      CDisplaySettings::GetInstance().GetResolutionInfo(RES_DESKTOP);
+  const int frac = (desktop_info.fRefreshRate == floor(desktop_info.fRefreshRate)) ? 0 : 1;
+  std::string content;
+  content += "# WARNING DO NOT MODIFY THIS FILE! ALL CHANGES WILL BE LOST!\n";
+  content += "kernel_hdmimode=" + desktop_info.strId + "\n";
+  content += "frac_rate_policy=" + std::to_string(frac) + "\n";
+  content += "native_4k_gui=" + std::to_string(nativeGui) + "\n";
+  content += "hdmitx=" + fmt_attr + "\n";
+  content += "allfmt_names=" + allfmt_names + "\n";
+  return content;
+}
+}
+
+bool write_resolution_ini(RESOLUTION_INFO res)
+{
+  const auto t_wri_start = std::chrono::steady_clock::now();
+  const std::shared_ptr<CSettings> settings = CServiceBroker::GetSettingsComponent()->GetSettings();
+  const bool nativeGui = settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DISABLEGUISCALING);
+
+  if (res.strId.empty())
+  {
+    logM(LOGDEBUG, "write_resolution_ini - empty strId, wire attr/mode untouched");
+    return true;
+  }
+
+  auto* winSystem = CServiceBroker::GetWinSystem();
+  if (winSystem &&
+      (winSystem->GetGfxContext().GetResInfo().dwFlags & D3DPRESENTFLAG_MODE3DFP))
+  {
+    logM(LOGDEBUG,
+         "write_resolution_ini - frame-packed output active, wire attr/mode untouched (strId={})",
+         res.strId);
+    return true;
+  }
+
+  std::string fmt_attr;
+  {
+    CAmlHdmiWireGuard wire(__FUNCTION__);
+    fmt_attr = compute_bandwidth_safe_fmt_attr(res);
+
+    CSysfsPath attr_path{"/sys/class/amhdmitx/amhdmitx0/attr"};
+    const std::string prev_attr = attr_path.Exists() ? attr_path.Get<std::string>().value() : "";
+    {
+      CAmlDvWireStep step("res_ini_attr");
+      attr_path.Set(fmt_attr);
+    }
+    const bool attr_changed = (prev_attr != fmt_attr);
+    CSysfsPath display_mode{"/sys/class/display/mode"};
+    const auto t_dm_start = std::chrono::steady_clock::now();
+    if (display_mode.Exists())
+    {
+      CAmlDvWireStep step("res_ini_mode");
+      display_mode.Set(display_mode.Get<std::string>().value());
+    }
+    const auto dm_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t_dm_start).count();
+    logM(LOGDEBUG, "write_resolution_ini - attr_was=[{}] attr_new=[{}] {} display_mode_set={}ms",
+         prev_attr, fmt_attr, attr_changed ? "CHANGED" : "unchanged", dm_ms);
+  }
+
+  if (winSystem && winSystem->GetGfxContext().IsFullScreenVideo())
+    logComponentM(LOGDEBUG, LOGVIDEO, "write_resolution_ini - fullscreen video active, /flash persist skipped (boot hint stays at desktop)");
+  else
+    queue_resolution_ini_persist(build_resolution_ini_content(nativeGui, fmt_attr));
+
+  const auto wri_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - t_wri_start).count();
+  logComponentM(LOGDEBUG, LOGVIDEO, "write_resolution_ini TIMING: elapsed={}ms strId={}", wri_ms, res.strId);
 
   return true;
+}
+
+bool write_current_resolution_ini()
+{
+  const RESOLUTION_INFO res_info = CDisplaySettings::GetInstance().GetResolutionInfo(CDisplaySettings::GetInstance().GetCurrentResolution());
+  return write_resolution_ini(res_info);
 }
 
 CDisplaySettings::CDisplaySettings()
@@ -343,6 +610,8 @@ bool CDisplaySettings::OnSettingChanging(const std::shared_ptr<const CSetting>& 
     }
 
     std::string screenmode = GetStringFromResolution(newRes);
+    logM(LOGDEBUG, "screenmodetrace: writer=OnSettingChanging.{} newRes={} screenmode={}",
+         settingId, static_cast<int>(newRes), screenmode);
     if (!CServiceBroker::GetSettingsComponent()->GetSettings()->SetString(CSettings::SETTING_VIDEOSCREEN_SCREENMODE, screenmode))
       return false;
   }
@@ -351,6 +620,16 @@ bool CDisplaySettings::OnSettingChanging(const std::shared_ptr<const CSetting>& 
   {
     RESOLUTION oldRes = GetCurrentResolution();
     RESOLUTION newRes = GetResolutionFromString(std::static_pointer_cast<const CSettingString>(setting)->GetValue());
+
+    logM(LOGDEBUG,
+         "screenmodetrace: handler oldRes={} newRes={} value={} aborted={} fullscreenVideo={} "
+         "willPrompt={}",
+         static_cast<int>(oldRes), static_cast<int>(newRes),
+         std::static_pointer_cast<const CSettingString>(setting)->GetValue(),
+         m_resolutionChangeAborted,
+         CServiceBroker::GetWinSystem()->GetGfxContext().IsFullScreenVideo(),
+         (oldRes != RES_WINDOW && newRes != RES_WINDOW && oldRes != newRes &&
+          !m_resolutionChangeAborted));
 
     SetCurrentResolution(newRes, false);
     CServiceBroker::GetWinSystem()->GetGfxContext().SetVideoResolution(newRes, false);
@@ -424,10 +703,7 @@ bool CDisplaySettings::OnSettingChanging(const std::shared_ptr<const CSetting>& 
   else if (settingId == CSettings::SETTING_COREELEC_AMLOGIC_DISABLEGUISCALING ||
     settingId == CSettings::SETTING_COREELEC_AMLOGIC_FORCE_CS ||
     settingId == CSettings::SETTING_COREELEC_AMLOGIC_LIMIT_CD)
-  {
-    const RESOLUTION_INFO res_info = GetResolutionInfo(GetCurrentResolution());
-    write_resolution_ini(res_info);
-  }
+    write_current_resolution_ini();
 
   return true;
 }
@@ -506,6 +782,8 @@ void CDisplaySettings::SetCurrentResolution(RESOLUTION resolution, bool save /* 
   {
     // Save videoscreen.screenmode setting
     std::string mode = GetStringFromResolution(resolution);
+    logM(LOGDEBUG, "screenmodetrace: writer=SetCurrentResolution res={} screenmode={}",
+         static_cast<int>(resolution), mode);
     CServiceBroker::GetSettingsComponent()->GetSettings()->SetString(
         CSettings::SETTING_VIDEOSCREEN_SCREENMODE, mode);
 
@@ -522,9 +800,8 @@ void CDisplaySettings::SetCurrentResolution(RESOLUTION resolution, bool save /* 
   {
 
     m_currentResolution = resolution;
-    const RESOLUTION_INFO res_info = GetResolutionInfo(m_currentResolution);
     SetChanged();
-    write_resolution_ini(res_info);
+    write_current_resolution_ini();
   }
 }
 
@@ -645,11 +922,18 @@ void CDisplaySettings::ApplyCalibrations()
         if (m_resolutions[res].iSubtitles > m_resolutions[res].iHeight * 3 / 2)
           m_resolutions[res].iSubtitles = m_resolutions[res].iHeight * 3 / 2;
 
-        m_resolutions[res].fPixelRatio = itCal->fPixelRatio;
-        if (m_resolutions[res].fPixelRatio < 0.5f)
-          m_resolutions[res].fPixelRatio = 0.5f;
-        if (m_resolutions[res].fPixelRatio > 2.0f)
-          m_resolutions[res].fPixelRatio = 2.0f;
+        const bool staleSdSquareRatio =
+            itCal->fPixelRatio == 1.0f && m_resolutions[res].fPixelRatio != 1.0f &&
+            m_resolutions[res].iScreenWidth == 720 &&
+            (m_resolutions[res].iScreenHeight == 480 || m_resolutions[res].iScreenHeight == 576);
+        if (!staleSdSquareRatio)
+        {
+          m_resolutions[res].fPixelRatio = itCal->fPixelRatio;
+          if (m_resolutions[res].fPixelRatio < 0.5f)
+            m_resolutions[res].fPixelRatio = 0.5f;
+          if (m_resolutions[res].fPixelRatio > 2.0f)
+            m_resolutions[res].fPixelRatio = 2.0f;
+        }
         break;
       }
     }
@@ -861,8 +1145,19 @@ void CDisplaySettings::SettingOptionsRefreshRatesFiller(const SettingConstPtr& s
     list.emplace_back(StringUtils::Format("{:.2f}", refreshrate->RefreshRate), screenmode);
   }
 
-  if (!match)
-    current = GetStringFromResolution(res, CServiceBroker::GetWinSystem()->DefaultRefreshRate(refreshrates).RefreshRate);
+  if (!match && !refreshrates.empty())
+  {
+    const std::string stored =
+        std::static_pointer_cast<const CSettingString>(setting)->GetValue();
+    const REFRESHRATE fallback = CServiceBroker::GetWinSystem()->DefaultRefreshRate(refreshrates);
+    current = GetStringFromResolution(static_cast<RESOLUTION>(fallback.ResInfo_Index),
+                                      fallback.RefreshRate);
+    logM(LOGWARNING,
+         "screenmodetrace: writer=SettingOptionsRefreshRatesFiller stored={} replacement={} res={} "
+         "fallbackResInfoIndex={} fallbackRefreshRate={:.3f} options={}",
+         stored, current, static_cast<int>(res), fallback.ResInfo_Index, fallback.RefreshRate,
+         refreshrates.size());
+  }
 }
 
 void CDisplaySettings::SettingOptionsResolutionsFiller(const SettingConstPtr& setting,

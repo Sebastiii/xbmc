@@ -600,6 +600,7 @@ bool CPVRGUIActionsTimers::EditTimer(const CFileItem& item) const
       // end up with one timer missing wrt to the rule defined by the new timer.
       if (DeleteTimer(timer, timer->IsRecording(), false))
       {
+        newTimer->ResetClientIndex();
         if (AddTimer(newTimer))
           return true;
 

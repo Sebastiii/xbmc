@@ -186,8 +186,15 @@ static void AddRefreshRate(std::vector<REFRESHRATE> &refreshrates, unsigned int 
   float RefreshRate = CDisplaySettings::GetInstance().GetResolutionInfo(addindex).fRefreshRate;
 
   for (unsigned int idx = 0; idx < refreshrates.size(); idx++)
-    if (   refreshrates[idx].RefreshRate == RefreshRate)
-      return; // already taken care of.
+  {
+    if (refreshrates[idx].RefreshRate != RefreshRate)
+      continue;
+
+    if (refreshrates[idx].ResInfo_Index == RES_DESKTOP && static_cast<int>(addindex) != RES_DESKTOP)
+      refreshrates[idx].ResInfo_Index = static_cast<int>(addindex);
+
+    return; // already taken care of.
+  }
 
   REFRESHRATE rr = {RefreshRate, (int)addindex};
   refreshrates.push_back(rr);

@@ -37,6 +37,7 @@ bool CActiveAEResampleFFMPEG::Init(SampleConfig dstConfig,
                                    bool upmix,
                                    bool normalize,
                                    double centerMix,
+                                   double surroundMix,
                                    CAEChannelInfo* remapLayout,
                                    AEQuality quality,
                                    bool force_resample,
@@ -55,6 +56,8 @@ bool CActiveAEResampleFFMPEG::Init(SampleConfig dstConfig,
   m_src_bits = srcConfig.bits_per_sample;
   m_src_dither_bits = srcConfig.dither_bits;
 
+  m_compensationCarry = 0.0;
+
   if (m_src_rate != m_dst_rate)
     m_doesResample = true;
 
@@ -72,6 +75,11 @@ bool CActiveAEResampleFFMPEG::Init(SampleConfig dstConfig,
     m_src_chan_layout = layout.u.mask;
     av_channel_layout_uninit(&layout);
   }
+
+  double boost_center = CServiceBroker::GetSettingsComponent()->GetSettings()->GetNumber(
+      CSettings::SETTING_AUDIOOUTPUT_BOOSTCENTER);
+  if (boost_center > 0.0)
+    centerMix = pow(10.0, (boost_center - 3.0) / 20.0);
 
   AVChannelLayout dstChLayout = {};
   AVChannelLayout srcChLayout = {};
@@ -131,6 +139,86 @@ bool CActiveAEResampleFFMPEG::Init(SampleConfig dstConfig,
     hasMatrix = true;
     av_channel_layout_uninit(&dstChLayout);
   }
+  else if (sublevel > 0.0f &&
+           (m_src_chan_layout & AV_CH_LOW_FREQUENCY) &&
+           !(m_dst_chan_layout & AV_CH_LOW_FREQUENCY))
+  {
+    int lfeMixTo = CServiceBroker::GetSettingsComponent()->GetSettings()->GetInt(
+        CSettings::SETTING_AUDIOOUTPUT_LFEMIXTO);
+    if (lfeMixTo == 1)
+    {
+      memset(m_rematrix, 0, sizeof(m_rematrix));
+      av_channel_layout_from_mask(&dstChLayout, m_dst_chan_layout);
+      av_channel_layout_from_mask(&srcChLayout, m_src_chan_layout);
+
+      for (int out = 0; out < m_dst_channels; out++)
+      {
+        AVChannel outChan = av_channel_layout_channel_from_index(&dstChLayout, out);
+        for (int in = 0; in < m_src_channels; in++)
+        {
+          AVChannel inChan = av_channel_layout_channel_from_index(&srcChLayout, in);
+
+          if (inChan == outChan)
+          {
+            m_rematrix[out][in] = 1.0;
+          }
+          else if (av_channel_layout_index_from_channel(&dstChLayout, inChan) >= 0)
+          {
+          }
+          else if (inChan == AV_CHAN_LOW_FREQUENCY)
+          {
+            if (outChan == AV_CHAN_FRONT_LEFT || outChan == AV_CHAN_FRONT_RIGHT)
+              m_rematrix[out][in] = static_cast<double>(sublevel) * M_SQRT1_2;
+          }
+          else
+          {
+            switch (inChan)
+            {
+              case AV_CHAN_FRONT_CENTER:
+                if (outChan == AV_CHAN_FRONT_LEFT || outChan == AV_CHAN_FRONT_RIGHT)
+                  m_rematrix[out][in] = centerMix;
+                break;
+              case AV_CHAN_BACK_LEFT:
+              case AV_CHAN_SIDE_LEFT:
+                if (outChan == AV_CHAN_FRONT_LEFT)
+                  m_rematrix[out][in] = surroundMix;
+                break;
+              case AV_CHAN_BACK_RIGHT:
+              case AV_CHAN_SIDE_RIGHT:
+                if (outChan == AV_CHAN_FRONT_RIGHT)
+                  m_rematrix[out][in] = surroundMix;
+                break;
+              default:
+                break;
+            }
+          }
+        }
+      }
+
+      if ((m_dst_fmt == AV_SAMPLE_FMT_FLT || m_dst_fmt == AV_SAMPLE_FMT_FLTP) && normalize)
+      {
+        double maxRowSum = 0.0;
+        for (int out = 0; out < m_dst_channels; out++)
+        {
+          double sum = 0.0;
+          for (int in = 0; in < m_src_channels; in++)
+            sum += fabs(m_rematrix[out][in]);
+          if (sum > maxRowSum)
+            maxRowSum = sum;
+        }
+        if (maxRowSum > 1.0)
+        {
+          for (int out = 0; out < m_dst_channels; out++)
+            for (int in = 0; in < m_src_channels; in++)
+              m_rematrix[out][in] /= maxRowSum;
+        }
+      }
+
+      hasMatrix = true;
+      av_channel_layout_uninit(&dstChLayout);
+      av_channel_layout_uninit(&srcChLayout);
+    }
+  }
 
   av_channel_layout_from_mask(&dstChLayout, m_dst_chan_layout);
   av_channel_layout_from_mask(&srcChLayout, m_src_chan_layout);
@@ -178,23 +266,17 @@ bool CActiveAEResampleFFMPEG::Init(SampleConfig dstConfig,
     av_opt_set_int(m_pContext, "output_sample_bits", m_dst_bits, 0);
   }
 
-  // tell resampler to clamp float values
+  // tell resampler to normalize downmix matrix so output does not exceed 1.0
   // not required for sink stage (remapLayout == true)
   if ((m_dst_fmt == AV_SAMPLE_FMT_FLT || m_dst_fmt == AV_SAMPLE_FMT_FLTP) &&
-      (m_src_fmt == AV_SAMPLE_FMT_FLT || m_src_fmt == AV_SAMPLE_FMT_FLTP) && !remapLayout &&
-      normalize)
+      !remapLayout && normalize)
   {
     av_opt_set_double(m_pContext, "rematrix_maxval", 1.0, 0);
   }
 
-  int boost_center = CServiceBroker::GetSettingsComponent()->GetSettings()->GetInt("audiooutput.boostcenter");
-  if (boost_center)
-  {
-    float gain = pow(10.0f, ((float)(-3 + boost_center))/20.0f);
-    av_opt_set_double(m_pContext, "center_mix_level", gain, 0);
-  }
-  else
-    av_opt_set_double(m_pContext, "center_mix_level", centerMix, 0);
+  av_opt_set_double(m_pContext, "center_mix_level", centerMix, 0);
+
+  av_opt_set_double(m_pContext, "surround_mix_level", surroundMix, 0);
 
   if(swr_init(m_pContext) < 0)
   {
@@ -210,10 +292,15 @@ int CActiveAEResampleFFMPEG::Resample(uint8_t **dst_buffer, int dst_samples, uin
   int distance = 0;
   if (ratio != 1.0)
   {
-    delta = (src_samples*ratio-src_samples)*m_dst_rate/m_src_rate;
+    const double wanted =
+        (src_samples * ratio - src_samples) * m_dst_rate / m_src_rate + m_compensationCarry;
+    delta = static_cast<int>(wanted);
+    m_compensationCarry = wanted - delta;
     distance = src_samples*m_dst_rate/m_src_rate;
     m_doesResample = true;
   }
+  else
+    m_compensationCarry = 0.0;
 
   if (m_doesResample)
   {

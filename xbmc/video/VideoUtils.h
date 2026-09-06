@@ -59,9 +59,12 @@ void QueueItem(const std::shared_ptr<CFileItem>& item, QueuePosition pos);
   busy dialog if action takes certain amount of time to give the user visual feedback.
   \param item [in] the item to add to the playlist
   \param queuedItems [out] the items that can be put in a play list
+  \param mode [in] whether to keep the current list order (play from here) or not
   \return true on success, false otherwise
   */
-bool GetItemsForPlayList(const std::shared_ptr<CFileItem>& item, CFileItemList& queuedItems);
+bool GetItemsForPlayList(const std::shared_ptr<CFileItem>& item,
+                         CFileItemList& queuedItems,
+                         ContentUtils::PlayMode mode);
 
 /*!
  \brief Check whether the given item can be played by the app playlist player as one or more videos.

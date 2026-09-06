@@ -22,6 +22,7 @@
 #include "cores/IPlayer.h"
 #include "cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodec.h"
 #include "cores/VideoPlayer/VideoRenderers/RenderFlags.h"
+#include "rendering/GLExtensions.h"
 #include "rendering/MatrixGL.h"
 #include "rendering/gl/RenderSystemGL.h"
 #include "settings/AdvancedSettings.h"
@@ -532,9 +533,57 @@ void CLinuxRendererGL::RenderUpdate(int index, int index2, bool clear, unsigned 
 void CLinuxRendererGL::ClearBackBuffer()
 {
   //set the entire backbuffer to black
-  glClearColor(m_clearColour, m_clearColour, m_clearColour, 0);
-  glClear(GL_COLOR_BUFFER_BIT);
-  glClearColor(0,0,0,0);
+  //if we do a two pass render, we have to draw a quad. else we might occlude OSD elements.
+  if (CServiceBroker::GetWinSystem()->GetGfxContext().GetRenderOrder() ==
+      RENDER_ORDER_ALL_BACK_TO_FRONT)
+  {
+    CServiceBroker::GetWinSystem()->GetGfxContext().Clear(0xff000000);
+  }
+  else
+  {
+    ClearBackBufferQuad();
+  }
+}
+
+void CLinuxRendererGL::ClearBackBufferQuad()
+{
+  CRect windowRect(0, 0, CServiceBroker::GetWinSystem()->GetGfxContext().GetWidth(),
+                   CServiceBroker::GetWinSystem()->GetGfxContext().GetHeight());
+  struct Svertex
+  {
+    float x, y;
+  };
+
+  std::vector<Svertex> vertices{
+      {windowRect.x1, windowRect.y2 * 2},
+      {windowRect.x1, windowRect.y1},
+      {windowRect.x2 * 2, windowRect.y1},
+  };
+
+  glDisable(GL_BLEND);
+
+  m_renderSystem->EnableShader(ShaderMethodGL::SM_DEFAULT);
+  GLint posLoc = m_renderSystem->ShaderGetPos();
+  GLint uniCol = m_renderSystem->ShaderGetUniCol();
+
+  glUniform4f(uniCol, m_clearColour / 255.0f, m_clearColour / 255.0f, m_clearColour / 255.0f, 1.0f);
+
+  GLuint vertexVBO;
+  glGenBuffers(1, &vertexVBO);
+  glBindBuffer(GL_ARRAY_BUFFER, vertexVBO);
+  glBufferData(GL_ARRAY_BUFFER, sizeof(Svertex) * vertices.size(), vertices.data(), GL_STATIC_DRAW);
+
+  glVertexAttribPointer(posLoc, 2, GL_FLOAT, GL_FALSE, sizeof(Svertex), 0);
+  glEnableVertexAttribArray(posLoc);
+
+  glDrawArrays(GL_TRIANGLES, 0, vertices.size());
+
+  glDisableVertexAttribArray(posLoc);
+  glBindBuffer(GL_ARRAY_BUFFER, 0);
+  glDeleteBuffers(1, &vertexVBO);
+
+  m_renderSystem->DisableShader();
+  glEnable(GL_BLEND);
 }
 
 //draw black bars around the video quad, this is more efficient than glClear()
@@ -659,6 +708,7 @@ void CLinuxRendererGL::DrawBlackBars()
   glDeleteBuffers(1, &vertexVBO);
 
   m_renderSystem->DisableShader();
+  glEnable(GL_BLEND);
 }
 
 void CLinuxRendererGL::UpdateVideoFilter()
@@ -847,7 +897,6 @@ void CLinuxRendererGL::UpdateVideoFilter()
       break;
     }
 
-    SetTextureFilter(GL_LINEAR);
     m_renderQuality = RQ_MULTIPASS;
     return;
 
@@ -1049,8 +1098,6 @@ void CLinuxRendererGL::RenderSinglePass(int index, int field)
     LoadShaders(field);
   }
 
-  glDisable(GL_DEPTH_TEST);
-
   // Y
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(m_textureTarget, planes[0].id);
@@ -1221,8 +1268,6 @@ void CLinuxRendererGL::RenderToFBO(int index, int field, bool weave /*= false*/)
     }
   }
 
-  glDisable(GL_DEPTH_TEST);
-
   // Y
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(m_textureTarget, planes[0].id);
@@ -1386,7 +1431,7 @@ void CLinuxRendererGL::RenderToFBO(int index, int field, bool weave /*= false*/)
   glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, indexVBO);
   glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(GLubyte)*4, idx, GL_STATIC_DRAW);
 
-  glDrawElements(GL_TRIANGLE_STRIP, 4, GL_UNSIGNED_BYTE, 0);
+  glDrawElements(GL_TRIANGLE_STRIP, 4, GL_UNSIGNED_BYTE, nullptr);
   VerifyGLState();
 
   glDisableVertexAttribArray(vertLoc);
@@ -1509,7 +1554,7 @@ void CLinuxRendererGL::RenderFromFBO()
   glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, indexVBO);
   glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(GLubyte)*4, idx, GL_STATIC_DRAW);
 
-  glDrawElements(GL_TRIANGLE_STRIP, 4, GL_UNSIGNED_BYTE, 0);
+  glDrawElements(GL_TRIANGLE_STRIP, 4, GL_UNSIGNED_BYTE, nullptr);
   VerifyGLState();
 
   glDisableVertexAttribArray(loc);
@@ -1650,7 +1695,7 @@ void CLinuxRendererGL::RenderRGB(int index, int field)
   glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, indexVBO);
   glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(GLubyte)*4, idx, GL_STATIC_DRAW);
 
-  glDrawElements(GL_TRIANGLE_STRIP, 4, GL_UNSIGNED_BYTE, 0);
+  glDrawElements(GL_TRIANGLE_STRIP, 4, GL_UNSIGNED_BYTE, nullptr);
 
   glBindBuffer(GL_ARRAY_BUFFER, 0);
   glDeleteBuffers(1, &vertexVBO);
@@ -1703,6 +1748,8 @@ bool CLinuxRendererGL::RenderCapture(int index, CRenderCapture* capture)
   // restore original video rect
   m_destRect = saveSize;
   restoreRotatedCoords();//restores the previous state of the rotated dest coords
+
+  glEnable(GL_BLEND);
 
   return true;
 }

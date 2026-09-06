@@ -91,7 +91,20 @@ protected:
   static const int FIELD_TOP{1};
   static const int FIELD_BOT{2};
 
-  virtual void Render(unsigned int flags, int index);
+#if defined(HAS_GLES) && HAS_GLES == 3
+  struct GpuTimerQuery
+  {
+    GLuint id{0};
+    bool pending{false};
+    double accumulatedMs{0.0};
+    double smoothedMs{0.0};
+    unsigned int samples{0};
+    bool hasValue{false};
+    const char* label{nullptr};
+  };
+#endif
+
+  virtual bool Render(unsigned int flags, int index);
   virtual void RenderUpdateVideo(bool clear, unsigned int flags = 0, unsigned int alpha = 255);
 
   int NextYV12Texture() const;
@@ -117,11 +130,24 @@ protected:
   void DeleteNV12Texture(int index);
   bool CreateNV12Texture(int index);
 
+  void UpdateGpuTimerSupport();
+  void PumpGpuTimerQueries();
+  ESCALINGMETHOD ResolveAutoScalingMethod() const;
+  ESCALINGMETHOD ResolveScalingMethod() const;
+  ESCALINGMETHOD GetPerformanceFallbackScalingMethod(ESCALINGMETHOD method) const;
+  bool IsHighQualityScalingMethod(ESCALINGMETHOD method) const;
+  void EvaluateScalerPerformance();
+#if defined(HAS_GLES) && HAS_GLES == 3
+  bool BeginGpuTimerQuery(GpuTimerQuery& query, const char* label);
+  void EndGpuTimerQuery(GpuTimerQuery& query);
+  void DestroyGpuTimerQuery(GpuTimerQuery& query);
+#endif
+
   void CalculateTextureSourceRects(int source, int num_planes);
 
   // renderers
   void RenderToFBO(int index, int field);
-  void RenderFromFBO() const;
+  void RenderFromFBO();
   void RenderSinglePass(int index, int field); // single pass glsl renderer
 
   // hooks for HwDec Renderered
@@ -202,18 +228,31 @@ protected:
   Shaders::GLES::BaseVideoFilterShader* m_pVideoFilterShader{nullptr};
   ESCALINGMETHOD m_scalingMethod{VS_SCALINGMETHOD_LINEAR};
   ESCALINGMETHOD m_scalingMethodGui{VS_SCALINGMETHOD_MAX};
+  ESCALINGMETHOD m_dynamicScalingMethod{VS_SCALINGMETHOD_MAX};
   bool m_fullRange;
   AVColorPrimaries m_srcPrimaries;
   bool m_toneMap = false;
   ETONEMAPMETHOD m_toneMapMethod = VS_TONEMAPMETHOD_OFF;
   bool m_passthroughHDR = false;
+  bool m_dvOpened = false;
   unsigned char* m_planeBuffer = nullptr;
   size_t m_planeBufferSize = 0;
+  bool m_gpuTimersInitialized{false};
+  bool m_gpuTimersEnabled{false};
+  bool m_dynamicScalingFallbackActive{false};
+  unsigned int m_scalerOverBudgetCount{0};
+  unsigned int m_scalerUnderBudgetCount{0};
+#if defined(HAS_GLES) && HAS_GLES == 3
+  GpuTimerQuery m_renderToFboTimer;
+  GpuTimerQuery m_renderFromFboTimer;
+#endif
 
   // clear colour for "black" bars
   float m_clearColour{0.0f};
   CRect m_viewRect;
 
 private:
-  void DrawBlackBars() const;
+  void ClearBackBuffer();
+  void ClearBackBufferQuad();
+  void DrawBlackBars();
 };

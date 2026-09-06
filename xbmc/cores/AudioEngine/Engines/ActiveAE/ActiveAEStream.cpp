@@ -48,8 +48,8 @@ CActiveAEStream::CActiveAEStream(AEAudioFormat* format, unsigned int streamid, C
   m_matrixEncoding = AV_MATRIX_ENCODING_NONE;
   m_audioServiceType = AV_AUDIO_SERVICE_TYPE_MAIN;
   m_pClock = nullptr;
-  m_lastPts = 0;
-  m_lastPtsJump = 0;
+  m_lastPts.store(0.0, std::memory_order_relaxed);
+  m_lastPtsJump.store(0.0, std::memory_order_relaxed);
   m_clockSpeed = 1.0;
 }
 
@@ -147,7 +147,7 @@ void CActiveAEStream::InitRemapper()
     srcConfig.bits_per_sample = CAEUtil::DataFormatToUsedBits(m_format.m_dataFormat);
     srcConfig.dither_bits = CAEUtil::DataFormatToDitherBits(m_format.m_dataFormat);
 
-    m_remapper->Init(dstConfig, srcConfig, false, false, M_SQRT1_2, &remapLayout,
+    m_remapper->Init(dstConfig, srcConfig, false, false, M_SQRT1_2, M_SQRT1_2, &remapLayout,
                      AE_QUALITY_LOW, // not used for remapping
                      false, 0.0f);
 
@@ -178,9 +178,13 @@ void CActiveAEStream::RemapBuffer()
 
 double CActiveAEStream::CalcResampleRatio(double error)
 {
+  bool bigErrorReset = false;
   //reset the integral on big errors, failsafe
   if (fabs(error) > 1000)
+  {
     m_resampleIntegral = 0;
+    bigErrorReset = true;
+  }
   else if (fabs(error) > 5)
     m_resampleIntegral += error / 1000 / 50;
 
@@ -189,27 +193,47 @@ double CActiveAEStream::CalcResampleRatio(double error)
   double proportionaldiv = 2.0;
   proportional = error / GetErrorInterval().count() / proportionaldiv;
 
+  bool clockReset = false;
   double clockspeed = 1.0;
   if (m_pClock)
   {
     clockspeed = m_pClock->GetClockSpeed();
     if (m_clockSpeed != clockspeed)
+    {
       m_resampleIntegral = 0;
+      clockReset = true;
+    }
     m_clockSpeed = clockspeed;
   }
 
   double ret = 1.0 / clockspeed + proportional + m_resampleIntegral;
+  logComponentM(LOGDEBUG, LOGAUDIO,
+                "avservo: errMs={:.2f} errMinMs={:.2f} errMaxMs={:.2f} errSpanMs={:.2f} n={} "
+                "rr={:.6f} prop={:.6f} integ={:.6f} clkspd={:.6f} "
+                "intvMs={} rstClk={:d} rstBig={:d}",
+                error, m_syncError.GetLastMin(), m_syncError.GetLastMax(),
+                m_syncError.GetLastMax() - m_syncError.GetLastMin(), m_syncError.GetLastCount(),
+                ret, proportional, m_resampleIntegral, clockspeed,
+                GetErrorInterval().count(), clockReset, bigErrorReset);
   //CLog::Log(LOGINFO,"----- error: {:f}, rr: {:f}, prop: {:f}, int: {:f}",
   //                    error, ret, proportional, m_resampleIntegral);
   return ret;
 }
 
 std::chrono::milliseconds CActiveAEStream::GetErrorInterval() const {
-  std::chrono::milliseconds ret = m_errorInterval;
+  const auto interval_ms = m_hybridFirstCycleIntervalMs.load(std::memory_order_relaxed);
+  if (interval_ms > 0 && m_insyncFirstCycle)
+    return std::chrono::milliseconds(interval_ms);
+  std::chrono::milliseconds ret{m_errorIntervalMs.load(std::memory_order_relaxed)};
   double rr = m_processingBuffers->GetRR();
   if (rr > 1.02 || rr < 0.98)
     ret *= 3;
   return ret;
+}
+
+void CActiveAEStream::SetHybridFirstCycleInterval(std::chrono::milliseconds interval)
+{
+  m_hybridFirstCycleIntervalMs.store(interval.count(), std::memory_order_relaxed);
 }
 
 unsigned int CActiveAEStream::GetSpace()
@@ -255,12 +279,13 @@ unsigned int CActiveAEStream::AddData(const uint8_t* const *data, unsigned int o
 
       if (!copied)
       {
-        if (pts < m_lastPts)
+        if (pts < m_lastPts.load(std::memory_order_relaxed))
         {
-          if (m_lastPtsJump != 0)
+          const double lastPtsJump = m_lastPtsJump.load(std::memory_order_relaxed);
+          if (lastPtsJump != 0)
           {
-            auto diff = std::chrono::milliseconds(static_cast<int>(pts - m_lastPtsJump));
-            if (diff > m_errorInterval)
+            auto diff = std::chrono::milliseconds(static_cast<int>(pts - lastPtsJump));
+            if (diff.count() > m_errorIntervalMs.load(std::memory_order_relaxed))
             {
               diff += 1s;
               diff = std::min(diff, 6000ms);
@@ -268,12 +293,12 @@ unsigned int CActiveAEStream::AddData(const uint8_t* const *data, unsigned int o
                         "CActiveAEStream::AddData - messy timestamps, increasing interval for "
                         "measuring average error to {} ms",
                         diff.count());
-              m_errorInterval = diff;
+              m_errorIntervalMs.store(diff.count(), std::memory_order_relaxed);
             }
           }
-          m_lastPtsJump = pts;
+          m_lastPtsJump.store(pts, std::memory_order_relaxed);
         }
-        m_lastPts = pts;
+        m_lastPts.store(pts, std::memory_order_relaxed);
         m_currentBuffer->timestamp = pts;
         m_currentBuffer->pkt_start_offset = m_currentBuffer->pkt->nb_samples;
       }
@@ -285,7 +310,10 @@ unsigned int CActiveAEStream::AddData(const uint8_t* const *data, unsigned int o
       copied += minFrames;
 
       if (extData && extData->hasDownmix)
+      {
         m_currentBuffer->centerMixLevel = extData->centerMixLevel;
+        m_currentBuffer->surroundMixLevel = extData->surroundMixLevel;
+      }
 
       bool rawPktComplete = false;
       {
@@ -472,9 +500,11 @@ void CActiveAEStream::Flush()
     // Seeking/skipping can cause PTS discontinuities. Reset the PTS tracking and
     // error measurement interval so we don't treat a legitimate discontinuity
     // as "messy timestamps" and ramp the averaging window up to seconds.
-    m_lastPts = std::numeric_limits<double>::lowest();
-    m_lastPtsJump = 0;
-    m_errorInterval = 1000ms;
+    m_lastPts.store(std::numeric_limits<double>::lowest(), std::memory_order_relaxed);
+    m_lastPtsJump.store(0.0, std::memory_order_relaxed);
+    m_errorIntervalMs.store(1000, std::memory_order_relaxed);
+    m_insyncFirstCycle = false;
+    m_lastSyncFromFirstCycle = false;
 
     m_activeAE->FlushStream(this);
     m_streamIsFlushed = true;

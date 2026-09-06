@@ -7,16 +7,13 @@
  */
 
 #define AC3_ENCODE_BITRATE 640000
-#define EAC3_ENCODE_BITRATE 768000
+#define EAC3_ENCODE_BITRATE 1024000
 #define DTS_ENCODE_BITRATE 1411200
 
 #include "cores/AudioEngine/Encoders/AEEncoderFFmpeg.h"
 
-#include "ServiceBroker.h"
 #include "cores/AudioEngine/Utils/AEUtil.h"
 #include "cores/FFmpeg.h"
-#include "settings/Settings.h"
-#include "settings/SettingsComponent.h"
 #include "utils/log.h"
 
 extern "C"
@@ -91,8 +88,6 @@ bool CAEEncoderFFmpeg::Initialize(AEAudioFormat &format, bool allow_planar_input
 {
   Reset();
 
-  bool ac3 = CServiceBroker::GetSettingsComponent()->GetSettings()->GetBool(CSettings::SETTING_AUDIOOUTPUT_AC3PASSTHROUGH);
-
   const AVCodec* codec = nullptr;
 
   if (format.m_streamInfo.m_type == CAEStreamInfo::STREAM_TYPE_EAC3)
@@ -101,8 +96,15 @@ bool CAEEncoderFFmpeg::Initialize(AEAudioFormat &format, bool allow_planar_input
     m_CodecID = AV_CODEC_ID_EAC3;
     m_BitRate = EAC3_ENCODE_BITRATE;
     codec = avcodec_find_encoder(m_CodecID);
+    if (!codec)
+    {
+      CLog::Log(LOGWARNING,
+                "CAEEncoderFFmpeg::Initialize - EAC3 encoder not available, falling back to AC3");
+      format.m_streamInfo.m_type = CAEStreamInfo::STREAM_TYPE_AC3;
+    }
   }
-  else if (ac3 || format.m_streamInfo.m_type == CAEStreamInfo::STREAM_TYPE_AC3)
+
+  if (format.m_streamInfo.m_type == CAEStreamInfo::STREAM_TYPE_AC3)
   {
     m_CodecName = "AC3";
     m_CodecID = AV_CODEC_ID_AC3;

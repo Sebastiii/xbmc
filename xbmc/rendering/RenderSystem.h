@@ -14,12 +14,37 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 /*
  *   CRenderSystemBase interface allows us to create the rendering engine we use.
  *   We currently have two engines: OpenGL and DirectX
  *   This interface is very basic since a lot of the actual details will go in to the derived classes
  */
+
+enum DEPTH_CULLING
+{
+  DEPTH_CULLING_OFF = 0,
+  DEPTH_CULLING_BACK_TO_FRONT,
+  DEPTH_CULLING_FRONT_TO_BACK,
+};
+
+class CGUIRenderTargetFBO
+{
+public:
+  static constexpr size_t MAX_CONTENT_RECTS = 8;
+
+  virtual ~CGUIRenderTargetFBO() = default;
+
+  virtual unsigned int GetWidth() const = 0;
+  virtual unsigned int GetHeight() const = 0;
+
+  void SetContentRects(std::vector<CRect> rects) { m_contentRects = std::move(rects); }
+  const std::vector<CRect>& GetContentRects() const { return m_contentRects; }
+
+private:
+  std::vector<CRect> m_contentRects;
+};
 
 class CGUIImage;
 class CGUITextLayout;
@@ -37,6 +62,27 @@ public:
   virtual bool BeginRender() = 0;
   virtual bool EndRender() = 0;
   virtual void PresentRender(bool rendered, bool videoLayer) = 0;
+  virtual bool SupportsGuiRenderTargets() const;
+  virtual std::unique_ptr<CGUIRenderTargetFBO> CreateGuiRenderTarget(unsigned int width,
+                                                                  unsigned int height);
+  virtual bool BeginGuiRenderTarget(CGUIRenderTargetFBO& target);
+  virtual bool BeginGuiRenderTargetPersistent(CGUIRenderTargetFBO& target, bool clearColor);
+  virtual bool SupportsGuiRenderTargetConvert() const { return false; }
+  virtual void EndGuiRenderTarget(CGUIRenderTargetFBO& target);
+  virtual bool RenderGuiRenderTarget(const CGUIRenderTargetFBO& target, bool replace = false);
+  virtual void* CreateGuiRenderFence();
+  virtual bool WaitGuiRenderFence(void* fence, bool poll);
+  virtual bool WaitGuiRenderFenceBounded(void* fence, uint64_t maxWaitNs);
+  virtual void DeleteGuiRenderFence(void* fence);
+  virtual bool SupportsGuiRenderTimer() const { return false; }
+  virtual void BeginGuiRenderTimer() {}
+  virtual void EndGuiRenderTimer() {}
+  virtual bool PollGuiRenderTimerNs(uint64_t& elapsedNs) { return false; }
+  virtual void EstablishGuiRenderBaseline(unsigned int width, unsigned int height);
+  virtual void SetThreadGuiShaderScope(bool worker) {}
+  virtual void ReleaseThreadGuiShaders() {}
+  virtual unsigned int GetGuiShaderEpoch() const { return 0; }
+  virtual void InvalidateColorBuffer() {}
   virtual bool ClearBuffers(UTILS::COLOR::Color color) = 0;
   virtual bool IsExtSupported(const char* extension) const = 0;
 
@@ -48,6 +94,8 @@ public:
   virtual CRect ClipRectToScissorRect(const CRect &rect) { return CRect(); }
   virtual void SetScissors(const CRect &rect) = 0;
   virtual void ResetScissors() = 0;
+
+  virtual void SetDepthCulling(DEPTH_CULLING culling) {}
 
   virtual void CaptureStateBlock() = 0;
   virtual void ApplyStateBlock() = 0;
@@ -91,7 +139,6 @@ protected:
   RENDER_STEREO_VIEW m_stereoView = RENDER_STEREO_VIEW_OFF;
   RENDER_STEREO_MODE m_stereoMode = RENDER_STEREO_MODE_OFF;
   bool m_limitedColorRange = false;
-  bool m_transferPQ{false};
 
   std::unique_ptr<CGUIImage> m_splashImage;
   std::unique_ptr<CGUITextLayout> m_splashMessageLayout;

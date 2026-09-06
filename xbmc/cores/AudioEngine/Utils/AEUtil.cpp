@@ -65,7 +65,8 @@ const char* CAEUtil::GetStdChLayoutName(const enum AEStdChLayout layout)
   {
     "1.0",
     "2.0", "2.1", "3.0", "3.1", "4.0",
-    "4.1", "5.0", "5.1", "7.0", "7.1"
+    "4.1", "5.0", "5.1", "7.0", "7.1",
+    "6.0", "6.1"
   };
 
   return layouts[layout];
@@ -498,9 +499,9 @@ CAEChannelInfo CAEUtil::GetAEChannelLayout(uint64_t layout)
   if (layout & AV_CH_TOP_FRONT_LEFT)   channelLayout += AE_CH_TFL;
   if (layout & AV_CH_TOP_FRONT_CENTER) channelLayout += AE_CH_TFC;
   if (layout & AV_CH_TOP_FRONT_RIGHT)  channelLayout += AE_CH_TFR;
-  if (layout & AV_CH_TOP_BACK_LEFT)    channelLayout += AE_CH_BL;
-  if (layout & AV_CH_TOP_BACK_CENTER)  channelLayout += AE_CH_BC;
-  if (layout & AV_CH_TOP_BACK_RIGHT)   channelLayout += AE_CH_BR;
+  if (layout & AV_CH_TOP_BACK_LEFT)    channelLayout += AE_CH_TBL;
+  if (layout & AV_CH_TOP_BACK_CENTER)  channelLayout += AE_CH_TBC;
+  if (layout & AV_CH_TOP_BACK_RIGHT)   channelLayout += AE_CH_TBR;
 
   return channelLayout;
 }

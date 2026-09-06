@@ -223,6 +223,7 @@ protected:
     double m_syncError;
     unsigned int m_errorTime;
     CAESyncInfo::AESyncState m_syncState;
+    bool m_lastSyncFromFirstCycle{false};
   };
   std::vector<StreamStats> m_streamStats;
 };

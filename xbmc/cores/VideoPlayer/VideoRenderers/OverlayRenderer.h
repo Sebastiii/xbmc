@@ -80,9 +80,13 @@ namespace OVERLAY {
     float m_height{1.0f};
     float m_source_width{0}; // Video source width resolution used to calculate aspect ratio
     float m_source_height{0}; // Video source height resolution used to calculate aspect ratio
+    float m_glyphMinY{0.0f};
+    float m_glyphMaxY{0.0f};
 
     int m_3dSubtitleDepth{0};
     bool m_pgsSubtitle{false};
+    bool m_isBitmapOverlay{false};
+    bool m_isDiscMenuOverlay{false};
 
   protected:
     /*!
@@ -103,7 +107,7 @@ namespace OVERLAY {
     void Notify(const Observable& obs, const ObservableMessage msg) override;
 
     void AddOverlay(std::shared_ptr<CDVDOverlay> o, double pts, int index);
-    virtual void Render(int idx);
+    virtual void Render(int idx, float depth = 0.0f);
 
     /*!
      * \brief Release resources
@@ -119,8 +123,14 @@ namespace OVERLAY {
 
     void Release(int idx);
     bool HasOverlay(int idx);
+    int GetOverlayCount(int idx);
+    uint64_t GetOverlaySetSignature(int idx, bool& animated) const;
+    bool GetVisibleSubtitleSpan(int& topPx, int& botPx, bool& imageVisible) const;
     void SetVideoRect(CRect &source, CRect &dest, CRect &view);
     void SetStereoMode(const std::string &stereomode);
+    void SetActiveAreaPx(int topPx, int bottomPx);
+    int GetPgsVerticalMode() const { return m_pgsVerticalMode.load(std::memory_order_acquire); }
+    int GetPgsBitmapZoom() const { return m_pgsBitmapZoom.load(std::memory_order_acquire); }
 
     /*!
      * \brief Set the subtitle vertical position,
@@ -134,12 +144,14 @@ namespace OVERLAY {
     /*!
      * \brief Reset the subtitle position to default value
      */
-    void ResetSubtitlePosition();
+    virtual void ResetSubtitlePosition();
 
     /*!
      * \brief Called when the screen resolution is changed
      */
     void OnViewChange();
+
+    void MarkOverlayRenderChanged();
 
     struct SElement
     {
@@ -149,6 +161,10 @@ namespace OVERLAY {
     };
 
     void Render(COverlay* o) const;
+    void RenderOverlay(COverlay* o, SRenderState state) const;
+    SRenderState ComputeBaseState(const COverlay* o) const;
+    bool IsSubtitleTextCandidate(const COverlay* o, const SRenderState& state) const;
+    float ComputeBitmapBlockShift(float blockTop, float blockBottom) const;
     std::shared_ptr<COverlay> Convert(CDVDOverlay& o, double pts);
     /*!
     * \brief Convert the overlay to a overlay renderer
@@ -180,10 +196,11 @@ namespace OVERLAY {
       POSRESINFO_SAVE_CHANGES = -2,
     };
 
-    CCriticalSection m_section;
+    mutable CCriticalSection m_section;
     std::vector<SElement> m_buffers[NUM_BUFFERS];
     std::array<std::atomic_uint, NUM_BUFFERS> m_overlayCount{};
     std::atomic_bool m_buffersChanged{false};
+    std::atomic<uint64_t> m_overlayRenderChangeGen{0};
     std::map<unsigned int, std::shared_ptr<COverlay>> m_textureCache;
     static unsigned int m_textureid;
     CRect m_rv; // Frame size
@@ -199,7 +216,21 @@ namespace OVERLAY {
     bool m_saveSubtitlePosition{false}; // To save subtitle position permanently
     KODI::SUBTITLES::HorizontalAlign m_subtitleHorizontalAlign{
         KODI::SUBTITLES::HorizontalAlign::CENTER};
-    KODI::SUBTITLES::Align m_subtitleAlign{KODI::SUBTITLES::Align::BOTTOM_OUTSIDE};
+    KODI::SUBTITLES::Align m_subtitleAlign{KODI::SUBTITLES::Align::ORIGINAL};
+
+    std::atomic<int> m_pgsVerticalMode{0};
+    std::atomic<int> m_pgsVerticalOffsetSteps{0};
+    std::atomic<int> m_pgsBitmapZoom{100};
+    std::atomic<bool> m_alignOriginal{false};
+    std::atomic<bool> m_restrictToActiveArea{false};
+    float m_pgsBitmapBlockShift{0.0f};
+    float m_pgsBitmapClusterMinY{0.0f};
+    std::atomic<int> m_activeAreaTopOffsetPx{0};
+    std::atomic<int> m_activeAreaBottomOffsetPx{0};
+    std::atomic<bool> m_lastSubtitleVisible{false};
+    std::atomic<bool> m_lastSubtitleImageVisible{false};
+    std::atomic<int> m_lastSubtitleTopPx{0};
+    std::atomic<int> m_lastSubtitleBottomPx{0};
 
     std::shared_ptr<struct KODI::SUBTITLES::STYLE::style> m_overlayStyle;
     std::atomic<bool> m_isSettingsChanged{false};

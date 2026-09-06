@@ -463,6 +463,12 @@ constexpr const int ACTION_KEYBOARD_COMPOSING_KEY_FINISHED = 265;
 constexpr const int ACTION_PLAYER_INCREASE_TEMPO = 266;
 constexpr const int ACTION_PLAYER_DECREASE_TEMPO = 267;
 
+constexpr const int ACTION_DIALOG_SELECT_VIDEO = 270;
+
+constexpr const int ACTION_DIALOG_SELECT_AUDIO = 271;
+
+constexpr const int ACTION_DIALOG_SELECT_SUBTITLE = 272;
+
 // Voice actions
 constexpr const int ACTION_VOICE_RECOGNIZE = 300;
 

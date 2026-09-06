@@ -2,15 +2,45 @@
  *  Copyright (C) 2010-2018 Team Kodi
  *  This file is part of Kodi - https://kodi.tv
  *
+ *  Object audio and DTS extension substream parsing is implemented from the
+ *  published specifications:
+ *
+ *    ETSI TS 103 420 V1.2.1 (object audio carriage using Enhanced AC-3)
+ *      program_assignment syntax      clause 5.5.3
+ *      content_description elements   table 11a
+ *      intermediate spatial format    table 11b
+ *      bed channel assignment widths  table 12
+ *      non standard bed assignment    table 13
+ *      num_bed_instances              clauses 5.6.0.9 and 5.6.0.10
+ *      num_dynamic_objects            clause 5.6.0.12
+ *      reserved_data_size             clause 5.6.4.1
+ *
+ *    ETSI TS 102 114 V1.6.1 (DTS coherent acoustics)
+ *      extension substream header     table 7-2
+ *      audio asset descriptor         table 7-5
+ *      loudspeaker activity mask      table 7-10
+ *
+ *  TS 103 420 specifies an extension to E-AC-3 only. The TrueHD 16 channel
+ *  presentation carries the same program assignment fields but is not covered
+ *  by a published specification, so its intermediate spatial format indices are
+ *  restricted to those the format is known to use.
+ *
+ *  No published specification documents the DTS:X height layer. A stream that
+ *  ffmpeg reports as DTS:X, and whose loudspeaker activity mask declares no
+ *  height channels, is modelled as carrying four.
+ *
  *  SPDX-License-Identifier: GPL-2.0-or-later
  *  See LICENSES/README.md for more information.
  */
 
 #include "AEStreamInfo.h"
 
+#include "utils/LogThrottle.h"
 #include "utils/log.h"
 
 #include <algorithm>
+#include <climits>
+#include <fmt/format.h>
 #include <string.h>
 #include <iomanip>
 #include <sstream>
@@ -25,6 +55,15 @@
 #define DTS_SYNC_CORE_16LE  0xFE7F0180
 
 #define DTS_SYNC_EXTENTION  0x64582025  // DTS Extention Subsystem for below extensions.
+
+static constexpr unsigned int DTS_CHANGE_CONFIRM_FRAMES = 3;
+static constexpr unsigned int DTSHD_PACKER_OVERHEAD = 12;
+
+static bool IsPackableDtsBurst(unsigned int period)
+{
+  return period == 512 || period == 1024 || period == 2048 || period == 4096 ||
+         period == 8192 || period == 16384;
+}
 
 #define DTS_SYNC_EXT_XCH    0x5a5a5a5a  // DTS Extension to 6.1 Channels (XCh) - in case of multiple extension streams the XCh stream is always the last.
 #define DTS_SYNC_EXT_XXCH   0x47004a03  // DTS Extension to More Than 5.1 Channels (XXCh)
@@ -74,7 +113,7 @@ double CAEStreamInfo::GetDuration() const
       duration = 3840.0 / rate;
       break;
     case STREAM_TYPE_DTSHD_MA:
-      duration = ((m_dtsSamplesPerFrame != 0) ? static_cast<double>(m_dtsSamplesPerFrame) : 512.0) / m_sampleRate;
+      duration = 512.0 / m_sampleRate;
       break;
     case STREAM_TYPE_DTS_512:
     case STREAM_TYPE_DTSHD_CORE:
@@ -110,6 +149,12 @@ void CAEStreamParser::Reset()
   m_skipBytes = 0;
   m_bufferSize = 0;
   m_needBytes = 0;
+  m_dtsChangeStreak = 0;
+  m_dtsCandidateType = CAEStreamInfo::STREAM_TYPE_NULL;
+  m_dtsCandidateRate = 0;
+  m_dtsCandidateBlocks = 0;
+  m_eac3ObjectsLatched = false;
+  m_eac3ScanAttempts = 0;
 
   m_hasSync = false;
 }
@@ -238,6 +283,17 @@ void CAEStreamParser::GetPacket(uint8_t** buffer, unsigned int* bufferSize)
       DefeatAC3DialNorm(m_buffer, size);
     }
 
+    if (m_defeatDTSDialNorm &&
+        (m_info.m_type == CAEStreamInfo::STREAM_TYPE_DTS_512 ||
+         m_info.m_type == CAEStreamInfo::STREAM_TYPE_DTS_1024 ||
+         m_info.m_type == CAEStreamInfo::STREAM_TYPE_DTS_2048 ||
+         m_info.m_type == CAEStreamInfo::STREAM_TYPE_DTSHD ||
+         m_info.m_type == CAEStreamInfo::STREAM_TYPE_DTSHD_CORE ||
+         m_info.m_type == CAEStreamInfo::STREAM_TYPE_DTSHD_MA))
+    {
+      DefeatDTSDialNorm(m_buffer, size);
+    }
+
     // make sure the buffer is allocated and big enough
     if (!*buffer || !bufferSize || *bufferSize < size)
     {
@@ -275,8 +331,9 @@ unsigned int CAEStreamParser::DetectType(uint8_t* data, unsigned int size)
     unsigned int header = data[0] << 24 | data[1] << 16 | data[2] << 8 | data[3];
 
     // if it could be DTS
-    if (header == DTS_SYNC_CORE_14BE || header == DTS_SYNC_CORE_14LE ||
-        header == DTS_SYNC_CORE_16BE || header == DTS_SYNC_CORE_16LE)
+    if ((m_syncFamily == SyncFamily::Any || m_syncFamily == SyncFamily::DTS) &&
+        (header == DTS_SYNC_CORE_14BE || header == DTS_SYNC_CORE_14LE ||
+         header == DTS_SYNC_CORE_16BE || header == DTS_SYNC_CORE_16LE))
     {
       unsigned int skip = SyncDTS(data, size);
       if (m_hasSync || m_needBytes)
@@ -286,7 +343,8 @@ unsigned int CAEStreamParser::DetectType(uint8_t* data, unsigned int size)
     }
 
     // if it could be AC3
-    if (data[0] == 0x0b && data[1] == 0x77)
+    if ((m_syncFamily == SyncFamily::Any || m_syncFamily == SyncFamily::AC3) &&
+        data[0] == 0x0b && data[1] == 0x77)
     {
       unsigned int skip = SyncAC3(data, size);
       if (m_hasSync || m_needBytes)
@@ -296,7 +354,8 @@ unsigned int CAEStreamParser::DetectType(uint8_t* data, unsigned int size)
     }
 
     // if it could be TrueHD
-    if (data[4] == 0xf8 && data[5] == 0x72 && data[6] == 0x6f && data[7] == 0xba)
+    if ((m_syncFamily == SyncFamily::Any || m_syncFamily == SyncFamily::TrueHD) &&
+        data[4] == 0xf8 && data[5] == 0x72 && data[6] == 0x6f && data[7] == 0xba)
     {
       unsigned int skip = SyncTrueHD(data, size);
       if (m_hasSync)
@@ -450,9 +509,16 @@ void CAEStreamParser::DefeatAC3DialNorm(uint8_t* data, unsigned int size)
     else if (bsid <= 16)
     {
       // E-AC-3
+      uint8_t strmtyp = frame[2] >> 6;
       unsigned int framewords = (((frame[2] & 0x7) << 8) | frame[3]) + 1;
       frame_bytes = framewords * 2;
       if (offset + frame_bytes > size) break;
+
+      if (strmtyp == 1)
+      {
+        offset += frame_bytes;
+        continue;
+      }
 
       // dialnorm: byte 5 bits[2:0] (MSBs) + byte 6 bits[7:6] (LSBs)
       uint8_t dn = ((frame[5] & 0x07) << 2) | ((frame[6] >> 6) & 0x03);
@@ -482,6 +548,716 @@ void CAEStreamParser::DefeatAC3DialNorm(uint8_t* data, unsigned int size)
 
     offset += frame_bytes;
   }
+}
+
+static inline uint32_t DTS_ReadBits(const uint8_t* d, unsigned int& pos, unsigned int n)
+{
+  uint32_t v = 0;
+  while (n--)
+  {
+    v = (v << 1) | ((d[pos >> 3] >> (7 - (pos & 7))) & 1);
+    ++pos;
+  }
+  return v;
+}
+
+static inline void DTS_WriteBits(uint8_t* d, unsigned int pos, unsigned int n, uint32_t value)
+{
+  for (unsigned int i = 0; i < n; ++i)
+  {
+    const uint8_t mask = 1 << (7 - ((pos + i) & 7));
+    if ((value >> (n - 1 - i)) & 1)
+      d[(pos + i) >> 3] |= mask;
+    else
+      d[(pos + i) >> 3] &= ~mask;
+  }
+}
+
+static inline unsigned int DTS_PopCount(uint32_t x)
+{
+  unsigned int c = 0;
+  for (; x; x >>= 1)
+    c += x & 1;
+  return c;
+}
+
+static inline uint16_t DTS_CRC16_CCITT(const uint8_t* d, unsigned int len)
+{
+  uint16_t crc = 0xFFFF;
+  for (unsigned int i = 0; i < len; ++i)
+  {
+    crc ^= static_cast<uint16_t>(d[i]) << 8;
+    for (int b = 0; b < 8; ++b)
+      crc = (crc & 0x8000) ? static_cast<uint16_t>((crc << 1) ^ 0x1021)
+                           : static_cast<uint16_t>(crc << 1);
+  }
+  return crc;
+}
+
+
+namespace
+{
+struct DtsBitCursor
+{
+  const uint8_t* data;
+  unsigned int pos;
+  unsigned int limit;
+  bool ok = true;
+
+  DtsBitCursor(const uint8_t* buffer, unsigned int startBit, unsigned int limitBits)
+    : data(buffer), pos(startBit), limit(limitBits)
+  {
+  }
+
+  uint32_t Read(unsigned int n)
+  {
+    if (!ok || n > 32 || n > limit || pos > limit - n)
+    {
+      ok = false;
+      return 0;
+    }
+    return DTS_ReadBits(data, pos, n);
+  }
+
+  void Skip(unsigned int n)
+  {
+    if (!ok || n > limit || pos > limit - n)
+    {
+      ok = false;
+      return;
+    }
+    pos += n;
+  }
+};
+}
+
+static unsigned int DTS_SpeakerMaskHeightChannels(uint32_t mask)
+{
+  static const uint32_t heightBits[6] = {0x0020, 0x0080, 0x0100, 0x2000, 0x4000, 0x8000};
+  static const unsigned int heightWidth[6] = {2, 1, 1, 2, 1, 2};
+
+  unsigned int count = 0;
+  for (unsigned int i = 0; i < 6; ++i)
+    if (mask & heightBits[i])
+      count += heightWidth[i];
+  return count;
+}
+
+static bool DTS_ParseAssetChannels(const uint8_t* data,
+                                   unsigned int size,
+                                   unsigned int& channels,
+                                   unsigned int& baseHeightChannels)
+{
+  channels = 0;
+  baseHeightChannels = 0;
+  if (size < 16)
+    return false;
+
+  const uint32_t coreSync = (static_cast<uint32_t>(data[0]) << 24) |
+                            (static_cast<uint32_t>(data[1]) << 16) |
+                            (static_cast<uint32_t>(data[2]) << 8) | data[3];
+  if (coreSync != DTS_SYNC_CORE_16BE)
+    return false;
+
+  unsigned int pos = 32;
+  DTS_ReadBits(data, pos, 1 + 5 + 1 + 7);
+  const unsigned int fsize = DTS_ReadBits(data, pos, 14) + 1;
+  if (fsize + 4 > size)
+    return false;
+
+  const uint32_t exssSync = (static_cast<uint32_t>(data[fsize]) << 24) |
+                            (static_cast<uint32_t>(data[fsize + 1]) << 16) |
+                            (static_cast<uint32_t>(data[fsize + 2]) << 8) | data[fsize + 3];
+  if (exssSync != DTS_SYNC_EXTENTION)
+    return false;
+
+  const uint8_t* eb = data + fsize;
+  const unsigned int available = size - fsize;
+  DtsBitCursor bs(eb, 32, available * 8);
+
+  bs.Read(8);
+  const unsigned int nExtSSIndex = bs.Read(2);
+  const unsigned int bHeaderSizeType = bs.Read(1);
+  const unsigned int nBitsHdr = bHeaderSizeType ? 12 : 8;
+  const unsigned int nBitsFsize = bHeaderSizeType ? 20 : 16;
+  const unsigned int headerSize = bs.Read(nBitsHdr) + 1;
+  if (!bs.ok || headerSize < 7 || headerSize > available)
+    return false;
+  if (DTS_CRC16_CCITT(eb + 5, headerSize - 5) != 0)
+    return false;
+
+  bs.limit = (headerSize - 2) * 8;
+
+  bs.Read(nBitsFsize);
+  if (!bs.Read(1))
+    return false;
+
+  bs.Read(2 + 3);
+  if (bs.Read(1))
+  {
+    bs.Read(32);
+    bs.Read(4);
+  }
+  const unsigned int numAudioPresnt = bs.Read(3) + 1;
+  const unsigned int numAssets = bs.Read(3) + 1;
+  if (numAudioPresnt > 8)
+    return false;
+
+  uint32_t masks[8] = {0};
+  for (unsigned int i = 0; i < numAudioPresnt; ++i)
+    masks[i] = bs.Read(nExtSSIndex + 1);
+  for (unsigned int i = 0; i < numAudioPresnt; ++i)
+    for (unsigned int ss = 0; ss < nExtSSIndex + 1u; ++ss)
+      if ((masks[i] >> ss) & 1)
+        bs.Read(8);
+
+  if (bs.Read(1))
+  {
+    bs.Read(2);
+    const unsigned int nuBits4MixOutMask = (bs.Read(2) + 1) << 2;
+    const unsigned int numMixOutConfigs = bs.Read(2) + 1;
+    for (unsigned int i = 0; i < numMixOutConfigs; ++i)
+      bs.Read(nuBits4MixOutMask);
+  }
+
+  for (unsigned int i = 0; i < numAssets; ++i)
+    bs.Read(nBitsFsize);
+
+  const unsigned int descrStart = bs.pos;
+  const unsigned int descrEnd = descrStart + (bs.Read(9) + 1) * 8;
+  if (!bs.ok || descrEnd > bs.limit)
+    return false;
+
+  bs.Read(3);
+  if (bs.Read(1))
+    bs.Read(4);
+  if (bs.Read(1))
+    bs.Read(24);
+  if (bs.Read(1))
+    bs.Skip((bs.Read(10) + 1) * 8);
+  bs.Read(5);
+  bs.Read(4);
+  const unsigned int totalChannels = bs.Read(8) + 1;
+
+  if (!bs.ok || bs.pos > descrEnd || totalChannels > 32)
+    return false;
+
+  if (bs.Read(1))
+  {
+    if (totalChannels > 2)
+      bs.Read(1);
+    if (totalChannels > 6)
+      bs.Read(1);
+    if (bs.Read(1))
+    {
+      const unsigned int maskBits = (bs.Read(2) + 1) << 2;
+      const uint32_t speakerMask = bs.Read(maskBits);
+      if (bs.ok && bs.pos <= descrEnd)
+        baseHeightChannels = DTS_SpeakerMaskHeightChannels(speakerMask);
+    }
+  }
+
+  channels = totalChannels;
+  return true;
+}
+
+void CAEStreamParser::DefeatDTSDialNorm(uint8_t* data, unsigned int size)
+{
+  if (size < 16)
+    return;
+
+  const uint32_t sync = (static_cast<uint32_t>(data[0]) << 24) |
+                        (static_cast<uint32_t>(data[1]) << 16) |
+                        (static_cast<uint32_t>(data[2]) << 8) | data[3];
+  if (sync != DTS_SYNC_CORE_16BE)
+    return;
+
+  unsigned int pos = 32;
+  DTS_ReadBits(data, pos, 1);
+  DTS_ReadBits(data, pos, 5);
+  const unsigned int cpf = DTS_ReadBits(data, pos, 1);
+  DTS_ReadBits(data, pos, 7);
+  const unsigned int fsize = DTS_ReadBits(data, pos, 14) + 1;
+  DTS_ReadBits(data, pos, 6 + 4 + 5);
+  DTS_ReadBits(data, pos, 1 + 1 + 1 + 1 + 1);
+  DTS_ReadBits(data, pos, 3 + 1 + 1 + 2 + 1);
+  if (cpf)
+    DTS_ReadBits(data, pos, 16);
+  DTS_ReadBits(data, pos, 1 + 4 + 2 + 3 + 1 + 1);
+  const unsigned int dngPos = pos;
+  const unsigned int dng = DTS_ReadBits(data, pos, 4);
+
+  if (cpf == 0 && dng != 0)
+    DTS_WriteBits(data, dngPos, 4, 0);
+
+  if (fsize + 4 > size)
+    return;
+  const unsigned int exss = fsize;
+  const uint32_t exssSync = (static_cast<uint32_t>(data[exss]) << 24) |
+                            (static_cast<uint32_t>(data[exss + 1]) << 16) |
+                            (static_cast<uint32_t>(data[exss + 2]) << 8) | data[exss + 3];
+  if (exssSync != DTS_SYNC_EXTENTION)
+    return;
+
+  uint8_t* eb = data + exss;
+  unsigned int ep = 32;
+  DTS_ReadBits(eb, ep, 8);
+  const unsigned int nExtSSIndex = DTS_ReadBits(eb, ep, 2);
+  const unsigned int bHeaderSizeType = DTS_ReadBits(eb, ep, 1);
+  const unsigned int nBitsHdr = bHeaderSizeType ? 12 : 8;
+  const unsigned int nBitsFsize = bHeaderSizeType ? 20 : 16;
+  const unsigned int headerSize = DTS_ReadBits(eb, ep, nBitsHdr) + 1;
+  if (exss + headerSize > size || headerSize < 7)
+    return;
+
+  if (DTS_CRC16_CCITT(eb + 5, headerSize - 5) != 0)
+    return;
+
+  DTS_ReadBits(eb, ep, nBitsFsize);
+  const unsigned int staticFields = DTS_ReadBits(eb, ep, 1);
+  unsigned int numAssets = 1;
+  if (staticFields)
+  {
+    DTS_ReadBits(eb, ep, 2 + 3);
+    if (DTS_ReadBits(eb, ep, 1))
+    {
+      DTS_ReadBits(eb, ep, 32);
+      DTS_ReadBits(eb, ep, 4);
+    }
+    const unsigned int numAudioPresnt = DTS_ReadBits(eb, ep, 3) + 1;
+    numAssets = DTS_ReadBits(eb, ep, 3) + 1;
+    if (numAudioPresnt > 8)
+      return;
+    uint32_t masks[8] = {0};
+    for (unsigned int i = 0; i < numAudioPresnt; ++i)
+      masks[i] = DTS_ReadBits(eb, ep, nExtSSIndex + 1);
+    for (unsigned int i = 0; i < numAudioPresnt; ++i)
+      for (unsigned int ss = 0; ss < nExtSSIndex + 1u; ++ss)
+        if ((masks[i] >> ss) & 1)
+          DTS_ReadBits(eb, ep, 8);
+    if (DTS_ReadBits(eb, ep, 1))
+      return;
+  }
+  for (unsigned int i = 0; i < numAssets; ++i)
+    DTS_ReadBits(eb, ep, nBitsFsize);
+
+  const unsigned int descrStart = ep;
+  const unsigned int descrEnd = descrStart + (DTS_ReadBits(eb, ep, 9) + 1) * 8;
+  if (descrEnd > (headerSize - 2) * 8)
+    return;
+  DTS_ReadBits(eb, ep, 3);
+  if (staticFields)
+  {
+    if (DTS_ReadBits(eb, ep, 1)) DTS_ReadBits(eb, ep, 4);
+    if (DTS_ReadBits(eb, ep, 1)) DTS_ReadBits(eb, ep, 24);
+    if (DTS_ReadBits(eb, ep, 1))
+      ep += (DTS_ReadBits(eb, ep, 10) + 1) * 8;
+    DTS_ReadBits(eb, ep, 5);
+    DTS_ReadBits(eb, ep, 4);
+    const unsigned int nch = DTS_ReadBits(eb, ep, 8) + 1;
+    if (DTS_ReadBits(eb, ep, 1))
+    {
+      if (nch > 2) DTS_ReadBits(eb, ep, 1);
+      if (nch > 6) DTS_ReadBits(eb, ep, 1);
+      unsigned int w = 0;
+      if (DTS_ReadBits(eb, ep, 1))
+      {
+        w = (DTS_ReadBits(eb, ep, 2) + 1) * 4;
+        DTS_ReadBits(eb, ep, w);
+      }
+      const unsigned int nremap = DTS_ReadBits(eb, ep, 3);
+      if (nremap > 8)
+        return;
+      uint32_t layouts[8] = {0};
+      for (unsigned int i = 0; i < nremap; ++i)
+        layouts[i] = DTS_ReadBits(eb, ep, w);
+      for (unsigned int i = 0; i < nremap; ++i)
+      {
+        const unsigned int ndec = DTS_ReadBits(eb, ep, 5) + 1;
+        const unsigned int nspk = DTS_PopCount(layouts[i]);
+        for (unsigned int c = 0; c < nspk; ++c)
+        {
+          const unsigned int ncoef = DTS_PopCount(DTS_ReadBits(eb, ep, ndec));
+          for (unsigned int k = 0; k < ncoef; ++k)
+            DTS_ReadBits(eb, ep, 5);
+        }
+      }
+    }
+    else
+      DTS_ReadBits(eb, ep, 3);
+  }
+  if (DTS_ReadBits(eb, ep, 1))
+    DTS_ReadBits(eb, ep, 8);
+  if (!DTS_ReadBits(eb, ep, 1))
+    return;
+  const unsigned int dnPos = ep;
+  if (dnPos + 5 > descrEnd)
+    return;
+  if (DTS_ReadBits(eb, ep, 5) == 0)
+    return;
+
+  DTS_WriteBits(eb, dnPos, 5, 0);
+  const uint16_t crc = DTS_CRC16_CCITT(eb + 5, headerSize - 2 - 5);
+  eb[headerSize - 2] = (crc >> 8) & 0xFF;
+  eb[headerSize - 1] = crc & 0xFF;
+}
+
+namespace
+{
+struct AtmosBitReader
+{
+  const uint8_t* data;
+  unsigned int pos;
+  unsigned int limit;
+  bool ok = true;
+
+  AtmosBitReader(const uint8_t* buffer, unsigned int startBit, unsigned int endBit)
+    : data(buffer), pos(startBit), limit(endBit)
+  {
+  }
+
+  AtmosBitReader(const uint8_t* buffer,
+                 unsigned int startBit,
+                 unsigned int endBit,
+                 unsigned int sizeBytes)
+    : data(buffer), pos(startBit), limit(std::min(endBit, sizeBytes * 8))
+  {
+  }
+
+  bool Skip(unsigned int n)
+  {
+    if (!ok || n > limit || pos > limit - n)
+    {
+      ok = false;
+      return false;
+    }
+    pos += n;
+    return true;
+  }
+
+  uint32_t Read(unsigned int n)
+  {
+    if (n > 32 || !Skip(n))
+    {
+      ok = false;
+      return 0;
+    }
+
+    uint32_t v = 0;
+    for (unsigned int bit = pos - n; bit < pos; ++bit)
+      v = (v << 1) | ((data[bit >> 3] >> (7 - (bit & 7))) & 1);
+    return v;
+  }
+};
+
+struct AtmosProgram
+{
+  int bedChannels = -1;
+  int declaredObjects = -1;
+  bool objectOnlyProgram = false;
+};
+
+constexpr uint8_t ATMOS_STD_BED_WIDTH[10] = {2, 1, 1, 2, 2, 2, 2, 2, 2, 1};
+constexpr uint8_t ATMOS_ISF_OBJECTS[6] = {4, 8, 10, 14, 15, 30};
+constexpr uint8_t ATMOS_TRUEHD_ISF_OBJECTS[8] = {0, 0, 10, 14, 15, 0, 0, 0};
+
+enum class AtmosCarriage
+{
+  EAC3,
+  TRUEHD
+};
+constexpr unsigned int ATMOS_EMDF_SYNCWORD = 0x5838;
+
+AtmosProgram Atmos_ParseProgramAssignment(AtmosBitReader& br,
+                                          int elementCount,
+                                          AtmosCarriage carriage)
+{
+  AtmosProgram prog;
+
+  if (br.Read(1))
+  {
+    const bool lfePresent = br.Read(1) != 0;
+    if (!br.ok)
+      return prog;
+
+    prog.bedChannels = lfePresent ? 1 : 0;
+    prog.objectOnlyProgram = true;
+    if (elementCount > 0)
+      prog.declaredObjects = std::max(0, elementCount - prog.bedChannels);
+    return prog;
+  }
+
+  const uint32_t contentDescription = br.Read(4);
+  if (!br.ok)
+    return prog;
+  int bedChannels = 0;
+
+  if (contentDescription & 0x1)
+  {
+    br.Read(1);
+    uint32_t bedInstances = 1;
+    if (br.Read(1))
+      bedInstances = br.Read(3) + 2;
+
+    for (uint32_t bed = 0; bed < bedInstances && br.ok; ++bed)
+    {
+      if (br.Read(1))
+      {
+        ++bedChannels;
+        continue;
+      }
+
+      if (br.Read(1))
+      {
+        for (unsigned int i = 0; i < 10; ++i)
+          if (br.Read(1))
+            bedChannels += ATMOS_STD_BED_WIDTH[9 - i];
+      }
+      else
+      {
+        for (unsigned int i = 0; i < 17; ++i)
+          if (br.Read(1))
+            ++bedChannels;
+      }
+    }
+  }
+
+  int isfObjects = 0;
+  if (contentDescription & 0x2)
+  {
+    const uint32_t isfIndex = br.Read(3);
+    if (!br.ok)
+      return prog;
+    if (carriage == AtmosCarriage::TRUEHD)
+    {
+      if (ATMOS_TRUEHD_ISF_OBJECTS[isfIndex] == 0)
+        return prog;
+      isfObjects = ATMOS_TRUEHD_ISF_OBJECTS[isfIndex];
+    }
+    else if (isfIndex < 6)
+    {
+      isfObjects = ATMOS_ISF_OBJECTS[isfIndex];
+    }
+  }
+
+  int declared = 0;
+  if (contentDescription & 0x4)
+  {
+    uint32_t objectBits = br.Read(5);
+    if (objectBits == 0x1F)
+      objectBits += br.Read(7);
+    declared = static_cast<int>(objectBits) + 1;
+    if (elementCount > 0 && declared + isfObjects + bedChannels > elementCount)
+      return prog;
+  }
+
+  if (contentDescription & 0x8)
+  {
+    const uint32_t reservedBytes = br.Read(4) + 1;
+    br.Skip(reservedBytes * 8);
+  }
+
+  if (!br.ok)
+    return prog;
+
+  prog.bedChannels = bedChannels;
+  prog.declaredObjects = declared;
+  return prog;
+}
+
+int Atmos_DerivedObjects(const AtmosProgram& prog, int elementCount)
+{
+  if (prog.bedChannels < 0 || elementCount <= 0)
+    return -1;
+
+  return std::max(0, elementCount - prog.bedChannels);
+}
+
+uint32_t Atmos_VariableBits(AtmosBitReader& br, unsigned int n)
+{
+  uint32_t value = 0;
+  for (unsigned int guard = 0; guard < 8 && br.ok; ++guard)
+  {
+    value += br.Read(n);
+    if (!br.Read(1))
+      return value;
+    value <<= n;
+    value += (1u << n);
+  }
+
+  br.ok = false;
+  return 0;
+}
+
+bool Atmos_SkipEmdfPayloadConfig(AtmosBitReader& br)
+{
+  const bool smpOffsetPresent = br.Read(1) != 0;
+  if (smpOffsetPresent)
+    br.Skip(12);
+
+  if (br.Read(1))
+    Atmos_VariableBits(br, 11);
+  if (br.Read(1))
+    Atmos_VariableBits(br, 2);
+  if (br.Read(1))
+    br.Skip(8);
+
+  if (!br.Read(1))
+  {
+    bool frameAligned = false;
+    if (!smpOffsetPresent)
+    {
+      frameAligned = br.Read(1) != 0;
+      if (frameAligned)
+        br.Skip(2);
+    }
+    if (smpOffsetPresent || frameAligned)
+      br.Skip(7);
+  }
+
+  return br.ok;
+}
+
+bool Atmos_ParseOamd(AtmosBitReader& br, AtmosProgram& prog, int& elementCount)
+{
+  uint32_t version = br.Read(2);
+  if (version == 3)
+    version += br.Read(3);
+  if (!br.ok || version != 0)
+    return false;
+
+  int count = static_cast<int>(br.Read(5)) + 1;
+  if (count == 32)
+    count += static_cast<int>(br.Read(7));
+  if (!br.ok || count <= 0)
+    return false;
+
+  const AtmosProgram parsed =
+      Atmos_ParseProgramAssignment(br, count, AtmosCarriage::EAC3);
+  if (parsed.declaredObjects < 0 || parsed.bedChannels < 0)
+    return false;
+
+  prog = parsed;
+  elementCount = count;
+  return true;
+}
+
+bool Atmos_TryEmdfContainerAt(const uint8_t* data,
+                              unsigned int syncBit,
+                              unsigned int limitBit,
+                              AtmosProgram& prog,
+                              int& elementCount)
+{
+  AtmosBitReader br{data, syncBit, limitBit};
+
+  br.Skip(16);
+  const uint32_t containerLength = br.Read(16);
+  if (!br.ok)
+    return false;
+
+  const uint64_t containerEnd64 = static_cast<uint64_t>(br.pos) + containerLength * 8ull;
+  if (containerEnd64 > limitBit)
+    return false;
+  const unsigned int containerEnd = static_cast<unsigned int>(containerEnd64);
+
+  if (br.Read(2) != 0)
+    return false;
+  if (br.Read(3) == 0x7)
+    Atmos_VariableBits(br, 3);
+
+  bool found = false;
+  AtmosProgram foundProg;
+  int foundElements = -1;
+
+  for (unsigned int payload = 0; payload < 32; ++payload)
+  {
+    uint32_t payloadId = br.Read(5);
+    if (payloadId == 0x1F)
+      payloadId += Atmos_VariableBits(br, 5);
+    if (!br.ok)
+      break;
+
+    if (payloadId == 0)
+      break;
+
+    if (!Atmos_SkipEmdfPayloadConfig(br))
+      break;
+
+    const uint64_t payloadBits = static_cast<uint64_t>(Atmos_VariableBits(br, 8)) * 8ull;
+    const unsigned int payloadStart = br.pos;
+    if (!br.ok || payloadStart > containerEnd ||
+        payloadBits > static_cast<uint64_t>(containerEnd - payloadStart))
+      break;
+
+    const unsigned int payloadEnd = payloadStart + static_cast<unsigned int>(payloadBits);
+    if (payloadId == 11 && !found)
+    {
+      AtmosBitReader payloadReader{data, payloadStart, std::min(payloadEnd, limitBit)};
+      found = Atmos_ParseOamd(payloadReader, foundProg, foundElements);
+    }
+
+    br.pos = payloadStart;
+    if (!br.Skip(static_cast<unsigned int>(payloadBits)))
+      break;
+  }
+
+  if (found)
+  {
+    prog = foundProg;
+    elementCount = foundElements;
+  }
+  return found;
+}
+
+bool Atmos_ScanWindowForOamd(const uint8_t* data,
+                             unsigned int startBit,
+                             unsigned int endBit,
+                             AtmosProgram& prog,
+                             int& elementCount)
+{
+  if (endBit < 16 || startBit > endBit - 16)
+    return false;
+
+  for (unsigned int bit = startBit; bit <= endBit - 16; ++bit)
+  {
+    if (((data[bit >> 3] >> (7 - (bit & 7))) & 1) != 0)
+      continue;
+
+    AtmosBitReader peek{data, bit, endBit};
+    if (peek.Read(16) != ATMOS_EMDF_SYNCWORD)
+      continue;
+
+    if (Atmos_TryEmdfContainerAt(data, bit, endBit, prog, elementCount))
+      return true;
+  }
+
+  return false;
+}
+
+bool Atmos_ParseEAC3Objects(const uint8_t* data,
+                            unsigned int frameBytes,
+                            AtmosProgram& prog,
+                            int& elementCount)
+{
+  const unsigned int frameBits = frameBytes * 8;
+  if (frameBits < 32)
+    return false;
+
+  const unsigned int trailerStart = frameBits - 32;
+  AtmosBitReader footer{data, trailerStart, frameBits};
+  const unsigned int auxLength = footer.Read(14);
+  const bool auxPresent = footer.Read(1) != 0;
+
+  if (auxPresent && footer.ok)
+  {
+    const unsigned int auxBits = auxLength;
+    if (auxBits <= trailerStart &&
+        Atmos_ScanWindowForOamd(data, trailerStart - auxBits, trailerStart, prog, elementCount))
+      return true;
+  }
+
+  return Atmos_ScanWindowForOamd(data, 0, frameBits, prog, elementCount);
+}
 }
 
 bool CAEStreamParser::TrySyncAC3(uint8_t* data,
@@ -555,6 +1331,8 @@ bool CAEStreamParser::TrySyncAC3(uint8_t* data,
       uint8_t ac3_acmod = data[6] >> 5;
       uint8_t dialNormRaw = AC3_ParseDialnorm(data, ac3_acmod);
       m_info.m_dialNorm = static_cast<int>(dialNormRaw) - 31;
+      m_info.m_dialNormApplied = m_defeatAC3DialNorm ? 0 : m_info.m_dialNorm;
+      m_info.m_hasDialNorm = true;
     }
 
     // dont do extensive testing if we have not lost sync
@@ -605,12 +1383,21 @@ bool CAEStreamParser::TrySyncAC3(uint8_t* data,
       uint8_t ac3_acmod = data[6] >> 5;
       uint8_t dialNormRaw = AC3_ParseDialnorm(data, ac3_acmod);
       m_info.m_dialNorm = static_cast<int>(dialNormRaw) - 31;
+      m_info.m_dialNormApplied = m_defeatAC3DialNorm ? 0 : m_info.m_dialNorm;
+      m_info.m_hasDialNorm = true;
     }
-    CLog::Log(LOGINFO,
-              "CAEStreamParser::TrySyncAC3 - AC3 stream detected ({} channels, {}Hz, "
-              "dialnorm: {} dB{})",
-              m_info.m_channels, m_info.m_sampleRate, m_info.m_dialNorm,
-              m_defeatAC3DialNorm ? ", defeat enabled" : "");
+    {
+      const std::string msg = fmt::format(
+          "CAEStreamParser::TrySyncAC3 - AC3 stream detected ({} channels, {}Hz, "
+          "dialnorm: {} dB{})",
+          m_info.m_channels, m_info.m_sampleRate, m_info.m_dialNorm,
+          m_defeatAC3DialNorm ? ", defeat enabled" : "");
+      if (msg != m_lastLoggedStreamDetected)
+      {
+        CLog::Log(LOGINFO, "{}", msg);
+        m_lastLoggedStreamDetected = msg;
+      }
+    }
     return true;
   }
   else
@@ -653,6 +1440,49 @@ bool CAEStreamParser::TrySyncAC3(uint8_t* data,
     {
       uint8_t dialNormRaw = ((data[5] & 0x07) << 2) | ((data[6] >> 6) & 0x03);
       m_info.m_dialNorm = static_cast<int>(dialNormRaw) - 31;
+      m_info.m_dialNormApplied = m_defeatAC3DialNorm ? 0 : m_info.m_dialNorm;
+      m_info.m_hasDialNorm = true;
+    }
+
+    const bool frameCrcValid =
+        m_fsize > 2 && size >= m_fsize &&
+        av_crc(av_crc_get_table(AV_CRC_16_ANSI), 0, &data[2], m_fsize - 2) == 0;
+
+    if (!m_eac3ObjectsLatched && m_fsize > 2 && size >= m_fsize && !frameCrcValid)
+      LOG_THROTTLE_PERIODIC(LOGDEBUG, LOGAUDIO, 1000,
+                            "CAEStreamParser::TrySyncAC3 - frameCrcValid={:d} "
+                            "m_eac3ObjectsLatched={:d} m_fsize={} size={}",
+                            frameCrcValid, m_eac3ObjectsLatched, m_fsize, size);
+
+    if (!m_eac3ObjectsLatched && m_eac3ScanAttempts < EAC3ObjectScanBudget() && m_fsize > 0 &&
+        size >= m_fsize && frameCrcValid)
+    {
+      ++m_eac3ScanAttempts;
+
+      AtmosProgram prog;
+      int elementCount = -1;
+      if (Atmos_ParseEAC3Objects(data, m_fsize, prog, elementCount))
+      {
+        const int derived = Atmos_DerivedObjects(prog, elementCount);
+        m_info.m_hasAtmos = true;
+        m_info.m_atmosChannels = static_cast<unsigned int>(elementCount);
+        m_info.m_atmosObjects = prog.declaredObjects;
+        m_info.m_bedChannels = prog.objectOnlyProgram ? 0 : prog.bedChannels;
+        m_info.m_bedIsLfeOnly = prog.objectOnlyProgram && prog.bedChannels == 1;
+        m_eac3ObjectsLatched = true;
+        logM(LOGINFO,
+             "CAEStreamParser::TrySyncAC3 - E-AC3 JOC object metadata found after {} scans "
+                  "(atmosChannels: {}, atmosObjects: {}, derivedObjects: {})",
+                  m_eac3ScanAttempts, elementCount, prog.declaredObjects, derived);
+      }
+      else if (m_eac3ScanAttempts >= EAC3ObjectScanBudget())
+      {
+        m_eac3ObjectsLatched = true;
+        logM(LOGINFO,
+             "CAEStreamParser::TrySyncAC3 - E-AC3 no object metadata in {} scans, giving up "
+                  "for this stream{}",
+                  m_eac3ScanAttempts, m_eac3IsJOC ? " (demuxer typed it Atmos)" : "");
+      }
     }
 
     // EAC3 can have a dependent stream too
@@ -694,12 +1524,21 @@ bool CAEStreamParser::TrySyncAC3(uint8_t* data,
     {
       uint8_t dialNormRaw = ((data[5] & 0x07) << 2) | ((data[6] >> 6) & 0x03);
       m_info.m_dialNorm = static_cast<int>(dialNormRaw) - 31;
+      m_info.m_dialNormApplied = m_defeatAC3DialNorm ? 0 : m_info.m_dialNorm;
+      m_info.m_hasDialNorm = true;
     }
-    CLog::Log(LOGINFO,
-              "CAEStreamParser::TrySyncAC3 - E-AC3 stream detected ({} channels, {}Hz, {}-bit, "
-              "dialnorm: {} dB{})",
-              m_info.m_channels, m_info.m_sampleRate, m_info.m_bitDepth,
-              m_info.m_dialNorm, m_defeatAC3DialNorm ? ", defeat enabled" : "");
+    {
+      const std::string msg = fmt::format(
+          "CAEStreamParser::TrySyncAC3 - E-AC3 stream detected ({} channels, {}Hz, {}-bit, "
+          "dialnorm: {} dB{})",
+          m_info.m_channels, m_info.m_sampleRate, m_info.m_bitDepth,
+          m_info.m_dialNorm, m_defeatAC3DialNorm ? ", defeat enabled" : "");
+      if (msg != m_lastLoggedStreamDetected)
+      {
+        CLog::Log(LOGINFO, "{}", msg);
+        m_lastLoggedStreamDetected = msg;
+      }
+    }
 
     return true;
   }
@@ -743,6 +1582,7 @@ unsigned int CAEStreamParser::SyncDTS(uint8_t* data, unsigned int size)
     unsigned int ext_type = UNKNOWN_DTS_EXTENSION;
     unsigned int lfe;
     uint32_t bits = 0;
+    bool dataIsLE = m_info.m_dataIsLE;
 
     switch (header)
     {
@@ -758,7 +1598,7 @@ unsigned int CAEStreamParser::SyncDTS(uint8_t* data, unsigned int size)
         ext_type = ((data[11] & 0xe) >> 1);
         sfreq = data[9] & 0xF;
         lfe = (data[12] & 0x18) >> 3;
-        m_info.m_dataIsLE = false;
+        dataIsLE = false;
         bits = 14;
         break;
 
@@ -774,7 +1614,7 @@ unsigned int CAEStreamParser::SyncDTS(uint8_t* data, unsigned int size)
         ext_type = ((data[10] & 0xe) >> 1);
         sfreq = data[8] & 0xF;
         lfe = (data[13] & 0x18) >> 3;
-        m_info.m_dataIsLE = true;
+        dataIsLE = true;
         bits = 14;
         break;
 
@@ -788,7 +1628,7 @@ unsigned int CAEStreamParser::SyncDTS(uint8_t* data, unsigned int size)
         extension = (data[10] & 0x10) >> 4;
         ext_type = (data[10] & 0xe0) >> 5;
         lfe = (data[10] >> 1) & 0x3;
-        m_info.m_dataIsLE = false;
+        dataIsLE = false;
         bits = 16;
         break;
 
@@ -802,7 +1642,7 @@ unsigned int CAEStreamParser::SyncDTS(uint8_t* data, unsigned int size)
         extension = (data[11] & 0x10) >> 4;
         ext_type = (data[11] & 0xe0) >> 5;
         lfe = (data[11] >> 1) & 0x3;
-        m_info.m_dataIsLE = true;
+        dataIsLE = true;
         bits = 16;
         break;
 
@@ -811,6 +1651,9 @@ unsigned int CAEStreamParser::SyncDTS(uint8_t* data, unsigned int size)
     }
 
     if (sfreq == 0 || sfreq >= DTS_SFREQ_COUNT)
+      continue;
+
+    if (amode >= sizeof(DTSChannels) / sizeof(DTSChannels[0]))
       continue;
 
     // make sure the framesize is sane
@@ -873,6 +1716,15 @@ unsigned int CAEStreamParser::SyncDTS(uint8_t* data, unsigned int size)
       else
         ext_header_size = (((data[m_fsize + 5] & 0x1f) << 3) | ((data[m_fsize + 6] & 0xe0) >> 5)) + 1;
 
+      if (size - skip < m_fsize + ext_header_size + 4)
+      {
+        m_syncFunc = &CAEStreamParser::SyncDTS;
+        m_needBytes = m_fsize + ext_header_size + 4;
+        m_fsize = 0;
+
+        return skip;
+      }
+
       ext_sub_sync = data[m_fsize + ext_header_size] << 24 | data[m_fsize + ext_header_size + 1] << 16 |
                      data[m_fsize + ext_header_size + 2] << 8 | data[m_fsize + ext_header_size + 3];
 
@@ -886,7 +1738,10 @@ unsigned int CAEStreamParser::SyncDTS(uint8_t* data, unsigned int size)
                ext_sub_sync == DTS_SYNC_EXT_LBR)
         dataType = CAEStreamInfo::STREAM_TYPE_DTSHD;
       else
-        dataType = m_info.m_type;
+      {
+        if (m_info.m_type != CAEStreamInfo::STREAM_TYPE_NULL)
+          dataType = m_info.m_type;
+      }
 
       m_coreSize = m_fsize;
       m_fsize += ext_size;
@@ -894,10 +1749,85 @@ unsigned int CAEStreamParser::SyncDTS(uint8_t* data, unsigned int size)
 
     unsigned int sampleRate = DTSSampleRates[sfreq];
 
-    if (!m_hasSync || skip || dataType != m_info.m_type || sampleRate != m_info.m_sampleRate ||
-        dtsBlocks != m_dtsBlocks)
+    const bool paramsChanged = dataType != m_info.m_type ||
+                               sampleRate != m_info.m_sampleRate || dtsBlocks != m_dtsBlocks ||
+                               dataIsLE != m_info.m_dataIsLE;
+
+    if (!m_hasSync || skip || paramsChanged)
     {
+      if (m_hasSync && paramsChanged && m_info.m_type != CAEStreamInfo::STREAM_TYPE_NULL)
+      {
+        unsigned int candidatePeriod;
+        if (dataType == CAEStreamInfo::STREAM_TYPE_DTSHD_MA)
+          candidatePeriod = (192000 * (8 >> 1)) * (dtsBlocks << 5) / sampleRate;
+        else if (dataType == CAEStreamInfo::STREAM_TYPE_DTSHD)
+          candidatePeriod = (192000 * (2 >> 1)) * (dtsBlocks << 5) / sampleRate;
+        else
+          candidatePeriod = (sampleRate * (2 >> 1)) * (dtsBlocks << 5) / sampleRate;
+
+        if (ext_sync != DTS_SYNC_EXTENTION)
+          m_coreSize = m_fsize;
+
+        const bool wrapped = dataType == CAEStreamInfo::STREAM_TYPE_DTSHD_MA ||
+                             dataType == CAEStreamInfo::STREAM_TYPE_DTSHD;
+
+        if (wrapped && !IsPackableDtsBurst(candidatePeriod))
+        {
+          LOG_THROTTLE_PERIODIC_GENERAL(
+              LOGINFO, 1000,
+              "CAEStreamParser::SyncDTS - rejecting DTS reclassification: period {} has no IEC "
+              "61937 burst subtype, keeping established format",
+              candidatePeriod);
+          return skip;
+        }
+
+        unsigned int frameBytes;
+        if (wrapped)
+          frameBytes = (candidatePeriod << 2);
+        else if (dataType == CAEStreamInfo::STREAM_TYPE_DTS_1024)
+          frameBytes = OUT_FRAMESTOBYTES(DTS2_FRAME_SIZE);
+        else if (dataType == CAEStreamInfo::STREAM_TYPE_DTS_2048)
+          frameBytes = OUT_FRAMESTOBYTES(DTS3_FRAME_SIZE);
+        else
+          frameBytes = OUT_FRAMESTOBYTES(DTS1_FRAME_SIZE);
+        const unsigned int capacity =
+            wrapped ? frameBytes - IEC61937_DATA_OFFSET - DTSHD_PACKER_OVERHEAD
+                    : frameBytes - IEC61937_DATA_OFFSET;
+        const unsigned int deliveredSize =
+            (dataType == CAEStreamInfo::STREAM_TYPE_DTSHD_CORE) ? m_coreSize : m_fsize;
+
+        if (deliveredSize > capacity && !(!wrapped && deliveredSize == frameBytes))
+        {
+          LOG_THROTTLE_PERIODIC_GENERAL(
+              LOGINFO, 1000,
+              "CAEStreamParser::SyncDTS - rejecting DTS reclassification: {} byte frame cannot "
+              "fit its own {} byte burst payload (period {}), keeping established format",
+              deliveredSize, capacity, candidatePeriod);
+          return skip;
+        }
+
+        if (dataType != m_dtsCandidateType || sampleRate != m_dtsCandidateRate ||
+            dtsBlocks != m_dtsCandidateBlocks)
+        {
+          m_dtsCandidateType = dataType;
+          m_dtsCandidateRate = sampleRate;
+          m_dtsCandidateBlocks = dtsBlocks;
+          m_dtsChangeStreak = 0;
+        }
+
+        if (++m_dtsChangeStreak < DTS_CHANGE_CONFIRM_FRAMES)
+        {
+          LOG_THROTTLE_PERIODIC_GENERAL(
+              LOGINFO, 1000,
+              "CAEStreamParser::SyncDTS - holding established DTS format against "
+              "reclassification until confirmed ({}/{} frames)",
+              m_dtsChangeStreak, DTS_CHANGE_CONFIRM_FRAMES);
+          return skip;
+        }
+      }
+      m_dtsChangeStreak = 0;
       m_hasSync = true;
+      m_info.m_dataIsLE = dataIsLE;
       m_info.m_type = dataType;
       m_info.m_sampleRate = sampleRate;
       m_dtsBlocks = dtsBlocks;
@@ -956,9 +1886,49 @@ unsigned int CAEStreamParser::SyncDTS(uint8_t* data, unsigned int size)
 
       m_info.m_bitDepth = (hd_bits > 0) ? hd_bits : bits;
 
+      if (dataType != CAEStreamInfo::STREAM_TYPE_DTSHD_MA)
+      {
+        m_info.m_hasDtsX = false;
+        m_info.m_bedChannels = -1;
+        m_info.m_bedIsLfeOnly = false;
+        m_info.m_atmosObjects = -1;
+        m_info.m_atmosChannels = 0;
+      }
+
       if (dataType == CAEStreamInfo::STREAM_TYPE_DTSHD_MA)
       {
-        m_info.m_channels += 2; // FIXME: this needs to be read out, not sure how to do that yet
+        unsigned int assetChannels = 0;
+        unsigned int baseHeightChannels = 0;
+        const bool assetParsed =
+            DTS_ParseAssetChannels(data, size - skip, assetChannels, baseHeightChannels);
+        const unsigned int coreChannels = m_info.m_channels;
+        m_info.m_channels = assetParsed ? assetChannels : coreChannels + 2;
+        m_info.m_hasDtsX = m_dtsX;
+        m_info.m_bedChannels = -1;
+        m_info.m_bedIsLfeOnly = false;
+        m_info.m_atmosObjects = -1;
+
+        static constexpr unsigned int DTSX_HEIGHT_CHANNELS = 4;
+        const unsigned int dtsXHeights =
+            (baseHeightChannels > 0) ? 0 : DTSX_HEIGHT_CHANNELS;
+        m_info.m_atmosChannels = (m_dtsX && assetParsed) ? assetChannels + dtsXHeights : 0;
+        if (m_dtsX && assetParsed)
+        {
+          m_info.m_bedChannels = static_cast<int>(assetChannels + dtsXHeights);
+          m_info.m_bedIsLfeOnly = false;
+        }
+
+        const bool dtsXHint = m_dtsX;
+        const unsigned int infoChannels = m_info.m_channels;
+        const int bedChannels = m_info.m_bedChannels;
+        const int atmosObjects = m_info.m_atmosObjects;
+        const unsigned int atmosChannels = m_info.m_atmosChannels;
+        logComponentM(LOGDEBUG, LOGAUDIO,
+                      "dts asset descriptor: parsed={:d} dtsX={:d} nuTotalNumChs={} "
+                      "coreChannels={} m_info.m_channels={} m_info.m_bedChannels={} "
+                      "m_info.m_atmosObjects={} m_info.m_atmosChannels={}",
+                      assetParsed, dtsXHint, assetChannels, coreChannels, infoChannels,
+                      bedChannels, atmosObjects, atmosChannels);
         m_info.m_dtsPeriod = (192000 * (8 >> 1)) * (m_dtsBlocks << 5) / m_info.m_sampleRate;
       }
       else if (dataType == CAEStreamInfo::STREAM_TYPE_DTSHD)
@@ -969,6 +1939,17 @@ unsigned int CAEStreamParser::SyncDTS(uint8_t* data, unsigned int size)
       {
         m_info.m_dtsPeriod =
             (m_info.m_sampleRate * (2 >> 1)) * (m_dtsBlocks << 5) / m_info.m_sampleRate;
+      }
+
+      if ((dataType == CAEStreamInfo::STREAM_TYPE_DTSHD_MA ||
+           dataType == CAEStreamInfo::STREAM_TYPE_DTSHD) &&
+          !IsPackableDtsBurst(m_info.m_dtsPeriod))
+      {
+        LOG_THROTTLE_PERIODIC_GENERAL(
+            LOGWARNING, 1000,
+            "CAEStreamParser::SyncDTS - DTS-HD period {} has no IEC 61937 burst subtype, "
+            "Kodi-side IEC packing will drop every frame of this stream",
+            m_info.m_dtsPeriod);
       }
 
       std::string type;
@@ -1007,11 +1988,31 @@ unsigned int CAEStreamParser::SyncDTS(uint8_t* data, unsigned int size)
         }
       }
 
-      CLog::Log(LOGINFO,
-                "CAEStreamParser::SyncDTS - {} stream detected ({} channels, {}Hz, {}bit {}, "
-                "period: {}, core syncword: 0x{:x}, ext syncword: 0x{:x}, ext sub syncword: 0x{:x}, target rate: 0x{:x}, framesize {}))",
-                type, m_info.m_channels, m_info.m_sampleRate, m_info.m_bitDepth, m_info.m_dataIsLE ? "LE" : "BE",
-                m_info.m_dtsPeriod, header, ext_sync, ext_sub_sync, target_rate, m_fsize);
+      const std::string msg = fmt::format(
+          "CAEStreamParser::SyncDTS - {} stream detected ({} channels, {}Hz, {}bit {}, "
+          "period: {}, core syncword: 0x{:x}, ext syncword: 0x{:x}, ext sub syncword: 0x{:x}, target rate: 0x{:x}, framesize {}))",
+          type, m_info.m_channels, m_info.m_sampleRate, m_info.m_bitDepth, m_info.m_dataIsLE ? "LE" : "BE",
+          m_info.m_dtsPeriod, header, ext_sync, ext_sub_sync, target_rate, m_fsize);
+      if (msg != m_lastLoggedStreamDetected)
+      {
+        CLog::Log(LOGINFO, "{}", msg);
+        m_lastLoggedStreamDetected = msg;
+      }
+    }
+    else
+    {
+      m_dtsChangeStreak = 0;
+      if (dataType == CAEStreamInfo::STREAM_TYPE_DTSHD_MA)
+      {
+        unsigned int steadyAssetChannels = 0;
+        unsigned int steadyHeightChannels = 0;
+        if (DTS_ParseAssetChannels(data, size - skip, steadyAssetChannels, steadyHeightChannels) &&
+            steadyAssetChannels != m_info.m_channels)
+        {
+          m_hasSync = false;
+          return skip;
+        }
+      }
     }
 
     return skip;
@@ -1060,12 +2061,10 @@ unsigned int CAEStreamParser::SyncTrueHD(uint8_t* data, unsigned int size)
         continue;
 
       unsigned int major_sync_size = 28;
-      if (data[29] & 1)
-      {
-        // extension(s) present, look up count
-        int extension_count = data[30] >> 4;
+      const bool extChannelMeaningPresent = (data[29] & 1) != 0;
+      const int extension_count = extChannelMeaningPresent ? (data[30] >> 4) : 0;
+      if (extChannelMeaningPresent)
         major_sync_size += 2 + extension_count * 2;
-      }
 
       if (left < 4 + major_sync_size)
         return skip;
@@ -1077,16 +2076,19 @@ unsigned int CAEStreamParser::SyncTrueHD(uint8_t* data, unsigned int size)
         continue;
 
       // Detect Atmos and parse extra_channel_meaning fields (before any patching)
-      // Reference: MediaInfoLib File_Ac3.cpp HD()
       // Bit layout inside extra_channel_meaning:
       //   extra_channel_meaning_length: 4 bits = data[30] bits[7:4]
       //   16ch_dialogue_norm:           5 bits = data[30] bits[3:0] + data[31] bit 7
       //   16ch_mix_level:               6 bits = data[31] bits[6:1]
       //   16ch_channel_count:           5 bits = data[31] bit 0   + data[32] bits[7:4]
       bool hasAtmos = (data[21] & 0x80) != 0;
-      bool hasExtChannelMeaning = hasAtmos && (data[29] & 1);
+      bool hasExtChannelMeaning = hasAtmos && extChannelMeaningPresent && extension_count >= 1;
       int origDialNorm = 0;
       int atmosChannels = 0;
+      int atmosObjects = -1;
+      int atmosBedChannels = -1;
+      bool atmosBedIsLfeOnly = false;
+      int atmosDerivedObjects = -1;
 
       if (hasExtChannelMeaning)
       {
@@ -1096,16 +2098,25 @@ unsigned int CAEStreamParser::SyncTrueHD(uint8_t* data, unsigned int size)
 
         int channelCountRaw = ((data[31] & 0x01) << 4) | (data[32] >> 4);
         atmosChannels = channelCountRaw + 1;
+
+        const unsigned int extChannelMeaningEndBit = 240 + (extension_count + 1) * 16;
+        AtmosBitReader br(data, 260, extChannelMeaningEndBit, left);
+        const AtmosProgram prog =
+            Atmos_ParseProgramAssignment(br, atmosChannels, AtmosCarriage::TRUEHD);
+        atmosObjects = prog.declaredObjects;
+        atmosBedChannels = prog.objectOnlyProgram ? 0 : prog.bedChannels;
+        atmosBedIsLfeOnly = prog.objectOnlyProgram && prog.bedChannels == 1;
+        atmosDerivedObjects = Atmos_DerivedObjects(prog, atmosChannels);
       }
 
       // Defeat 16ch dialog normalization to 0 dB on every major sync frame.
       // This disables receiver-side dialog normalization for the Atmos presentation.
       bool dialNormDefeated = false;
-      if (m_defeatTrueHDDialNorm && hasExtChannelMeaning)
+      if (m_defeatTrueHDDialNorm && hasExtChannelMeaning && origDialNorm != 0)
       {
         data[30] |= 0x0F; // set dialnorm bits [4:1] = 1111
         data[31] |= 0x80; // set dialnorm bit  [0]   = 1
-        dialNormDefeated = (origDialNorm != 0);
+        dialNormDefeated = true;
 
         // Recompute CRC-16 (polynomial 0x002D) after modification
         uint16_t new_crc = av_crc(m_crcTrueHD, 0, data + 4, major_sync_size - 4);
@@ -1116,6 +2127,8 @@ unsigned int CAEStreamParser::SyncTrueHD(uint8_t* data, unsigned int size)
 
       m_substreams = (data[20] & 0xF0) >> 4;
       m_fsize = length;
+
+      const bool firstSync = !m_hasSync;
 
       if (!m_hasSync)
       {
@@ -1137,29 +2150,72 @@ unsigned int CAEStreamParser::SyncTrueHD(uint8_t* data, unsigned int size)
           channel_map = (data[9] << 1) | (data[10] >> 7);
         m_info.m_channels = CAEStreamParser::GetTrueHDChannels(channel_map);
 
-        m_info.m_hasAtmos = hasAtmos;
-        m_info.m_dialNorm = dialNormDefeated ? 0 : origDialNorm;
-        m_info.m_atmosChannels = atmosChannels;
-
-        std::string atmosStr;
-        if (hasAtmos)
-        {
-          atmosStr = ", dialNorm: " + std::to_string(m_info.m_dialNorm) + " dB";
-          if (dialNormDefeated)
-            atmosStr += " (defeated from " + std::to_string(origDialNorm) + " dB)";
-          if (atmosChannels)
-            atmosStr += ", atmosChannels: " + std::to_string(atmosChannels);
-        }
-        CLog::Log(LOGINFO,
-                  "CAEStreamParser::SyncTrueHD - TrueHD stream detected ({} channels, {}Hz, "
-                  "{}-bit{}{})",
-                  m_info.m_channels, m_info.m_sampleRate, m_info.m_bitDepth,
-                  hasAtmos ? ", Atmos" : "", atmosStr);
-
         m_hasSync = true;
         m_info.m_type = CAEStreamInfo::STREAM_TYPE_TRUEHD;
         m_syncFunc = &CAEStreamParser::SyncTrueHD;
         m_info.m_repeat = 1;
+      }
+
+      m_info.m_hasAtmos = hasAtmos;
+      if (hasExtChannelMeaning)
+      {
+        m_info.m_dialNorm = origDialNorm;
+        m_info.m_dialNormApplied = dialNormDefeated ? 0 : origDialNorm;
+        m_info.m_hasDialNorm = true;
+        m_info.m_atmosChannels = atmosChannels;
+        m_info.m_atmosObjects = atmosObjects;
+        m_info.m_bedChannels = atmosBedChannels;
+        m_info.m_bedIsLfeOnly = atmosBedIsLfeOnly;
+      }
+      else if (!hasAtmos || firstSync)
+      {
+        m_info.m_dialNorm = 0;
+        m_info.m_dialNormApplied = 0;
+        m_info.m_hasDialNorm = true;
+        m_info.m_atmosChannels = 0;
+        m_info.m_atmosObjects = -1;
+        m_info.m_bedChannels = -1;
+        m_info.m_bedIsLfeOnly = false;
+      }
+
+      const std::array<int, 10> logKey{static_cast<int>(m_info.m_channels),
+                                       static_cast<int>(m_info.m_sampleRate),
+                                       static_cast<int>(m_info.m_bitDepth),
+                                       hasAtmos ? 1 : 0,
+                                       dialNormDefeated ? 1 : 0,
+                                       m_info.m_dialNorm,
+                                       m_info.m_dialNormApplied,
+                                       static_cast<int>(m_info.m_atmosChannels),
+                                       m_info.m_atmosObjects,
+                                       atmosDerivedObjects};
+      if (!m_hasTrueHDLogKey || logKey != m_lastTrueHDLogKey)
+      {
+        m_hasTrueHDLogKey = true;
+        m_lastTrueHDLogKey = logKey;
+
+        std::string atmosStr;
+        if (hasAtmos)
+        {
+          atmosStr = ", dialNorm: " + std::to_string(m_info.m_dialNormApplied) + " dB";
+          if (dialNormDefeated)
+            atmosStr += " (defeated from " + std::to_string(origDialNorm) + " dB)";
+          if (m_info.m_atmosChannels)
+            atmosStr += ", atmosChannels: " + std::to_string(m_info.m_atmosChannels);
+          if (m_info.m_atmosObjects >= 0)
+            atmosStr += ", atmosObjects: " + std::to_string(m_info.m_atmosObjects);
+          if (atmosDerivedObjects >= 0 && atmosDerivedObjects != m_info.m_atmosObjects)
+            atmosStr += ", derivedObjects: " + std::to_string(atmosDerivedObjects);
+        }
+        const std::string msg = fmt::format(
+            "CAEStreamParser::SyncTrueHD - TrueHD stream detected ({} channels, {}Hz, "
+            "{}-bit{}{})",
+            m_info.m_channels, m_info.m_sampleRate, m_info.m_bitDepth,
+            hasAtmos ? ", Atmos" : "", atmosStr);
+        if (msg != m_lastLoggedStreamDetected)
+        {
+          CLog::Log(LOGINFO, "{}", msg);
+          m_lastLoggedStreamDetected = msg;
+        }
       }
 
       return skip;

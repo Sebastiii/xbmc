@@ -15,6 +15,7 @@
 #include "settings/Settings.h"
 #include "settings/SettingsComponent.h"
 #include "windowing/GraphicContext.h"
+#include "windowing/WinSystem.h"
 
 namespace OVERLAY
 {
@@ -268,6 +269,110 @@ bool convert_quad(ASS_Image* images, SQuads& quads, int max_x)
     curr_x += img->w + 1;
     data   += img->w + 1;
   }
+  return true;
+}
+
+bool convert_quads(ASS_Image* images, std::vector<SQuads>& pages, int maxTextureSize)
+{
+  pages.clear();
+
+  if (!images || maxTextureSize <= 0)
+    return false;
+
+  struct Placement
+  {
+    ASS_Image* img;
+    int page;
+    int x;
+    int y;
+  };
+  std::vector<Placement> placements;
+  std::vector<int> pageWidth;
+  std::vector<int> pageHeight;
+
+  int page = 0;
+  int curX = 0;
+  int shelfY = 0;
+  int shelfH = 0;
+  int usedW = 0;
+
+  auto finalizePage = [&]() {
+    pageWidth.push_back(usedW);
+    pageHeight.push_back(shelfY + shelfH + 1);
+  };
+
+  for (ASS_Image* img = images; img; img = img->next)
+  {
+    if ((img->color & 0xff) == 0xff || img->w == 0 || img->h == 0)
+      continue;
+
+    if (img->w + 1 > maxTextureSize || img->h + 1 > maxTextureSize)
+      continue;
+
+    if (curX + img->w + 1 > maxTextureSize)
+    {
+      shelfY += shelfH + 1;
+      curX = 0;
+      shelfH = 0;
+    }
+
+    if (shelfY + img->h + 1 > maxTextureSize)
+    {
+      finalizePage();
+      page++;
+      curX = 0;
+      shelfY = 0;
+      shelfH = 0;
+      usedW = 0;
+    }
+
+    placements.push_back({img, page, curX, shelfY});
+
+    curX += img->w + 1;
+    if (img->h > shelfH)
+      shelfH = img->h;
+    if (curX > usedW)
+      usedW = curX;
+  }
+
+  if (placements.empty())
+    return false;
+
+  finalizePage();
+
+  pages.resize(page + 1);
+  for (size_t p = 0; p < pages.size(); p++)
+  {
+    pages[p].size_x = pageWidth[p];
+    pages[p].size_y = pageHeight[p];
+    pages[p].texture.assign(static_cast<size_t>(pageWidth[p]) * pageHeight[p], 0);
+  }
+
+  for (const Placement& pl : placements)
+  {
+    SQuads& quads = pages[pl.page];
+    const unsigned int color = pl.img->color;
+    const unsigned int alpha = (color & 0xff);
+
+    SQuad quad;
+    quad.a = 255 - alpha;
+    quad.r = (color >> 24) & 0xff;
+    quad.g = (color >> 16) & 0xff;
+    quad.b = (color >> 8) & 0xff;
+    quad.u = pl.x;
+    quad.v = pl.y;
+    quad.x = pl.img->dst_x;
+    quad.y = pl.img->dst_y;
+    quad.w = pl.img->w;
+    quad.h = pl.img->h;
+    quads.quad.push_back(quad);
+
+    uint8_t* data = quads.texture.data() + static_cast<size_t>(pl.y) * quads.size_x + pl.x;
+    for (int i = 0; i < pl.img->h; i++)
+      memcpy(data + static_cast<size_t>(quads.size_x) * i, pl.img->bitmap + pl.img->stride * i,
+             pl.img->w);
+  }
+
   return true;
 }
 

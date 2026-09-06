@@ -59,6 +59,8 @@ enum AEStdChLayout
   AE_CH_LAYOUT_5_1,
   AE_CH_LAYOUT_7_0,
   AE_CH_LAYOUT_7_1,
+  AE_CH_LAYOUT_6_0,
+  AE_CH_LAYOUT_6_1,
 
   AE_CH_LAYOUT_MAX
 };

@@ -1,79 +1,99 @@
-#include <string>
-
-#include "HevcSei.h"
-#include "StringUtils.h"
+/*
+ *  Copyright (C) 2026 Team Kodi
+ *  This file is part of Kodi - https://kodi.tv
+ *
+ *  SPDX-License-Identifier: GPL-2.0-or-later
+ *  See LICENSES/README.md for more information.
+ *
+ *  Colour primary names follow the informative remarks of Rec. ITU-T H.273 (V4)
+ *  (07/2024) Table 2. The mastering display colour volume element order is
+ *  specified by Rec. ITU-T H.265 clause D.3.27, where index 0 is green, index 1
+ *  is blue and index 2 is red. Match tolerances are fixed at half of the finest
+ *  precision H.273 Table 2 quotes: 0.0005 for the primaries, which is 25 units
+ *  of 0.00002, and 0.00005 for the white point, rounded up to 3 units. Entries
+ *  the table quotes more coarsely are therefore matched more strictly.
+ */
 
 #include "HDR10.h"
 
+#include <array>
+#include <string>
 
-// Logic from MediaInfoLib
+namespace
+{
+constexpr int PRIMARY_TOLERANCE = 25;
+constexpr int WHITE_TOLERANCE = 3;
+
+constexpr size_t GREEN = 0;
+constexpr size_t BLUE = 1;
+constexpr size_t RED = 2;
+
+bool Matches(const DisplayPrimary& point, const uint16_t (&reference)[2], int tolerance)
+{
+  const int dx = static_cast<int>(point.x) - static_cast<int>(reference[0]);
+  const int dy = static_cast<int>(point.y) - static_cast<int>(reference[1]);
+
+  return dx >= -tolerance && dx <= tolerance && dy >= -tolerance && dy <= tolerance;
+}
+
+std::string Coordinates(const DisplayPrimary& point)
+{
+  return std::to_string(point.x) + "," + std::to_string(point.y);
+}
+} // namespace
 
 std::string CodeToColourPrimaries(uint8_t code)
 {
-    switch (code)
-    {
-        case  1 : return "BT.709";
-        case  4 : return "BT.470 System M";
-        case  5 : return "BT.601 PAL";
-        case  6 : return "BT.601 NTSC";
-        case  7 : return "SMPTE 240M"; //Same as BT.601 NTSC
-        case  8 : return "Generic film";
-        case  9 : return "BT.2020";          // Added in HEVC
-        case 10 : return "XYZ";              // Added in HEVC 2014
-        case 11 : return "DCI P3";           // Added in HEVC 2016
-        case 12 : return "Display P3";       // Added in HEVC 2016
-        case 22 : return "EBU Tech 3213";    // Added in HEVC 2016
-        default : return "";
-    }
+  switch (code)
+  {
+    case 1:
+      return "BT.709";
+    case 4:
+      return "BT.470 System M";
+    case 5:
+      return "BT.601 PAL";
+    case 6:
+      return "BT.601 NTSC";
+    case 7:
+      return "SMPTE 240M";
+    case 8:
+      return "Generic film";
+    case 9:
+      return "BT.2020";
+    case 10:
+      return "XYZ";
+    case 11:
+      return "DCI P3";
+    case 12:
+      return "Display P3";
+    case 22:
+      return "EBU Tech 3213";
+    default:
+      return "";
+  }
 }
 
 std::string MasteringDisplayColourVolumeText(const MasteringDisplayColourVolume& mdcv)
 {
-    // Reordering to RGB
-    size_t R = 4;
-    size_t G = 4;
-    size_t B = 4;
-    size_t W = 3;
+  static constexpr std::array<std::array<size_t, 3>, 6> orderings = {
+      {{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}}};
 
-    for (size_t c = 0; c < 3; c++)
+  for (const auto& set : COLOUR_PRIMARY_SETS)
+  {
+    if (!Matches(mdcv.whitePoint, set.white, WHITE_TOLERANCE))
+      continue;
+
+    for (const auto& order : orderings)
     {
-      if ((mdcv.displayPrimaries[c].x < 17500) && (mdcv.displayPrimaries[c].y < 17500)) B = c;    // x and y small then blue
-      else if ((mdcv.displayPrimaries[c].y - mdcv.displayPrimaries[c].x) >= 0) G = c;             // y > x then green
-      else R = c;
+      if (Matches(mdcv.displayPrimaries[order[0]], set.green, PRIMARY_TOLERANCE) &&
+          Matches(mdcv.displayPrimaries[order[1]], set.blue, PRIMARY_TOLERANCE) &&
+          Matches(mdcv.displayPrimaries[order[2]], set.red, PRIMARY_TOLERANCE))
+        return CodeToColourPrimaries(set.code);
     }
+  }
 
-    // Order not automaticly detected, then assume GBR order
-    if ((R | B | G) >= 4)
-    {
-        G=0; B=1; R=2;
-    }
-
-    // Attempt to match to Well Known Colour Primaries
-    for (uint8_t i = 0; i < 4; i++)
-    {
-        uint8_t code = knownColourVolumes[i].code;
-
-        // +/- 0.0005 (3 digits after comma)
-        if ((mdcv.displayPrimaries[G].x < (knownColourVolumes[i].values[0] - 25)) || (mdcv.displayPrimaries[G].x >= (knownColourVolumes[i].values[0] + 25))) code = 0;
-        if ((mdcv.displayPrimaries[G].y < (knownColourVolumes[i].values[1] - 25)) || (mdcv.displayPrimaries[G].y >= (knownColourVolumes[i].values[1] + 25))) code = 0;
-
-        if ((mdcv.displayPrimaries[B].x < (knownColourVolumes[i].values[2] - 25)) || (mdcv.displayPrimaries[B].x >= (knownColourVolumes[i].values[2] + 25))) code = 0;
-        if ((mdcv.displayPrimaries[B].y < (knownColourVolumes[i].values[3] - 25)) || (mdcv.displayPrimaries[B].y >= (knownColourVolumes[i].values[3] + 25))) code = 0;
-
-        if ((mdcv.displayPrimaries[R].x < (knownColourVolumes[i].values[4] - 25)) || (mdcv.displayPrimaries[R].x >= (knownColourVolumes[i].values[4] + 25))) code = 0;
-        if ((mdcv.displayPrimaries[R].y < (knownColourVolumes[i].values[5] - 25)) || (mdcv.displayPrimaries[R].y >= (knownColourVolumes[i].values[5] + 25))) code = 0;
-
-        // +/- 0.00005 (4 digits after comma)
-        if ((mdcv.whitePoint.x < knownColourVolumes[i].values[6] - 2) || (mdcv.whitePoint.x >= knownColourVolumes[i].values[6] + 3)) code = 0;
-        if ((mdcv.whitePoint.y < knownColourVolumes[i].values[7] - 2) || (mdcv.whitePoint.y >= knownColourVolumes[i].values[7] + 3)) code = 0;
-
-        // if a well known colour primarites return a name
-        if (code) return CodeToColourPrimaries(code);
-    }
-
-    // Not well known - create a string from values
-    return   "R:" + std::to_string(mdcv.displayPrimaries[R].x) + "," + std::to_string(mdcv.displayPrimaries[R].y) + " " +
-             "G:" + std::to_string(mdcv.displayPrimaries[G].x) + "," + std::to_string(mdcv.displayPrimaries[G].y) + " " +
-             "B:" + std::to_string(mdcv.displayPrimaries[B].x) + "," + std::to_string(mdcv.displayPrimaries[B].y) + " " +
-             "W:" + std::to_string(mdcv.whitePoint.x) + "," + std::to_string(mdcv.whitePoint.y);
+  return "R:" + Coordinates(mdcv.displayPrimaries[RED]) + " " +
+         "G:" + Coordinates(mdcv.displayPrimaries[GREEN]) + " " +
+         "B:" + Coordinates(mdcv.displayPrimaries[BLUE]) + " " +
+         "W:" + Coordinates(mdcv.whitePoint);
 }

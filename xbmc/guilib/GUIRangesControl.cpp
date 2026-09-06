@@ -114,7 +114,10 @@ bool CGUIRangesControl::CGUIRange::UpdateLayout(float fBackgroundTextureHeight,
     bChanged |= m_guiFillTexture->SetPosition(fPosX + (offsetX > 0 ? offsetX : 0),
                                               fPosY + (offsetY > 0 ? offsetY : 0));
     bChanged |= m_guiFillTexture->SetHeight(fScaleY * m_guiFillTexture->GetTextureHeight());
-    bChanged |= m_guiFillTexture->SetWidth(width);
+    const bool fillVisible = width > 0.0f;
+    bChanged |= m_guiFillTexture->SetVisible(fillVisible);
+    if (fillVisible)
+      bChanged |= m_guiFillTexture->SetWidth(width);
   }
   else
   {
@@ -141,7 +144,10 @@ bool CGUIRangesControl::CGUIRange::UpdateLayout(float fBackgroundTextureHeight,
       bChanged |=
           m_guiFillTexture->SetPosition(fPosX + offsetX, fPosY + (offsetY > 0 ? offsetY : 0));
       bChanged |= m_guiFillTexture->SetHeight(fScaleY * m_guiFillTexture->GetTextureHeight());
-      bChanged |= m_guiFillTexture->SetWidth(width);
+      const bool fillVisible = width > 0.0f;
+      bChanged |= m_guiFillTexture->SetVisible(fillVisible);
+      if (fillVisible)
+        bChanged |= m_guiFillTexture->SetWidth(width);
 
       offsetX += width;
       offsetY = std::fabs(fScaleY * 0.5f *

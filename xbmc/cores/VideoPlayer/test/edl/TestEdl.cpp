@@ -77,7 +77,7 @@ TEST_F(TestEdl, TestParsingMplayerTimeBasedEDL)
   // one of the scenemarkers (the first) have start and end times defined, kodi should assume the marker at the END position (255.3 secs)
   EXPECT_EQ(edl.GetSceneMarkers().at(0), edl.GetTimeWithoutCuts(255.3 * 1000));
   // one of them only has start defined, at 720.1 secs
-  EXPECT_EQ(edl.GetSceneMarkers().at(1), edl.GetTimeWithoutCuts(720.1 * 1000));
+  EXPECT_EQ(edl.GetSceneMarkers().at(2), edl.GetTimeWithoutCuts(720.1 * 1000));
 
   // commbreaks
   // the second edit on the file is a commbreak

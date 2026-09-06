@@ -32,6 +32,7 @@ public:
             bool upmix,
             bool normalize,
             double centerMix,
+            double surroundMix,
             CAEChannelInfo* remapLayout,
             AEQuality quality,
             bool force_resample,
@@ -55,6 +56,7 @@ protected:
   int m_src_dither_bits, m_dst_dither_bits;
   SwrContext *m_pContext;
   double m_rematrix[AE_CH_MAX][AE_CH_MAX];
+  double m_compensationCarry{0.0};
 };
 
 }

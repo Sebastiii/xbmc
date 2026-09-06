@@ -55,6 +55,13 @@ bool CRendererStarfish::Configure(const VideoPicture& picture, float fps, unsign
   SetViewMode(m_videoSettings.m_ViewMode);
   ManageRenderArea();
 
+  if (picture.color_transfer == AVCOL_TRC_SMPTE2084 ||
+      picture.hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION)
+  {
+    if (CServiceBroker::GetWinSystem()->IsHDRDisplay())
+      CServiceBroker::GetWinSystem()->GetGfxContext().SetTransferPQ(true);
+  }
+
   m_configured = true;
 
   return true;
@@ -108,7 +115,7 @@ void CRendererStarfish::ManageRenderArea()
   if ((m_exportedDestRect != m_destRect || m_exportedSourceRect != m_sourceRect) &&
       !m_sourceRect.IsEmpty() && !m_destRect.IsEmpty())
   {
-    auto origRect =
+    const auto origRect =
         CRect{0, 0, static_cast<float>(m_sourceWidth), static_cast<float>(m_sourceHeight)};
     using namespace KODI::WINDOWING::WAYLAND;
     auto winSystem = static_cast<CWinSystemWaylandWebOS*>(CServiceBroker::GetWinSystem());

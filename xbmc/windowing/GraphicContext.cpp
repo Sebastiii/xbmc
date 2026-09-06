@@ -24,10 +24,25 @@
 #include "settings/Settings.h"
 #include "settings/SettingsComponent.h"
 #include "settings/lib/Setting.h"
+#include "filesystem/Directory.h"
+#include "filesystem/SpecialProtocol.h"
+#include "utils/URIUtils.h"
+#include "utils/XBMCTinyXML.h"
+#include "utils/XMLUtils.h"
 #include "utils/log.h"
 
 #include <cassert>
+#include <cfloat>
+#include <cmath>
+#include <cstdlib>
 #include <mutex>
+
+static bool ResolutionModeEquals(const RESOLUTION_INFO& lhs, const RESOLUTION_INFO& rhs)
+{
+  return lhs.iScreenWidth == rhs.iScreenWidth && lhs.iScreenHeight == rhs.iScreenHeight &&
+         ResolutionRefreshRateEquals(lhs.fRefreshRate, rhs.fRefreshRate) &&
+         (lhs.dwFlags & D3DPRESENTFLAG_MODEMASK) == (rhs.dwFlags & D3DPRESENTFLAG_MODEMASK);
+}
 
 CGraphicContext::CGraphicContext() = default;
 CGraphicContext::~CGraphicContext() = default;
@@ -125,6 +140,18 @@ CRect CGraphicContext::GetClipRegion()
   if (!m_origins.empty())
     clipRegion -= m_origins.top();
   return clipRegion;
+}
+
+size_t CGraphicContext::GetClipRegionDepth()
+{
+  std::unique_lock lock(*this);
+  return m_clipRegions.size();
+}
+
+size_t CGraphicContext::GetViewPortDepth()
+{
+  std::unique_lock lock(*this);
+  return m_viewStack.size();
 }
 
 void CGraphicContext::AddGUITransform()
@@ -304,6 +331,12 @@ const CRect CGraphicContext::GetViewWindow() const
 {
   if (m_bCalibrating || m_bFullScreenVideo)
   {
+    if (m_stereoMode == RENDER_STEREO_MODE_OFF)
+    {
+      const RESOLUTION_INFO& fastInfo = CDisplaySettings::GetInstance().GetResolutionInfo(m_Resolution);
+      return CRect((float)fastInfo.Overscan.left, (float)fastInfo.Overscan.top,
+                   (float)fastInfo.Overscan.right, (float)fastInfo.Overscan.bottom);
+    }
     CRect rect;
     RESOLUTION_INFO info = GetResInfo();
     rect.x1 = (float)info.Overscan.left;
@@ -327,6 +360,87 @@ void CGraphicContext::SetFullScreenVideo(bool bOnOff)
 {
   std::unique_lock<CCriticalSection> lock(*this);
 
+  if (bOnOff && !m_bFullScreenVideo && !m_savedGuiResolutionValid && m_guiSnapshotValid)
+  {
+    m_savedGuiResolutionInfo = m_guiSnapshotInfo;
+    m_savedGuiResolutionValid = true;
+    m_savedGuiResolution = m_guiSnapshotResolution;
+    logM(LOGINFO,
+         "saved GUI resolution {}x{}@{:.3f}Hz from pre-playback snapshot",
+         m_savedGuiResolutionInfo.iScreenWidth,
+         m_savedGuiResolutionInfo.iScreenHeight,
+         m_savedGuiResolutionInfo.fRefreshRate);
+    PersistDesktopResolution(m_savedGuiResolutionInfo);
+  }
+
+  if (bOnOff)
+    m_guiSnapshotValid = false;
+
+  if (bOnOff && !m_bFullScreenVideo && !m_savedGuiResolutionValid)
+  {
+    const std::string strScreenmode =
+        CServiceBroker::GetSettingsComponent()->GetSettings()->GetString(
+            CSettings::SETTING_VIDEOSCREEN_SCREENMODE);
+    const size_t resCount = CDisplaySettings::GetInstance().ResolutionInfoSize();
+
+    if (strScreenmode.size() >= 20 && strScreenmode != "DESKTOP")
+    {
+      const int targetW = static_cast<int>(
+          std::strtol(strScreenmode.substr(0, 5).c_str(), nullptr, 10));
+      const int targetH = static_cast<int>(
+          std::strtol(strScreenmode.substr(5, 5).c_str(), nullptr, 10));
+      const float targetRR = static_cast<float>(
+          std::strtod(strScreenmode.substr(10, 9).c_str(), nullptr));
+      uint32_t targetFlags = 0;
+      if (strScreenmode.substr(19, 1) == "i")
+        targetFlags |= D3DPRESENTFLAG_INTERLACED;
+      if (strScreenmode.find("sbs") != std::string::npos)
+        targetFlags |= D3DPRESENTFLAG_MODE3DSBS;
+      if (strScreenmode.find("tab") != std::string::npos)
+        targetFlags |= D3DPRESENTFLAG_MODE3DTB;
+      if (strScreenmode.find("frp") != std::string::npos)
+        targetFlags |= D3DPRESENTFLAG_MODE3DFP;
+
+      for (size_t i = RES_DESKTOP; i < resCount; ++i)
+      {
+        const RESOLUTION_INFO& info = CDisplaySettings::GetInstance().GetResolutionInfo(i);
+        if (info.iScreenWidth == targetW &&
+            info.iScreenHeight == targetH &&
+            ResolutionRefreshRateEquals(info.fRefreshRate, targetRR) &&
+            (info.dwFlags & D3DPRESENTFLAG_MODEMASK) ==
+                (targetFlags & D3DPRESENTFLAG_MODEMASK))
+        {
+          m_savedGuiResolutionInfo = info;
+          m_savedGuiResolutionValid = true;
+          m_savedGuiResolution = static_cast<RESOLUTION>(i);
+          logM(LOGINFO,
+               "saved GUI resolution {}x{}@{:.3f}Hz from table index {} matching videoscreen.screenmode",
+               m_savedGuiResolutionInfo.iScreenWidth,
+               m_savedGuiResolutionInfo.iScreenHeight,
+               m_savedGuiResolutionInfo.fRefreshRate,
+               static_cast<int>(i));
+          PersistDesktopResolution(m_savedGuiResolutionInfo);
+          break;
+        }
+      }
+    }
+
+    if (!m_savedGuiResolutionValid &&
+        m_Resolution >= RES_DESKTOP && static_cast<size_t>(m_Resolution) < resCount)
+    {
+      m_savedGuiResolutionInfo =
+          CDisplaySettings::GetInstance().GetResolutionInfo(m_Resolution);
+      m_savedGuiResolutionValid = true;
+      m_savedGuiResolution = m_Resolution;
+      logM(LOGINFO,
+           "saved current GUI resolution {}x{}@{:.3f}Hz (screenmode lookup unavailable)",
+           m_savedGuiResolutionInfo.iScreenWidth,
+           m_savedGuiResolutionInfo.iScreenHeight,
+           m_savedGuiResolutionInfo.fRefreshRate);
+      PersistDesktopResolution(m_savedGuiResolutionInfo);
+    }
+  }
+
   m_bFullScreenVideo = bOnOff;
 
   if (m_bFullScreenRoot)
@@ -334,34 +448,152 @@ void CGraphicContext::SetFullScreenVideo(bool bOnOff)
     bool bTriggerUpdateRes = false;
     auto& components = CServiceBroker::GetAppComponents();
     const auto appPlayer = components.GetComponent<CApplicationPlayer>();
+    const int adjustRefreshRateSetting =
+        CServiceBroker::GetSettingsComponent()->GetSettings()->GetInt(
+            CSettings::SETTING_VIDEOPLAYER_ADJUSTREFRESHRATE);
+    const bool allowDesktopRes =
+        adjustRefreshRateSetting == ADJUST_REFRESHRATE_ALWAYS;
+
     if (m_bFullScreenVideo)
       bTriggerUpdateRes = true;
-    else
-    {
-      bool allowDesktopRes = CServiceBroker::GetSettingsComponent()->GetSettings()->GetInt(CSettings::SETTING_VIDEOPLAYER_ADJUSTREFRESHRATE) == ADJUST_REFRESHRATE_ALWAYS;
-      if (!allowDesktopRes)
-      {
-        if (appPlayer->IsPlayingVideo())
-          bTriggerUpdateRes = true;
-      }
-    }
+    else if (!allowDesktopRes && appPlayer->IsPlayingVideo())
+      bTriggerUpdateRes = true;
 
-    bool allowResolutionChangeOnStop = CServiceBroker::GetSettingsComponent()->GetSettings()->GetInt(CSettings::SETTING_VIDEOPLAYER_ADJUSTREFRESHRATE) != ADJUST_REFRESHRATE_ON_START;
-    RESOLUTION targetResolutionOnStop = RES_DESKTOP;
+    bool allowResolutionChangeOnStop =
+        adjustRefreshRateSetting != ADJUST_REFRESHRATE_ON_START;
+    const RESOLUTION savedGuiIdx = FindSavedGuiResolutionIndex();
+    const RESOLUTION configuredGuiIdx = FindConfiguredGuiResolutionIndex();
+    RESOLUTION targetResolutionOnStop = savedGuiIdx != RES_INVALID ? savedGuiIdx : configuredGuiIdx;
     if (bTriggerUpdateRes)
       appPlayer->TriggerUpdateResolution();
-    else if (CDisplaySettings::GetInstance().GetCurrentResolution() > RES_DESKTOP)
+    else if (allowDesktopRes &&
+             CDisplaySettings::GetInstance().GetCurrentResolution() > RES_DESKTOP)
     {
       targetResolutionOnStop = CDisplaySettings::GetInstance().GetCurrentResolution();
     }
 
     if (allowResolutionChangeOnStop && !bTriggerUpdateRes)
     {
+      const RESOLUTION_INFO deskInfo =
+          CDisplaySettings::GetInstance().GetResolutionInfo(RES_DESKTOP);
+      logM(LOGINFO,
+           "restore on stop: targetResolutionOnStop={} savedGuiIdx={} configuredGuiIdx={} "
+           "m_savedGuiResolution={} m_savedGuiResolutionValid={:d} slot16={}x{}@{:.3f}Hz "
+           "saved={}x{}@{:.3f}Hz",
+           static_cast<int>(targetResolutionOnStop), static_cast<int>(savedGuiIdx),
+           static_cast<int>(configuredGuiIdx), static_cast<int>(m_savedGuiResolution),
+           m_savedGuiResolutionValid, deskInfo.iScreenWidth, deskInfo.iScreenHeight,
+           deskInfo.fRefreshRate, m_savedGuiResolutionInfo.iScreenWidth,
+           m_savedGuiResolutionInfo.iScreenHeight, m_savedGuiResolutionInfo.fRefreshRate);
       SetVideoResolution(targetResolutionOnStop, false);
     }
   }
   else
     SetVideoResolution(RES_WINDOW, false);
+}
+
+void CGraphicContext::CaptureGuiResolutionSnapshot()
+{
+  std::unique_lock<CCriticalSection> lock(*this);
+
+  if (m_bFullScreenVideo)
+    return;
+
+  const size_t resCount = CDisplaySettings::GetInstance().ResolutionInfoSize();
+  const RESOLUTION configured = CDisplaySettings::GetInstance().GetCurrentResolution();
+  RESOLUTION snapshotRes = m_Resolution;
+  if (configured >= RES_DESKTOP && static_cast<size_t>(configured) < resCount)
+    snapshotRes = configured;
+
+  if (snapshotRes >= RES_DESKTOP && static_cast<size_t>(snapshotRes) < resCount)
+  {
+    m_guiSnapshotInfo = CDisplaySettings::GetInstance().GetResolutionInfo(snapshotRes);
+    m_guiSnapshotValid = true;
+    m_guiSnapshotResolution = snapshotRes;
+    m_savedGuiResolutionValid = false;
+    m_savedGuiResolution = RES_INVALID;
+    logM(LOGINFO,
+         "captured GUI resolution snapshot {}x{}@{:.3f}Hz pre-playback (m_Resolution={} "
+         "configured={} used={})",
+         m_guiSnapshotInfo.iScreenWidth, m_guiSnapshotInfo.iScreenHeight,
+         m_guiSnapshotInfo.fRefreshRate, static_cast<int>(m_Resolution),
+         static_cast<int>(configured), static_cast<int>(snapshotRes));
+  }
+}
+
+void CGraphicContext::VerifyAndRestoreGuiResolution()
+{
+  std::unique_lock<CCriticalSection> lock(*this);
+
+  if (!m_savedGuiResolutionValid)
+    return;
+
+  if (CServiceBroker::GetSettingsComponent()->GetSettings()->GetInt(
+          CSettings::SETTING_VIDEOPLAYER_ADJUSTREFRESHRATE) == ADJUST_REFRESHRATE_ON_START)
+    return;
+
+  if (m_Resolution < RES_DESKTOP ||
+      static_cast<size_t>(m_Resolution) >= CDisplaySettings::GetInstance().ResolutionInfoSize())
+    return;
+
+  const RESOLUTION_INFO cur = CDisplaySettings::GetInstance().GetResolutionInfo(m_Resolution);
+  const bool mismatch = !ResolutionModeEquals(cur, m_savedGuiResolutionInfo);
+
+  if (!mismatch)
+    return;
+
+  RESOLUTION restoreIdx = FindSavedGuiResolutionIndex();
+  bool slotDesktopRewritten = false;
+  if (restoreIdx == RES_INVALID)
+  {
+    CDisplaySettings::GetInstance().GetResolutionInfo(RES_DESKTOP) = m_savedGuiResolutionInfo;
+    restoreIdx = RES_DESKTOP;
+    slotDesktopRewritten = true;
+  }
+
+  logM(LOGWARNING,
+       "GUI resolution not restored (m_Resolution={} current={}x{}@{:.3f}Hz, "
+       "expected={}x{}@{:.3f}Hz); forcing back via index {} slotDesktopRewritten={:d}",
+       static_cast<int>(m_Resolution), cur.iScreenWidth, cur.iScreenHeight, cur.fRefreshRate,
+       m_savedGuiResolutionInfo.iScreenWidth,
+       m_savedGuiResolutionInfo.iScreenHeight,
+       m_savedGuiResolutionInfo.fRefreshRate,
+       static_cast<int>(restoreIdx), slotDesktopRewritten);
+
+  SetVideoResolution(restoreIdx, true);
+}
+
+RESOLUTION CGraphicContext::FindConfiguredGuiResolutionIndex() const
+{
+  const RESOLUTION configured = CDisplaySettings::GetInstance().GetCurrentResolution();
+
+  if (configured >= RES_DESKTOP &&
+      static_cast<size_t>(configured) < CDisplaySettings::GetInstance().ResolutionInfoSize())
+    return configured;
+
+  return RES_DESKTOP;
+}
+
+RESOLUTION CGraphicContext::FindSavedGuiResolutionIndex() const
+{
+  if (!m_savedGuiResolutionValid)
+    return RES_INVALID;
+
+  const size_t resCount = CDisplaySettings::GetInstance().ResolutionInfoSize();
+
+  if (m_savedGuiResolution >= RES_DESKTOP && static_cast<size_t>(m_savedGuiResolution) < resCount &&
+      ResolutionModeEquals(CDisplaySettings::GetInstance().GetResolutionInfo(m_savedGuiResolution),
+                           m_savedGuiResolutionInfo))
+    return m_savedGuiResolution;
+
+  for (size_t i = RES_DESKTOP; i < resCount; ++i)
+  {
+    if (ResolutionModeEquals(CDisplaySettings::GetInstance().GetResolutionInfo(i),
+                             m_savedGuiResolutionInfo))
+      return static_cast<RESOLUTION>(i);
+  }
+
+  return RES_INVALID;
 }
 
 bool CGraphicContext::IsFullScreenVideo() const
@@ -591,6 +823,11 @@ void CGraphicContext::ResetScreenParameters(RESOLUTION res)
   info.iScreenWidth = info.iWidth;
   info.iScreenHeight = info.iHeight;
   ResetOverscan(res, info.Overscan);
+}
+
+void CGraphicContext::Clear()
+{
+  CServiceBroker::GetRenderSystem()->InvalidateColorBuffer();
 }
 
 void CGraphicContext::Clear(UTILS::COLOR::Color color)
@@ -841,6 +1078,22 @@ void CGraphicContext::RestoreStereoFactor()
   UpdateCameraPosition(m_cameras.top(), m_stereoFactors.top());
 }
 
+float CGraphicContext::GetNormalizedDepth(uint32_t depth)
+{
+  float normalizedDepth = static_cast<float>(depth);
+  normalizedDepth /= m_layer;
+  normalizedDepth = normalizedDepth * 2 - 1;
+  return normalizedDepth;
+}
+
+float CGraphicContext::GetTransformDepth(int32_t depthOffset)
+{
+  float depth = static_cast<float>(m_finalTransform.matrix.depth + depthOffset);
+  depth /= m_layer;
+  depth = depth * 2 - 1;
+  return depth;
+}
+
 CRect CGraphicContext::GenerateAABB(const CRect &rect) const
 {
 // ------------------------
@@ -945,7 +1198,7 @@ float CGraphicContext::GetFPS() const
 {
   if (m_Resolution != RES_INVALID)
   {
-    RESOLUTION_INFO info = GetResInfo();
+    const RESOLUTION_INFO& info = CDisplaySettings::GetInstance().GetResolutionInfo(m_Resolution);
     if (info.fRefreshRate > 0)
       return info.fRefreshRate;
   }
@@ -1019,7 +1272,91 @@ void CGraphicContext::GetAllowedResolutions(std::vector<RESOLUTION> &res)
   }
 }
 
+void CGraphicContext::SetRenderOrder(RENDER_ORDER renderOrder)
+{
+  m_renderOrder = renderOrder;
+  if (renderOrder == RENDER_ORDER_ALL_BACK_TO_FRONT)
+    CServiceBroker::GetRenderSystem()->SetDepthCulling(DEPTH_CULLING_OFF);
+  else if (renderOrder == RENDER_ORDER_BACK_TO_FRONT)
+    CServiceBroker::GetRenderSystem()->SetDepthCulling(DEPTH_CULLING_BACK_TO_FRONT);
+  else if (renderOrder == RENDER_ORDER_FRONT_TO_BACK)
+    CServiceBroker::GetRenderSystem()->SetDepthCulling(DEPTH_CULLING_FRONT_TO_BACK);
+}
+
+uint32_t CGraphicContext::GetDepth(uint32_t addLayers)
+{
+  uint32_t layer = m_layer;
+  m_layer += addLayers;
+  return layer;
+}
+
 void CGraphicContext::SetFPS(float fps)
 {
   m_fFPSOverride = fps;
+}
+
+void CGraphicContext::PersistDesktopResolution(const RESOLUTION_INFO& info)
+{
+  const std::string vfsPath =
+      "special://masterprofile/coreelec/desktop_resolution_snapshot.xml";
+  const std::string fullPath = CSpecialProtocol::TranslatePath(vfsPath);
+  const std::string dir = URIUtils::GetDirectory(fullPath);
+  if (!dir.empty() && !XFILE::CDirectory::Exists(dir))
+    XFILE::CDirectory::Create(dir);
+
+  CXBMCTinyXML doc;
+  TiXmlDeclaration decl("1.0", "UTF-8", "");
+  doc.InsertEndChild(decl);
+  TiXmlElement root("saveddesktopresolution");
+  root.SetAttribute("version", "1");
+  XMLUtils::SetInt   (&root, "iScreenWidth",  info.iScreenWidth);
+  XMLUtils::SetInt   (&root, "iScreenHeight", info.iScreenHeight);
+  XMLUtils::SetInt   (&root, "iWidth",        info.iWidth);
+  XMLUtils::SetInt   (&root, "iHeight",       info.iHeight);
+  XMLUtils::SetFloat (&root, "fRefreshRate",  info.fRefreshRate);
+  XMLUtils::SetInt   (&root, "dwFlags",       static_cast<int>(info.dwFlags));
+  XMLUtils::SetFloat (&root, "fPixelRatio",   info.fPixelRatio);
+  XMLUtils::SetInt   (&root, "iSubtitles",    info.iSubtitles);
+  XMLUtils::SetString(&root, "strMode",       info.strMode);
+  XMLUtils::SetString(&root, "strOutput",     info.strOutput);
+  XMLUtils::SetString(&root, "strId",         info.strId);
+  doc.InsertEndChild(root);
+
+  if (doc.SaveFile(fullPath))
+    logM(LOGINFO,
+         "persisted desktop resolution snapshot {}x{}@{:.3f}Hz to {}",
+         info.iScreenWidth, info.iScreenHeight, info.fRefreshRate, vfsPath);
+  else
+    logM(LOGWARNING, "failed to persist desktop resolution snapshot to {}", vfsPath);
+}
+
+bool CGraphicContext::LoadPersistedDesktopResolution(RESOLUTION_INFO& out)
+{
+  const std::string fullPath = CSpecialProtocol::TranslatePath(
+      "special://masterprofile/coreelec/desktop_resolution_snapshot.xml");
+
+  CXBMCTinyXML doc;
+  if (!doc.LoadFile(fullPath))
+    return false;
+
+  TiXmlElement* root = doc.RootElement();
+  if (!root || std::string(root->Value()) != "saveddesktopresolution")
+    return false;
+
+  out = RESOLUTION_INFO{};
+  int flags = 0;
+  XMLUtils::GetInt   (root, "iScreenWidth",  out.iScreenWidth);
+  XMLUtils::GetInt   (root, "iScreenHeight", out.iScreenHeight);
+  XMLUtils::GetInt   (root, "iWidth",        out.iWidth);
+  XMLUtils::GetInt   (root, "iHeight",       out.iHeight);
+  XMLUtils::GetFloat (root, "fRefreshRate",  out.fRefreshRate);
+  XMLUtils::GetInt   (root, "dwFlags",       flags);
+  out.dwFlags = static_cast<uint32_t>(flags);
+  XMLUtils::GetFloat (root, "fPixelRatio",   out.fPixelRatio);
+  XMLUtils::GetInt   (root, "iSubtitles",    out.iSubtitles);
+  XMLUtils::GetString(root, "strMode",       out.strMode);
+  XMLUtils::GetString(root, "strOutput",     out.strOutput);
+  XMLUtils::GetString(root, "strId",         out.strId);
+
+  return out.iScreenWidth > 0 && out.iScreenHeight > 0 && out.fRefreshRate > 0.0f;
 }

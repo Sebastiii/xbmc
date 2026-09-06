@@ -19,6 +19,7 @@ extern "C"
 
 #define CODEC_FORCE_SOFTWARE 0x01
 #define CODEC_ALLOW_FALLBACK 0x02
+#define CODEC_PROGRESSIVE    0x20
 #define CODEC_INTERLACED     0x40
 #define CODEC_UNKNOWN_I_P    0x80
 
@@ -35,6 +36,10 @@ enum DOVIELType : int
 struct DOVIFrameMetadata
 {
   double pts;
+
+  std::string meta_version = "";
+  std::string source_meta_version = "";
+
   uint16_t level1_min_pq = 0;
   uint16_t level1_max_pq = 0;
   uint16_t level1_avg_pq = 0;
@@ -58,6 +63,7 @@ struct DOVIStreamMetadata
   uint16_t level6_max_fall = 0;
 
   std::string meta_version = "";
+  std::string source_meta_version = "";
 };
 
 struct DOVIStreamInfo
@@ -65,6 +71,7 @@ struct DOVIStreamInfo
   DOVIELType dovi_el_type = DOVIELType::TYPE_NONE;
   bool has_config = false;
   bool has_header = false;
+  bool is_dual_track = false;
   AVDOVIDecoderConfigurationRecord dovi = {};
 };
 
@@ -111,11 +118,13 @@ public:
   int flags;
   std::string filename;
   bool dvd;
+  bool bluray;
   int codecOptions;
 
   // VIDEO
   int fpsscale; // scale of 1001 and a rate of 60000 will result in 59.94 fps
   int fpsrate;
+  bool fpsrate_doubled = false;
   bool interlaced;
   int height; // height of the stream reported by the demuxer
   int width; // width of the stream reported by the demuxer
@@ -129,6 +138,7 @@ public:
   int orientation; // orientation of the video in degrees counter clockwise
   int bitsperpixel;
   int bitdepth;
+  int pixelFormat{AV_PIX_FMT_NONE};
   StreamHdrType hdrType;
   AVColorSpace colorSpace;
   AVColorRange colorRange;
@@ -139,6 +149,7 @@ public:
   std::string stereo_mode; // stereoscopic 3d mode
   AVDOVIDecoderConfigurationRecord dovi{};
   DOVIELType dovi_el_type = DOVIELType::TYPE_NONE;
+  bool is_dual_track = false;
   CDVDClock *pClock;
 
   static constexpr AVDOVIDecoderConfigurationRecord empty_dovi{}; // For comparison

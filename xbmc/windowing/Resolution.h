@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <cmath>
 #include <stdint.h>
 #include <string>
 
@@ -22,6 +23,13 @@ enum RESOLUTION
   RES_DESKTOP        = 16,          // Desktop resolution
   RES_CUSTOM         = 16 + 1,      // First additional resolution
 };
+
+constexpr float RESOLUTION_REFRESH_RATE_EPSILON = 0.001f;
+
+inline bool ResolutionRefreshRateEquals(float lhs, float rhs)
+{
+  return std::fabs(lhs - rhs) < RESOLUTION_REFRESH_RATE_EPSILON;
+}
 
 struct OVERSCAN
 {

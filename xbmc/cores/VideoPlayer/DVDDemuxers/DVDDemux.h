@@ -131,6 +131,7 @@ public:
   {
     iFpsScale = 0;
     iFpsRate = 0;
+    bFpsRateDoubled = false;
     bInterlaced = true;
     bUnknownIP = true;
     iHeight = 0;
@@ -148,6 +149,7 @@ public:
   ~CDemuxStreamVideo() override = default;
   int iFpsScale = 0; // scale of 1000 and a rate of 29970 will result in 29.97 fps
   int iFpsRate = 0;
+  bool bFpsRateDoubled = false;
   bool interlaced = false; // unknown or progressive => false, otherwise true.
   int iHeight = 0; // height of the stream reported by the demuxer
   int iWidth = 0; // width of the stream reported by the demuxer
@@ -159,6 +161,7 @@ public:
   int iBitsPerPixel = 0;
   int iBitRate = 0;
   int bitDepth = 0;
+  int pixelFormat = AV_PIX_FMT_NONE;
 
   AVColorSpace colorSpace = AVCOL_SPC_UNSPECIFIED;
   AVColorRange colorRange = AVCOL_RANGE_UNSPECIFIED;
@@ -171,6 +174,7 @@ public:
   std::string stereo_mode; // expected stereo mode
   StreamHdrType hdr_type = StreamHdrType::HDR_TYPE_NONE; // type of HDR for this stream (hdr10, etc)
   AVDOVIDecoderConfigurationRecord dovi{};
+  bool is_dual_track = false;
   bool bInterlaced; // progressive/interlaced flag
   bool bUnknownIP; // progressive/interlace unknown
 };
@@ -263,6 +267,12 @@ public:
    */
   virtual void Abort() {}
 
+  virtual void MarkBroken() {}
+
+  virtual int64_t GetSourceReadBytes() { return -1; }
+
+  static constexpr int64_t BROKEN_SOURCE_MIN_SCAN_BYTES = 16LL * 1024 * 1024;
+
   /*
    * Flush the demuxer, if any data is kept in buffers, this should be freed now
    */
@@ -278,6 +288,9 @@ public:
    * Seek, time in msec calculated from stream start
    */
   virtual bool SeekTime(double time, bool backwards = false, double* startpts = nullptr) = 0;
+
+  virtual int GetEditionCount() { return 0; }
+  virtual std::string GetEditionName(int index) { return ""; }
 
   /*
    * Seek to a specified chapter.
@@ -376,6 +389,8 @@ public:
   * implicitly enable and open a demux stream for playback
   */
   virtual void OpenStream(int64_t demuxerId, int id) { OpenStream(id); }
+
+  virtual int GetPreferredVideoStream() const { return -1; }
 
   /*
    * sets desired width / height for video stream

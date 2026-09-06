@@ -8,12 +8,22 @@
 
 #include "Shader.h"
 
+#include "FileItem.h"
 #include "ServiceBroker.h"
+#include "filesystem/Directory.h"
 #include "filesystem/File.h"
 #include "rendering/RenderSystem.h"
+#include "utils/Crc32.h"
 #include "utils/GLUtils.h"
+#include "utils/URIUtils.h"
 #include "utils/StringUtils.h"
 #include "utils/log.h"
+
+#include <chrono>
+
+#include <cstring>
+#include <mutex>
+#include <unordered_map>
 
 #ifdef HAS_GLES
 #define GLchar char
@@ -24,6 +34,219 @@
 using namespace Shaders;
 using namespace XFILE;
 
+void Shaders::LogShaderBinaryCacheState()
+{
+  constexpr auto cacheDir = "special://profile/cache/shaders";
+  const bool exists = CDirectory::Exists(cacheDir);
+  int fileCount = 0;
+  if (exists)
+  {
+    CFileItemList items;
+    CDirectory::GetDirectory(cacheDir, items, ".bin", DIR_FLAG_NO_FILE_INFO);
+    fileCount = items.Size();
+  }
+  logM(LOGINFO, "Shader binary cache: {} (exists={}, entries={})",
+       cacheDir, exists ? "yes" : "no", fileCount);
+}
+
+namespace
+{
+using ShaderSourceCache = std::unordered_map<std::string, std::string>;
+
+void NormalizeShaderVersionDirective(std::string& source)
+{
+  const size_t versionPos = source.find("#version");
+  if (versionPos == std::string::npos || versionPos == 0)
+    return;
+
+  const size_t versionEnd = source.find('\n', versionPos);
+  const std::string versionLine =
+      versionEnd == std::string::npos ? source.substr(versionPos) : source.substr(versionPos, versionEnd - versionPos + 1);
+
+  source.erase(versionPos, versionEnd == std::string::npos ? std::string::npos : versionEnd - versionPos + 1);
+  source.insert(0, versionLine);
+}
+
+struct ShaderSourceCacheState
+{
+  std::mutex mutex;
+  ShaderSourceCache cache;
+};
+
+ShaderSourceCacheState& GetShaderSourceCacheState()
+{
+  static ShaderSourceCacheState state;
+  return state;
+}
+
+bool GetCachedShaderSource(const std::string& filename, std::string& path, std::string& source)
+{
+  const auto renderSystem = CServiceBroker::GetRenderSystem();
+  if (!renderSystem)
+    return false;
+
+  path = "special://xbmc/system/shaders/";
+  path += renderSystem->GetShaderPath(filename);
+  path += filename;
+
+  {
+    auto& cacheState = GetShaderSourceCacheState();
+    std::scoped_lock lock(cacheState.mutex);
+    const auto it = cacheState.cache.find(path);
+    if (it != cacheState.cache.cend())
+    {
+      source = it->second;
+      return true;
+    }
+  }
+
+  CFileStream file;
+  if (!file.Open(path))
+    return false;
+
+  getline(file, source, '\0');
+
+  {
+    auto& cacheState = GetShaderSourceCacheState();
+    std::scoped_lock lock(cacheState.mutex);
+    cacheState.cache.emplace(path, source);
+  }
+
+  return true;
+}
+
+#if defined(HAS_GLES) && HAS_GLES == 3
+constexpr uint32_t SHADER_BINARY_CACHE_MAGIC = 0x4B534233;
+constexpr uint32_t SHADER_BINARY_CACHE_VERSION = 1;
+
+struct ShaderBinaryCacheHeader
+{
+  uint32_t magic;
+  uint32_t version;
+  uint32_t format;
+  uint32_t length;
+};
+
+bool SupportsProgramBinaryCache()
+{
+  const auto renderSystem = CServiceBroker::GetRenderSystem();
+  if (!renderSystem)
+    return false;
+
+  unsigned int major{0};
+  unsigned int minor{0};
+  renderSystem->GetRenderVersion(major, minor);
+  if (major < 3)
+    return false;
+
+  GLint numBinaryFormats{0};
+  glGetIntegerv(GL_NUM_PROGRAM_BINARY_FORMATS, &numBinaryFormats);
+  return numBinaryFormats > 0;
+}
+
+uint32_t ComputeShaderCacheKey(const CShader& vertexShader, const CShader& pixelShader)
+{
+  Crc32 crc;
+  const auto renderSystem = CServiceBroker::GetRenderSystem();
+
+  const auto addString = [&crc](const std::string& value) {
+    crc.Compute(value.data(), value.size());
+  };
+
+  addString(vertexShader.GetName());
+  addString(vertexShader.GetSource());
+  addString(pixelShader.GetName());
+  addString(pixelShader.GetSource());
+
+  if (renderSystem)
+  {
+    addString(renderSystem->GetRenderVendor());
+    addString(renderSystem->GetRenderRenderer());
+    addString(renderSystem->GetRenderVersionString());
+  }
+
+  return crc;
+}
+
+std::string GetShaderBinaryCachePath(const CShader& vertexShader, const CShader& pixelShader)
+{
+  constexpr auto cacheDir = "special://profile/cache/shaders";
+  CDirectory::Create(cacheDir);
+  return URIUtils::AddFileToFolder(
+      cacheDir, StringUtils::Format("gles-program-{:08x}.bin", ComputeShaderCacheKey(vertexShader, pixelShader)));
+}
+
+bool LoadProgramBinaryCache(GLuint program, const CShader& vertexShader, const CShader& pixelShader)
+{
+  std::vector<uint8_t> fileData;
+  CFile file;
+  const std::string cachePath = GetShaderBinaryCachePath(vertexShader, pixelShader);
+
+  if (file.LoadFile(cachePath, fileData) <= static_cast<ssize_t>(sizeof(ShaderBinaryCacheHeader)))
+    return false;
+
+  ShaderBinaryCacheHeader header;
+  std::memcpy(&header, fileData.data(), sizeof(header));
+  if (header.magic != SHADER_BINARY_CACHE_MAGIC || header.version != SHADER_BINARY_CACHE_VERSION ||
+      header.length == 0 || fileData.size() != sizeof(header) + header.length)
+  {
+    CFile::Delete(cachePath);
+    return false;
+  }
+
+  glProgramBinary(program, header.format, fileData.data() + sizeof(header), header.length);
+
+  GLint linked{GL_FALSE};
+  glGetProgramiv(program, GL_LINK_STATUS, &linked);
+  if (linked != GL_TRUE)
+  {
+    CLog::Log(LOGDEBUG, "GL: Program binary cache rejected for {} {}", vertexShader.GetName(),
+              pixelShader.GetName());
+    CFile::Delete(cachePath);
+    return false;
+  }
+
+  CLog::Log(LOGDEBUG, "GL: Loaded program binary cache for {} {}", vertexShader.GetName(),
+            pixelShader.GetName());
+  return true;
+}
+
+void SaveProgramBinaryCache(GLuint program, const CShader& vertexShader, const CShader& pixelShader)
+{
+  GLint binaryLength{0};
+  glGetProgramiv(program, GL_PROGRAM_BINARY_LENGTH, &binaryLength);
+  if (binaryLength <= 0)
+    return;
+
+  std::vector<uint8_t> binary(binaryLength);
+  GLenum binaryFormat{0};
+  GLsizei actualLength{0};
+  glGetProgramBinary(program, binaryLength, &actualLength, &binaryFormat, binary.data());
+  if (actualLength <= 0)
+    return;
+
+  ShaderBinaryCacheHeader header{SHADER_BINARY_CACHE_MAGIC, SHADER_BINARY_CACHE_VERSION,
+                                 static_cast<uint32_t>(binaryFormat), static_cast<uint32_t>(actualLength)};
+
+  CFile file;
+  const std::string cachePath = GetShaderBinaryCachePath(vertexShader, pixelShader);
+  if (!file.OpenForWrite(cachePath, true))
+    return;
+
+  if (file.Write(&header, sizeof(header)) != static_cast<ssize_t>(sizeof(header)) ||
+      file.Write(binary.data(), actualLength) != actualLength)
+  {
+    CLog::Log(LOGWARNING, "GL: Failed to write shader program binary cache {}", cachePath);
+    file.Close();
+    CFile::Delete(cachePath);
+    return;
+  }
+
+  file.Close();
+}
+#endif
+} // namespace
+
 //////////////////////////////////////////////////////////////////////
 // CShader
 //////////////////////////////////////////////////////////////////////
@@ -32,17 +255,14 @@ bool CShader::LoadSource(const std::string& filename, const std::string& prefix)
   if(filename.empty())
     return true;
 
-  CFileStream file;
-
-  std::string path = "special://xbmc/system/shaders/";
-  path += CServiceBroker::GetRenderSystem()->GetShaderPath(filename);
-  path += filename;
-  if(!file.Open(path))
+  std::string path;
+  if (!GetCachedShaderSource(filename, path, m_source))
   {
     CLog::Log(LOGERROR, "CYUVShaderGLSL::CYUVShaderGLSL - failed to open file {}", filename);
     return false;
   }
-  getline(file, m_source, '\0');
+
+  NormalizeShaderVersionDirective(m_source);
 
   size_t pos = 0;
   size_t versionPos = m_source.find("#version");
@@ -64,18 +284,13 @@ bool CShader::AppendSource(const std::string& filename)
   if(filename.empty())
     return true;
 
-  CFileStream file;
   std::string temp;
-
-  std::string path = "special://xbmc/system/shaders/";
-  path += CServiceBroker::GetRenderSystem()->GetShaderPath(filename);
-  path += filename;
-  if(!file.Open(path))
+  std::string path;
+  if (!GetCachedShaderSource(filename, path, temp))
   {
     CLog::Log(LOGERROR, "CShader::AppendSource - failed to open file {}", filename);
     return false;
   }
-  getline(file, temp, '\0');
   m_source.append(temp);
 
   m_filenames.append(" " + filename);
@@ -88,18 +303,13 @@ bool CShader::InsertSource(const std::string& filename, const std::string& loc)
   if(filename.empty())
     return true;
 
-  CFileStream file;
   std::string temp;
-
-  std::string path = "special://xbmc/system/shaders/";
-  path += CServiceBroker::GetRenderSystem()->GetShaderPath(filename);
-  path += filename;
-  if(!file.Open(path))
+  std::string path;
+  if (!GetCachedShaderSource(filename, path, temp))
   {
     CLog::Log(LOGERROR, "CShader::InsertSource - failed to open file {}", filename);
     return false;
   }
-  getline(file, temp, '\0');
 
   size_t locPos = m_source.find(loc);
   if (locPos == std::string::npos)
@@ -283,9 +493,40 @@ void CGLSLShaderProgram::Free()
 bool CGLSLShaderProgram::CompileAndLink()
 {
   GLint params[4];
+  const bool logCompile = CServiceBroker::GetLogging().CanLogComponent(LOGAVTIMING);
+  const auto compileStart = logCompile ? std::chrono::steady_clock::now()
+                                       : std::chrono::steady_clock::time_point{};
 
   // free resources
   Free();
+
+#if defined(HAS_GLES) && HAS_GLES == 3
+  if (SupportsProgramBinaryCache())
+  {
+    if ((m_shaderProgram = glCreateProgram()) != 0)
+    {
+      if (LoadProgramBinaryCache(m_shaderProgram, *m_pVP, *m_pFP))
+      {
+        m_validated = false;
+        m_ok = true;
+        OnCompiledAndLinked();
+        VerifyGLState();
+        if (logCompile)
+        {
+          const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now() - compileStart).count();
+          logComponentM(LOGDEBUG, LOGAVTIMING,
+                        "Shader compile/link {} from binary cache in {} ms",
+                        m_pFP->GetName(), elapsedMs);
+        }
+        return true;
+      }
+
+      glDeleteProgram(m_shaderProgram);
+      m_shaderProgram = 0;
+    }
+  }
+#endif
 
   // compiled vertex shader
   if (!m_pVP->Compile())
@@ -310,6 +551,11 @@ bool CGLSLShaderProgram::CompileAndLink()
     CLog::Log(LOGERROR, "GL: Error creating shader program handle");
     goto error;
   }
+
+#if defined(HAS_GLES) && HAS_GLES == 3
+  if (SupportsProgramBinaryCache())
+    glProgramParameteri(m_shaderProgram, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE);
+#endif
 
   // attach the vertex shader
   glAttachShader(m_shaderProgram, m_pVP->Handle());
@@ -338,8 +584,22 @@ bool CGLSLShaderProgram::CompileAndLink()
 
   m_validated = false;
   m_ok = true;
+
+#if defined(HAS_GLES) && HAS_GLES == 3
+  if (SupportsProgramBinaryCache())
+    SaveProgramBinaryCache(m_shaderProgram, *m_pVP, *m_pFP);
+#endif
+
   OnCompiledAndLinked();
   VerifyGLState();
+  if (logCompile)
+  {
+    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - compileStart).count();
+    logComponentM(LOGDEBUG, LOGAVTIMING,
+                  "Shader compile/link {} from source in {} ms",
+                  m_pFP->GetName(), elapsedMs);
+  }
   return true;
 
  error:
@@ -387,8 +647,6 @@ void CGLSLShaderProgram::Disable()
 {
   if (OK())
   {
-    glUseProgram(0);
     OnDisabled();
   }
 }
-

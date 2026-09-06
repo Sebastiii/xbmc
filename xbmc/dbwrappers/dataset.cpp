@@ -600,6 +600,10 @@ DbErrors::DbErrors(const char* msg, ...)
   va_list vl;
   va_start(vl, msg);
   char buf[DB_BUFF_MAX] = "";
+
+  if (!msg)
+    msg = "unknown database error (NULL format)";
+
 #ifndef TARGET_POSIX
   _vsnprintf(buf, DB_BUFF_MAX - 1, msg, vl);
 #else

@@ -17,4 +17,8 @@ public:
   ~CGUIDialogPlayerProcessInfo(void) override;
 
   bool OnAction(const CAction &action) override;
+  void Process(unsigned int currentTime, CDirtyRegionList &dirtyregions) override;
+
+private:
+  unsigned int m_lastProcessTime = 0;
 };

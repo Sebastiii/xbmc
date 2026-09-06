@@ -34,12 +34,14 @@ protected:
   {
   public:
     CRenderer();
-    void Render(int idx) override;
+    void Render(int idx, float depth = 1.0f) override;
     void CreateSubtitlesStyle();
 
   private:
     // Implementation of Observer
     void Notify(const Observable& obs, const ObservableMessage msg) override{};
+
+    void ResetSubtitlePosition() override;
 
     std::shared_ptr<struct KODI::SUBTITLES::STYLE::style> m_debugOverlayStyle;
   };

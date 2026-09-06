@@ -58,22 +58,32 @@ public:
 
   bool OpenStream(CDVDStreamInfo hint) override;
   void CloseStream(bool bWaitForBuffers) override;
-
   void SetSpeed(int iSpeed) override;
+  void SetEOS(bool eos) override { m_isEOS = eos; }
   void Flush(bool sync) override;
-
   bool AcceptsData() const override;
   bool HasData() const override;
   int  GetLevel() const override { return m_messageQueue.GetLevel(); }
+  void SetMaxTimeSize(double sec) override { m_messageQueue.SetMaxTimeSize(sec); }
+  double GetMaxTimeSizeSeconds() const override
+  {
+    const double inverseSeconds = m_messageQueue.GetMaxTimeSize();
+    return inverseSeconds > 0.0 ? 1.0 / inverseSeconds : 0.0;
+  }
+  double GetQueueTimeSize() const override { return m_messageQueue.GetTimeSize(); }
   bool IsInited() const override;
   bool IsEOS() override;
+  bool IsOutputPictureInFlight() const { return m_outputPictureInFlight.load(); }
   void SendMessage(std::shared_ptr<CDVDMsg> pMsg, int priority = 0) override;
   void FlushMessages() override;
 
   void EnableSubtitle(bool bEnable) override { m_bRenderSubs = bEnable; }
   bool IsSubtitleEnabled() override { return m_bRenderSubs; }
-  double GetSubtitleDelay() override { return m_iSubtitleDelay; }
-  void SetSubtitleDelay(double delay) override { m_iSubtitleDelay = delay; }
+  double GetSubtitleDelay() override { return m_iSubtitleDelay.load(std::memory_order_relaxed); }
+  void SetSubtitleDelay(double delay) override
+  {
+    m_iSubtitleDelay.store(delay, std::memory_order_relaxed);
+  }
   bool IsStalled() const override { return m_stalled; }
   bool IsPlaybackStalled() const override { return m_playbackStalled; }
   double GetCurrentPts() override;
@@ -81,6 +91,7 @@ public:
   std::string GetPlayerInfo() override;
   int GetVideoBitrate() override;
   bool SupportsExtention() const override { return m_pVideoCodec && m_pVideoCodec->SupportsExtention(); }
+  bool HonorsAccurateSeek() const override { return !m_pVideoCodec || m_pVideoCodec->HonorsAccurateSeek(); }
 
   // classes
   CDVDOverlayContainer* m_pOverlayContainer;
@@ -112,11 +123,18 @@ protected:
 
   void ResetFrameRateCalc();
   void CalcFrameRate();
+  void ResolveTelecineProbe(double& frametime, bool timedOut);
   int CalcDropRequirement(double pts);
 
-  double m_iSubtitleDelay;
+  std::atomic<double> m_iSubtitleDelay{0.0};
 
   int m_retryProgressive;
+  int m_telecineProbe;
+  bool m_telecine;
+  double m_halvedFieldRate;
+  int m_telecineTwoFieldPackets;
+  std::chrono::steady_clock::time_point m_telecineProbeStart;
+  std::string m_vfmt;
   int m_iLateFrames;
   int m_iDroppedFrames;
   int m_iDroppedRequest;
@@ -130,12 +148,23 @@ protected:
                              //this is increased exponentially from CVideoPlayerVideo::CalcFrameRate()
 
   bool m_bFpsInvalid;        // needed to ignore fps (e.g. dvd stills)
-  bool m_bRenderSubs;
+  std::atomic<bool> m_bRenderSubs;
   float m_fForcedAspectRatio;
   int m_speed;
   std::atomic_bool m_stalled = false;
   std::atomic_bool m_playbackStalled;
   std::atomic_bool m_isEOS{true};
+  std::atomic_bool m_outputPictureInFlight{false};
+  bool m_swBlockArmed = false;
+  bool m_swBlockResetPending = false;
+  int m_swBlockAgain = 0;
+  int m_swBlockDropped = 0;
+  int m_swVqMin = -1;
+  int m_swVqMax = -1;
+  int64_t m_swQWaitUs = 0;
+  int64_t m_swWaitUs = 0;
+  int64_t m_swAddUs = 0;
+  std::chrono::steady_clock::time_point m_swBlockStamp{};
   bool m_paused;
   IDVDStreamPlayer::ESyncState m_syncState;
   std::atomic_bool m_bAbortOutput;

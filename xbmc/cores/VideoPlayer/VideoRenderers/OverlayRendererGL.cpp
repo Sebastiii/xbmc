@@ -109,6 +109,8 @@ COverlayTextureGL::COverlayTextureGL(const CDVDOverlayImage& o, CRect& rSource)
 
   glBindTexture(GL_TEXTURE_2D, 0);
 
+  m_isBitmapOverlay = true;
+
   if (o.source_width > 0 && o.source_height > 0)
   {
     m_pos = POSITION_RELATIVE;
@@ -182,6 +184,7 @@ COverlayTextureGL::COverlayTextureGL(const CDVDOverlaySpu& o)
   m_width = static_cast<float>(max_x - min_x);
   m_height = static_cast<float>(max_y - min_y);
   m_pma = !!USE_PREMULTIPLIED_ALPHA;
+  m_isBitmapOverlay = true;
 }
 
 std::shared_ptr<COverlay> COverlay::Create(ASS_Image* images, float width, float height)
@@ -293,6 +296,12 @@ void COverlayGlyphGL::Render(SRenderState& state)
   GLint posLoc  = renderSystem->ShaderGetPos();
   GLint colLoc  = renderSystem->ShaderGetCol();
   GLint tex0Loc = renderSystem->ShaderGetCoord0();
+  GLint depthLoc = renderSystem->ShaderGetDepth();
+  GLint matrixUniformLoc = renderSystem->ShaderGetMatrix();
+
+  CMatrixGL matrix = glMatrixProject.Get();
+  matrix.MultMatrixf(glMatrixModview.Get());
+  glUniformMatrix4fv(matrixUniformLoc, 1, GL_FALSE, matrix);
 
   std::vector<VERTEX> vecVertices(6 * m_vertex.size() / 4);
   VERTEX* vertices = vecVertices.data();
@@ -324,6 +333,8 @@ void COverlayGlyphGL::Render(SRenderState& state)
   glEnableVertexAttribArray(posLoc);
   glEnableVertexAttribArray(colLoc);
   glEnableVertexAttribArray(tex0Loc);
+
+  glUniform1f(depthLoc, -1.0f);
 
   glDrawArrays(GL_TRIANGLES, 0, vecVertices.size());
 
@@ -396,6 +407,7 @@ void COverlayTextureGL::Render(SRenderState& state)
   GLint posLoc = renderSystem->ShaderGetPos();
   GLint tex0Loc = renderSystem->ShaderGetCoord0();
   GLint uniColLoc = renderSystem->ShaderGetUniCol();
+  GLint depthLoc = renderSystem->ShaderGetDepth();
 
   GLfloat col[4] = {1.0f, 1.0f, 1.0f, 1.0f};
 
@@ -451,7 +463,9 @@ void COverlayTextureGL::Render(SRenderState& state)
   glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, indexVBO);
   glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(GLubyte)*4, idx, GL_STATIC_DRAW);
 
-  glDrawElements(GL_TRIANGLE_STRIP, 4, GL_UNSIGNED_BYTE, 0);
+  glUniform1f(depthLoc, -1.0f);
+
+  glDrawElements(GL_TRIANGLE_STRIP, 4, GL_UNSIGNED_BYTE, nullptr);
 
   glDisableVertexAttribArray(posLoc);
   glDisableVertexAttribArray(tex0Loc);

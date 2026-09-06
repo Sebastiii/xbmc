@@ -65,9 +65,11 @@ public:
 
 private:
   void UpdateDialNormSettings();
+  void UpdateLavModeSettings();
 
   int GetData(uint8_t** dst);
   unsigned int PackTrueHD();
+  unsigned int PackEAC3();
   CAEStreamParser m_parser;
   uint8_t* m_buffer = nullptr;
   unsigned int m_bufferSize = 0;
@@ -87,6 +89,13 @@ private:
   unsigned int m_trueHDframes = 0;
   bool m_deviceIsRAW{false};
 
+  std::vector<uint8_t> m_eac3Buffer;
+  unsigned int m_eac3Size = 0;
+  unsigned int m_eac3FramesCount = 0;
+  unsigned int m_eac3FramesPerBurst = 0;
+  unsigned int m_eac3AlignDiscards = 0;
+  bool m_eac3AlignGiveUp = false;
+
   //============================================================================
   // LAV A/V Sync - Enable/Disable Switches
   //============================================================================
@@ -103,7 +112,6 @@ private:
 
   // Internal sentinel for "no valid PTS" (-1.0 instead of DVD_NOPTS_VALUE)
   static constexpr double LOCAL_NOPTS = -1.0;
-  static constexpr double MAX_REASONABLE_PTS = 86400000000.0; // 24 hours
 
   // Track last output PTS for seamless branch recovery and jitter calculation
   double m_lastOutputPts{LOCAL_NOPTS};
@@ -118,7 +126,7 @@ private:
 
   // Jitter correction thresholds (in DVD_TIME_BASE units = microseconds)
   // LAV Filters: TrueHD/DTS use 10x threshold for bitstreaming tolerance
-  static constexpr double JITTER_THRESHOLD_TRUEHD_DTS = 100000.0;  // 100ms
+  static constexpr double JITTER_THRESHOLD_TRUEHD = 100000.0;      // 100ms
   static constexpr double JITTER_THRESHOLD_DEFAULT = 10000.0;      // 10ms
   double m_jitterThreshold{JITTER_THRESHOLD_DEFAULT};
 
@@ -126,6 +134,7 @@ private:
   std::atomic<bool> m_defeatAC3DialNorm{false};
   std::atomic<bool> m_defeatEAC3AtmosDialNorm{false};
   std::atomic<bool> m_defeatTrueHDDialNorm{false};
+  std::atomic<bool> m_defeatDTSDialNorm{false};
 
   // E-AC-3 JOC/Atmos: dialnorm defeat must be skipped because modifying BSI
   // dialnorm breaks JOC rendering (receiver cross-checks against OAMD metadata)
@@ -142,4 +151,5 @@ private:
   //============================================================================
   double m_internalClock{LOCAL_NOPTS};  // Running output timestamp (like LAV's m_rtStart)
   bool m_needsResync{true};             // When true, sync to next valid demuxer PTS
+  int m_jitterTraceCount{0};
 };

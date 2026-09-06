@@ -106,6 +106,7 @@ void CDVDOverlayCodecSSA::Flush()
 {
   m_pOverlay.reset();
   m_order = 0;
+  m_libass->FlushEvents();
 }
 
 std::shared_ptr<CDVDOverlay> CDVDOverlayCodecSSA::GetOverlay()

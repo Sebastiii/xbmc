@@ -161,7 +161,7 @@ void CGUIVisualisationControl::Process(unsigned int currentTime, CDirtyRegionLis
     {
       auto& context = CServiceBroker::GetWinSystem()->GetGfxContext();
 
-      context.CaptureStateBlock();
+      CGraphicContextStateBlock stateBlock(context);
       if (m_alreadyStarted)
       {
         m_instance->Stop();
@@ -174,7 +174,6 @@ void CGUIVisualisationControl::Process(unsigned int currentTime, CDirtyRegionLis
       if (tag && !tag->GetTitle().empty())
         songTitle = tag->GetTitle();
       m_alreadyStarted = m_instance->Start(m_channels, m_samplesPerSec, m_bitsPerSample, songTitle);
-      context.ApplyStateBlock();
       m_callStart = false;
       m_updateTrack = true;
     }
@@ -203,11 +202,14 @@ void CGUIVisualisationControl::Render()
      * the addon renders, so the best we can do is attempt to define
      * a viewport??
      */
-    context.SetViewPort(m_posX, m_posY, m_width, m_height);
-    context.CaptureStateBlock();
-    m_instance->Render();
-    context.ApplyStateBlock();
-    context.RestoreViewPort();
+    if (context.SetViewPort(m_posX, m_posY, m_width, m_height))
+    {
+      {
+        CGraphicContextStateBlock stateBlock(context);
+        m_instance->Render();
+      }
+      context.RestoreViewPort();
+    }
   }
 
   CGUIControl::Render();
@@ -365,7 +367,7 @@ bool CGUIVisualisationControl::InitVisualization()
 
   auto& context = winSystem->GetGfxContext();
 
-  context.CaptureStateBlock();
+  CGraphicContextStateBlock stateBlock(context);
 
   float x = context.ScaleFinalXCoord(GetXPosition(), GetYPosition());
   float y = context.ScaleFinalYCoord(GetXPosition(), GetYPosition());
@@ -384,7 +386,6 @@ bool CGUIVisualisationControl::InitVisualization()
   CreateBuffers();
 
   m_alreadyStarted = false;
-  context.ApplyStateBlock();
   return true;
 }
 
@@ -414,9 +415,10 @@ void CGUIVisualisationControl::DeInitVisualization()
     {
       auto& context = winSystem->GetGfxContext();
 
-      context.CaptureStateBlock();
-      m_instance->Stop();
-      context.ApplyStateBlock();
+      {
+        CGraphicContextStateBlock stateBlock(context);
+        m_instance->Stop();
+      }
       m_alreadyStarted = false;
     }
 

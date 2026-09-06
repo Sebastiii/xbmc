@@ -18,6 +18,10 @@ class StreamUtils
 public:
   static int GetCodecPriority(const std::string& codec);
 
+  static std::string GetCanonicalCodecName(const std::string& codec);
+  static std::string GetCodecDetail(const std::string& codec);
+  static std::string GetExtendedCodecName(const std::string& codec, const std::string& profile);
+
   /*!
    * \brief Make a FourCC code as unsigned integer value
    * \param c1 The first FourCC char

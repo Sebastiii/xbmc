@@ -54,6 +54,8 @@ CActiveAESettings::CActiveAESettings(CActiveAE &ae) : m_audioEngine(ae)
   settingSet.insert(CSettings::SETTING_AUDIOOUTPUT_STREAMSILENCE);
   settingSet.insert(CSettings::SETTING_AUDIOOUTPUT_STREAMNOISE);
   settingSet.insert(CSettings::SETTING_AUDIOOUTPUT_MIXSUBLEVEL);
+  settingSet.insert(CSettings::SETTING_AUDIOOUTPUT_LFEMIXTO);
+  settingSet.insert(CSettings::SETTING_AUDIOOUTPUT_BOOSTCENTER);
   settingSet.insert(CSettings::SETTING_AUDIOOUTPUT_MAINTAINORIGINALVOLUME);
   settingSet.insert(CSettings::SETTING_AUDIOOUTPUT_DTSHDCOREFALLBACK);
   settings->GetSettingsManager()->RegisterCallback(this, settingSet);
@@ -66,15 +68,20 @@ CActiveAESettings::CActiveAESettings(CActiveAE &ae) : m_audioEngine(ae)
 
 CActiveAESettings::~CActiveAESettings()
 {
-  const std::shared_ptr<CSettings> settings = CServiceBroker::GetSettingsComponent()->GetSettings();
+  const auto settingsComponent = CServiceBroker::GetSettingsComponent();
+  const std::shared_ptr<CSettings> settings =
+      settingsComponent ? settingsComponent->GetSettings() : nullptr;
 
   std::lock_guard lock(m_cs);
 
-  settings->GetSettingsManager()->UnregisterSettingOptionsFiller("aequalitylevels");
-  settings->GetSettingsManager()->UnregisterSettingOptionsFiller("audiodevices");
-  settings->GetSettingsManager()->UnregisterSettingOptionsFiller("audiodevicespassthrough");
-  settings->GetSettingsManager()->UnregisterSettingOptionsFiller("audiostreamsilence");
-  settings->GetSettingsManager()->UnregisterCallback(this);
+  if (settings)
+  {
+    settings->GetSettingsManager()->UnregisterSettingOptionsFiller("aequalitylevels");
+    settings->GetSettingsManager()->UnregisterSettingOptionsFiller("audiodevices");
+    settings->GetSettingsManager()->UnregisterSettingOptionsFiller("audiodevicespassthrough");
+    settings->GetSettingsManager()->UnregisterSettingOptionsFiller("audiostreamsilence");
+    settings->GetSettingsManager()->UnregisterCallback(this);
+  }
   m_instance = nullptr;
 }
 

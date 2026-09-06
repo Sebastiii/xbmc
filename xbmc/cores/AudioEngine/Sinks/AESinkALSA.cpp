@@ -18,10 +18,16 @@
 #include "cores/AudioEngine/Utils/AEUtil.h"
 #include "cores/DataCacheCore.h"
 #include "platform/Platform.h"
+#include "settings/AdvancedSettings.h"
+#include "settings/Settings.h"
+#include "settings/SettingsComponent.h"
+#include "utils/AudioDelayTrace.h"
 #include "utils/XTimeUtils.h"
+#include "utils/LogThrottle.h"
 #include "utils/log.h"
 
 #if defined(HAS_LIBAMCODEC)
+#include "platform/linux/SysfsPath.h"
 #include "utils/AMLUtils.h"
 #endif
 
@@ -34,6 +40,7 @@
 #include <string>
 #include <string_view>
 #include <time.h>
+#include <vector>
 
 #include <sys/utsname.h>
 
@@ -563,7 +570,10 @@ void CAESinkALSA::GetAESParams(const AEAudioFormat& format, std::string& params)
 
   params += ",AES2=0x00";
 
-  if (m_passthrough && format.m_channelLayout.Count() == 8) params += ",AES3=0x09";
+  const unsigned int aesChannels = (format.m_dataFormat == AE_FMT_RAW)
+                                       ? GetChannelLayoutRaw(format).Count()
+                                       : format.m_channelLayout.Count();
+  if (m_passthrough && aesChannels == 8) params += ",AES3=0x09";
   else if (format.m_sampleRate == 192000) params += ",AES3=0x0e";
   else if (format.m_sampleRate == 176400) params += ",AES3=0x0c";
   else if (format.m_sampleRate ==  96000) params += ",AES3=0x0a";
@@ -656,10 +666,13 @@ void CAESinkALSA::aml_configure_simple_control(std::string &device, const enum I
             return;
           }
 
-          snd_mixer_selem_set_enum_item(elem, (snd_mixer_selem_channel_id_t)0, spdif_id);
+          const int routeRc =
+              snd_mixer_selem_set_enum_item(elem, (snd_mixer_selem_channel_id_t)0, spdif_id);
+          unsigned int routeRead = ~0u;
+          snd_mixer_selem_get_enum_item(elem, (snd_mixer_selem_channel_id_t)0, &routeRead);
 
           // set codec format for SPDIF-B
-          logM(LOGDEBUG, "CAESinkALSA", "Set codec for \"{}\"", sid_names_fmt[HDMITX_SRC_SPDIF_B].c_str());
+          logM(LOGDEBUG, "Set codec for \"{}\"", sid_names_fmt[HDMITX_SRC_SPDIF_B].c_str());
           snd_mixer_selem_id_set_name(sid, sid_names_fmt[HDMITX_SRC_SPDIF_B].c_str());
           elem = snd_mixer_find_selem(handle, sid);
           if (!elem) {
@@ -669,7 +682,16 @@ void CAESinkALSA::aml_configure_simple_control(std::string &device, const enum I
             return;
           }
 
-          snd_mixer_selem_set_enum_item(elem, (snd_mixer_selem_channel_id_t)0, codec);
+          const int fmtRcB =
+              snd_mixer_selem_set_enum_item(elem, (snd_mixer_selem_channel_id_t)0, codec);
+          unsigned int fmtReadB = ~0u;
+          snd_mixer_selem_get_enum_item(elem, (snd_mixer_selem_channel_id_t)0, &fmtReadB);
+          logComponentM(LOGDEBUG, LOGAUDIO,
+                        "amlfmt: ctrl=spdif_b codec={}({}) setRc={} readback={} routeRc={} "
+                        "routeSet={} routeRead={} hpd={}",
+                        static_cast<int>(codec), AMLCodecToStr(codec), fmtRcB, fmtReadB, routeRc,
+                        static_cast<int>(spdif_id), routeRead,
+                        CSysfsPath("/sys/class/amhdmitx/amhdmitx0/hpd_state").GetOrDefault<int>());
         }
         [[fallthrough]];
       default:
@@ -685,7 +707,12 @@ void CAESinkALSA::aml_configure_simple_control(std::string &device, const enum I
             return;
           }
 
-          snd_mixer_selem_set_enum_item(elem, (snd_mixer_selem_channel_id_t)0, codec);
+          const int fmtRcA =
+              snd_mixer_selem_set_enum_item(elem, (snd_mixer_selem_channel_id_t)0, codec);
+          unsigned int fmtReadA = ~0u;
+          snd_mixer_selem_get_enum_item(elem, (snd_mixer_selem_channel_id_t)0, &fmtReadA);
+          logComponentM(LOGDEBUG, LOGAUDIO, "amlfmt: ctrl=spdif_a codec={}({}) setRc={} readback={}",
+                        static_cast<int>(codec), AMLCodecToStr(codec), fmtRcA, fmtReadA);
           break;
         }
     }
@@ -739,49 +766,53 @@ bool CAESinkALSA::Initialize(AEAudioFormat &format, std::string &device)
   m_isAmlDevice = (amlDeviceType != AMLDeviceType::AML_NONE);
   if (m_isAmlDevice)
   {
-    enum IEC958_mode_codec codec = inconfig.channels > 2 ? MULTI_CHANNEL_LPCM : STEREO_PCM;
-
-    CLog::Log(LOGDEBUG, "CAESinkALSA::Initialize - Configure simple control for \"{}\"",
-      GetAMLCardName(amlDeviceType));
-
-    if (m_passthrough)
-    {
-      switch(format.m_streamInfo.m_type)
-      {
-        case CAEStreamInfo::STREAM_TYPE_AC3:
-          codec = DOLBY_DIGITAL;
-          break;
-
-        case CAEStreamInfo::STREAM_TYPE_DTS_512:
-        case CAEStreamInfo::STREAM_TYPE_DTS_1024:
-        case CAEStreamInfo::STREAM_TYPE_DTS_2048:
-        case CAEStreamInfo::STREAM_TYPE_DTSHD_CORE:
-          codec = DTS;
-          break;
-
-        case CAEStreamInfo::STREAM_TYPE_DTSHD:
-          codec = DTS_HD;
-          break;
-
-        case CAEStreamInfo::STREAM_TYPE_EAC3:
-          codec = DD_PLUS;
-          break;
-
-        case CAEStreamInfo::STREAM_TYPE_DTSHD_MA:
-          codec = _DTS_HD_MA;
-          break;
-
-        case CAEStreamInfo::STREAM_TYPE_TRUEHD:
-          codec = TRUEHD;
-          break;
-
-        default:
-          break;
-      }
-    }
-
     aml_set_audio_passthrough(m_passthrough);
-    aml_configure_simple_control(device, codec);
+
+    if (devType == AE_DEVTYPE_HDMI || devType == AE_DEVTYPE_IEC958)
+    {
+      enum IEC958_mode_codec codec = inconfig.channels > 2 ? MULTI_CHANNEL_LPCM : STEREO_PCM;
+
+      CLog::Log(LOGDEBUG, "CAESinkALSA::Initialize - Configure simple control for \"{}\"",
+        GetAMLCardName(amlDeviceType));
+
+      if (m_passthrough)
+      {
+        switch(format.m_streamInfo.m_type)
+        {
+          case CAEStreamInfo::STREAM_TYPE_AC3:
+            codec = DOLBY_DIGITAL;
+            break;
+
+          case CAEStreamInfo::STREAM_TYPE_DTS_512:
+          case CAEStreamInfo::STREAM_TYPE_DTS_1024:
+          case CAEStreamInfo::STREAM_TYPE_DTS_2048:
+          case CAEStreamInfo::STREAM_TYPE_DTSHD_CORE:
+            codec = DTS;
+            break;
+
+          case CAEStreamInfo::STREAM_TYPE_DTSHD:
+            codec = DTS_HD;
+            break;
+
+          case CAEStreamInfo::STREAM_TYPE_EAC3:
+            codec = DD_PLUS;
+            break;
+
+          case CAEStreamInfo::STREAM_TYPE_DTSHD_MA:
+            codec = _DTS_HD_MA;
+            break;
+
+          case CAEStreamInfo::STREAM_TYPE_TRUEHD:
+            codec = TRUEHD;
+            break;
+
+          default:
+            break;
+        }
+      }
+
+      aml_configure_simple_control(device, codec);
+    }
   }
 
   CLog::Log(LOGDEBUG, "CAESinkALSA::Initialize - Attempting to open device \"{}\"", device);
@@ -800,6 +831,17 @@ bool CAESinkALSA::Initialize(AEAudioFormat &format, std::string &device)
   m_device = device;
 
   CLog::Log(LOGDEBUG, "CAESinkALSA::Initialize - Opened device \"{}\"", device);
+
+  if (GetAMLDeviceType(device) != AMLDeviceType::AML_NONE)
+  {
+    const auto settingsComponent = CServiceBroker::GetSettingsComponent();
+    if (settingsComponent)
+    {
+      const auto settings = settingsComponent->GetSettings();
+      if (settings)
+        aml_set_audio_ddr_urgent(settings->GetBool(CSettings::SETTING_COREELEC_AUDIO_DDR_PRIORITY));
+    }
+  }
 
   snd_pcm_chmap_t* selectedChmap = nullptr;
   if (!m_passthrough)
@@ -867,6 +909,19 @@ bool CAESinkALSA::Initialize(AEAudioFormat &format, std::string &device)
 
   m_format              = format;
   m_formatSampleRateMul = 1.0 / (double)m_format.m_sampleRate;
+
+  m_settleHoldMs = 0;
+  m_settleHoldUntil = {};
+  if (!m_passthrough && CServiceBroker::GetSettingsComponent())
+  {
+    const auto settleAdvanced = CServiceBroker::GetSettingsComponent()->GetAdvancedSettings();
+    const int settleMs = settleAdvanced ? settleAdvanced->m_audioSinkSettleHoldMs : 0;
+    if (settleMs > 0)
+    {
+      m_settleHoldMs = settleMs;
+      logM(LOGDEBUG, "CAESinkALSA::Initialize - settle hold armed, muting first {}ms", settleMs);
+    }
+  }
 
   return true;
 }
@@ -937,8 +992,21 @@ bool CAESinkALSA::InitializeHW(const ALSAConfig &inconfig, ALSAConfig &outconfig
   snd_pcm_hw_params_alloca(&hw_params_copy);
   snd_pcm_hw_params_copy(hw_params_copy, hw_params); // copy what we have
 
+  const auto alsaAdvanced = CServiceBroker::GetSettingsComponent()
+                                ? CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()
+                                : nullptr;
+  const unsigned int pcmBitsMax =
+      (!m_passthrough && alsaAdvanced)
+          ? static_cast<unsigned int>(alsaAdvanced->m_audioPcmSinkBitsMax)
+          : 0;
+  const bool formatCapped =
+      pcmBitsMax > 0 && CAEUtil::DataFormatToBits(outconfig.format) > pcmBitsMax;
+  if (formatCapped)
+    logM(LOGDEBUG, "CAESinkALSA::InitializeHW - pcmsinkbitsmax={} caps requested format {}",
+         pcmBitsMax, CAEUtil::DataFormatToStr(outconfig.format));
+
   /* try the data format */
-  if (snd_pcm_hw_params_set_format(m_pcm, hw_params, fmt) < 0)
+  if (formatCapped || snd_pcm_hw_params_set_format(m_pcm, hw_params, fmt) < 0)
   {
     /* if the chosen format is not supported, try each one in descending order */
     CLog::Log(LOGDEBUG,
@@ -951,6 +1019,9 @@ bool CAESinkALSA::InitializeHW(const ALSAConfig &inconfig, ALSAConfig &outconfig
         continue;
 
       if (m_passthrough && i != AE_FMT_S16BE && i != AE_FMT_S16LE)
+        continue;
+
+      if (pcmBitsMax > 0 && CAEUtil::DataFormatToBits(i) > pcmBitsMax)
         continue;
 
       fmt = AEFormatToALSAFormat(i);
@@ -998,52 +1069,10 @@ bool CAESinkALSA::InitializeHW(const ALSAConfig &inconfig, ALSAConfig &outconfig
   snd_pcm_hw_params_get_buffer_size_max(hw_params, &bufferSize);
   snd_pcm_hw_params_get_period_size_max(hw_params, &periodSize, nullptr);
 
-  /*
-   For PCM/UI sounds keep latency low (approx 50ms period, 200ms buffer).
-   For passthrough prefer stability and A/V sync over latency.
-  */
-  const bool isAmlPassthrough = m_passthrough && m_isAmlDevice;
+  periodSize = std::min(periodSize, static_cast<snd_pcm_uframes_t>(sampleRate / 20));
+  bufferSize = std::min(bufferSize, static_cast<snd_pcm_uframes_t>(sampleRate / 5));
 
-  // Run a deeper buffer with more periods reduces IEC61937 burst dropouts.
-  // For AML passthrough use a smaller period to reduce delay quantization (steadier reported delay).
-  //
-  // DTS-HD MA improvement: align period to IEC61937 burst size (dtsPeriod) so that ALSA
-  // consumes data in exact burst multiples. This makes snd_pcm_status_get_delay() step
-  // in regular increments rather than irregular ones, stabilizing the reported delay.
-  snd_pcm_uframes_t periodCap;
-  const bool isDtsHdPassthrough =
-      (isAmlPassthrough &&
-       (m_format.m_streamInfo.m_type == CAEStreamInfo::STREAM_TYPE_DTSHD_MA ||
-        m_format.m_streamInfo.m_type == CAEStreamInfo::STREAM_TYPE_DTSHD));
-  if (isDtsHdPassthrough)
-  {
-    // Use the IEC61937 burst size as the period for DTS-HD MA/HRA.
-    // For 48kHz DTS-HD MA: dtsPeriod = 8192 frames at 192kHz = ~42.67ms.
-    // This aligns DMA consumption with burst boundaries for much steadier delay reporting.
-    const unsigned int dtsPeriod = m_format.m_streamInfo.m_dtsPeriod;
-    periodCap = (dtsPeriod > 0) ? static_cast<snd_pcm_uframes_t>(dtsPeriod)
-                                : static_cast<snd_pcm_uframes_t>(sampleRate / 40);
-    CLog::Log(LOGDEBUG, "CAESinkALSA::InitializeHW - DTS-HD period aligned to IEC61937 burst: {} frames",
-              periodCap);
-  }
-  else
-  {
-    periodCap = static_cast<snd_pcm_uframes_t>(
-        sampleRate / (isAmlPassthrough ? 40 : (m_passthrough ? 10 : 20)));
-  }
-  // AML passthrough uses a deeper buffer for stability. However, for DTS-HD MA/HRA the
-  // burst-aligned period already improves stability, so cap the buffer to ~500ms to
-  // avoid consistently high (~700ms) buffered delay.
-  const snd_pcm_uframes_t bufferCap = static_cast<snd_pcm_uframes_t>(
-      sampleRate / (isDtsHdPassthrough ? 2 : (isAmlPassthrough ? 1 : (m_passthrough ? 2 : 5))));
-  periodSize = std::min(periodSize, periodCap);
-  bufferSize = std::min(bufferSize, bufferCap);
-
-  /*
-   According to upstream we should set buffer size first - so make sure it is always at least
-   4x period size to not get underruns (some systems seem to have issues with only 2 periods)
-  */
-  periodSize = std::min(periodSize, bufferSize / (isAmlPassthrough ? 8 : 4));
+  periodSize = std::min(periodSize, bufferSize / 4);
 
   CLog::Log(LOGDEBUG, "CAESinkALSA::InitializeHW - Request: periodSize {}, bufferSize {}",
             periodSize, bufferSize);
@@ -1051,7 +1080,7 @@ bool CAESinkALSA::InitializeHW(const ALSAConfig &inconfig, ALSAConfig &outconfig
   snd_pcm_hw_params_copy(hw_params_copy, hw_params); // copy what we have and is already working
 
   // Make sure to not initialize too large to not cause underruns
-  snd_pcm_uframes_t periodSizeMax = bufferSize / (isAmlPassthrough ? 8 : 4);
+  snd_pcm_uframes_t periodSizeMax = bufferSize / 3;
   if(snd_pcm_hw_params_set_period_size_max(m_pcm, hw_params_copy, &periodSizeMax, NULL) != 0)
   {
     snd_pcm_hw_params_copy(hw_params_copy, hw_params); // restore working copy
@@ -1156,29 +1185,7 @@ bool CAESinkALSA::ApplySwParams()
   snd_pcm_sw_params_current              (m_pcm, sw_params);
 
   // For passthrough, start only when some data is queued for stability.
-  // For PCM keep existing low-latency behavior.
-  if (m_passthrough)
-  {
-    snd_pcm_uframes_t bufferSize = 0;
-    snd_pcm_uframes_t periodSize = 0;
-    snd_pcm_get_params(m_pcm, &bufferSize, &periodSize);
-
-    // Waiting for an (almost) full buffer adds a large startup mute (on AML we can have ~1s buffers).
-    // Prefill a small amount to keep IEC61937 stable without audible start delay.
-    // Use a low start threshold (~20ms) for all passthrough formats for consistent fast startup.
-    snd_pcm_uframes_t startThreshold = bufferSize;
-    const snd_pcm_uframes_t maxPrefill =
-        std::max<snd_pcm_uframes_t>(1, static_cast<snd_pcm_uframes_t>(m_swSampleRate / 50)); // ~20ms
-    const snd_pcm_uframes_t prefill =
-        (periodSize > 0) ? std::min(periodSize, maxPrefill) : maxPrefill;
-    startThreshold = std::min(bufferSize, prefill);
-
-    snd_pcm_sw_params_set_start_threshold(m_pcm, sw_params, startThreshold);
-  }
-  else
-  {
-    snd_pcm_sw_params_set_start_threshold(m_pcm, sw_params, INT_MAX);
-  }
+  snd_pcm_sw_params_set_start_threshold(m_pcm, sw_params, INT_MAX);
   snd_pcm_sw_params_set_silence_threshold(m_pcm, sw_params, 0);
   snd_pcm_sw_params_get_boundary         (sw_params, &boundary);
   snd_pcm_sw_params_set_silence_size     (m_pcm, sw_params, boundary);
@@ -1243,14 +1250,48 @@ unsigned int CAESinkALSA::AddPackets(uint8_t **data, unsigned int frames, unsign
 {
   if (!m_pcm)
   {
-    CLog::Log(LOGERROR, "CAESinkALSA - Tried to add packets without a sink");
+    LOG_THROTTLE_PERIODIC(LOGERROR, LOGAUDIO, 1000, "CAESinkALSA - Tried to add packets without a sink");
     return INT_MAX;
+  }
+
+  if (m_settleHoldMs > 0)
+  {
+    const auto now = std::chrono::steady_clock::now();
+    if (m_settleHoldUntil == std::chrono::steady_clock::time_point{})
+      m_settleHoldUntil = now + std::chrono::milliseconds(m_settleHoldMs);
+    if (now < m_settleHoldUntil)
+    {
+      const uint8_t fill = (m_format.m_dataFormat == AE_FMT_U8) ? 0x80 : 0;
+      memset(data[0] + m_format.m_frameSize * offset, fill,
+             static_cast<size_t>(frames) * m_format.m_frameSize);
+    }
+    else
+    {
+      m_settleHoldMs = 0;
+      logM(LOGDEBUG, "CAESinkALSA::AddPackets - settle hold released");
+    }
   }
 
   const uint8_t *buffer = data[0] + (m_format.m_frameSize * offset);
   unsigned int amount = 0;
   int64_t data_left = (int64_t) frames;
   int frames_written = 0;
+
+  if (AUDIODELAY_ENABLED())
+  {
+    static int audiodelayAddPacketsCounter = 0;
+    ++audiodelayAddPacketsCounter;
+    if (audiodelayAddPacketsCounter == 1 || (audiodelayAddPacketsCounter % 20) == 0)
+    {
+      AUDIODELAY_LOG("ALSA.AddPackets",
+                     "call={} frames={} pcmState={} avail={} passthrough={}",
+                     audiodelayAddPacketsCounter,
+                     frames,
+                     static_cast<int>(snd_pcm_state(m_pcm)),
+                     static_cast<long>(snd_pcm_avail(m_pcm)),
+                     m_passthrough ? 1 : 0);
+    }
+  }
 
   while (data_left > 0)
   {
@@ -1259,92 +1300,26 @@ unsigned int CAESinkALSA::AddPackets(uint8_t **data, unsigned int frames, unsign
     else // take care as we can come here a second time if the sink does not eat all data
       amount = (unsigned int) data_left;
 
-    // For passthrough on AML: wait for ALSA to have space BEFORE calling snd_pcm_writei.
-    // Without this, snd_pcm_writei blocks inside the kernel for a variable duration
-    // (depends on exactly how full the ring buffer is), causing irregular write timing.
-    // snd_pcm_wait returns when at least avail_min frames are free, giving us deterministic
-    // timing and allowing the write to complete immediately without kernel-side blocking.
-    if (m_passthrough && m_isAmlDevice && snd_pcm_state(m_pcm) == SND_PCM_STATE_RUNNING)
-    {
-      // Wait up to half the buffer time generous but bounded
-      snd_pcm_wait(m_pcm, std::max(m_timeout / 2, 20));
-    }
-
     int ret = snd_pcm_writei(m_pcm, buffer, amount);
     if (ret < 0)
     {
-      const int writeErr = ret;
-      CLog::Log(LOGERROR, "CAESinkALSA - snd_pcm_writei({}) {} - trying to recover", writeErr,
-                snd_strerror(writeErr));
-
-      const int recoverErr = snd_pcm_recover(m_pcm, writeErr, 1);
-      if (recoverErr == 0)
-      {
-        // Recovered successfully; retry the write.
-        ret = snd_pcm_writei(m_pcm, buffer, amount);
-      }
-      else
-      {
-        // Some drivers return errors that snd_pcm_recover can't resolve; fall back
-        // to our explicit error handler then retry.
-        HandleError("snd_pcm_writei(recover)", writeErr);
-        if (m_passthrough)
-          snd_pcm_wait(m_pcm, std::min(m_timeout, 20));
-        ret = snd_pcm_writei(m_pcm, buffer, amount);
-      }
-
+      LOG_THROTTLE_PERIODIC(LOGERROR, LOGAUDIO, 1000, "CAESinkALSA - snd_pcm_writei({}) {} - trying to recover", ret,
+                    snd_strerror(ret));
+      ret = snd_pcm_recover(m_pcm, ret, 1);
       if (ret < 0)
       {
-        HandleError("snd_pcm_writei(retry)", ret);
-        if (m_passthrough)
-        {
-          // One extra retry for IEC61937 bursts after prepare/resume.
-          snd_pcm_wait(m_pcm, std::min(m_timeout, 20));
-          ret = snd_pcm_writei(m_pcm, buffer, amount);
-        }
-
+        HandleError("snd_pcm_writei(1)", ret);
+        ret = snd_pcm_writei(m_pcm, buffer, amount);
         if (ret < 0)
-          ret = 0;
-      }
-    }
-
-    if ( ret > 0 && snd_pcm_state(m_pcm) == SND_PCM_STATE_PREPARED)
-    {
-      if (!m_passthrough)
-      {
-        // PCM path uses start_threshold = INT_MAX (manual start).
-        snd_pcm_start(m_pcm);
-      }
-      else
-      {
-        // Passthrough prefers starting after a small prefill.
-        // Normally ALSA auto-starts when start_threshold is met, but keep a
-        // conservative fallback for drivers that don't.
-        snd_pcm_uframes_t bufferSize = 0;
-        snd_pcm_uframes_t periodSize = 0;
-        if (snd_pcm_get_params(m_pcm, &bufferSize, &periodSize) == 0 && periodSize > 0)
         {
-          snd_pcm_sframes_t avail = snd_pcm_avail(m_pcm);
-          snd_pcm_uframes_t startThreshold = std::min(bufferSize, periodSize * 2);
-
-          // For HBR formats (TrueHD, DTS-HD MA), use a small prefill threshold
-          // to start playback quickly without waiting for a large buffer fill.
-          // This keeps initial latency low while the rest of the buffer fills
-          // during playback.
-          if (m_format.m_streamInfo.m_type == CAEStreamInfo::STREAM_TYPE_TRUEHD ||
-              m_format.m_streamInfo.m_type == CAEStreamInfo::STREAM_TYPE_DTSHD_MA)
-          {
-            const snd_pcm_uframes_t maxPrefill =
-                std::max<snd_pcm_uframes_t>(1, static_cast<snd_pcm_uframes_t>(m_format.m_sampleRate / 50)); // ~20ms
-            startThreshold = std::min(bufferSize, std::min(periodSize, maxPrefill));
-          }
-          const snd_pcm_uframes_t availThreshold =
-              (bufferSize > startThreshold) ? (bufferSize - startThreshold) : 0;
-          if (avail >= 0 && static_cast<snd_pcm_uframes_t>(avail) <= availThreshold)
-            snd_pcm_start(m_pcm);
+          HandleError("snd_pcm_writei(2)", ret);
+          ret = 0;
         }
       }
     }
+
+    if (ret > 0 && snd_pcm_state(m_pcm) == SND_PCM_STATE_PREPARED)
+      snd_pcm_start(m_pcm);
 
     if (ret <= 0)
       break;
@@ -1371,7 +1346,7 @@ void CAESinkALSA::HandleError(const char* name, int err)
 
     case -ESTRPIPE:
     {
-      logM(LOGDEBUG, "CAESinkALSA", "({}) - Resuming after suspend", name);
+      logM(LOGDEBUG, "({}) - Resuming after suspend", name);
 
       /* try to resume the stream */
       // Some platforms can report -EAGAIN for a noticeable time; don't block
@@ -1387,7 +1362,7 @@ void CAESinkALSA::HandleError(const char* name, int err)
       if (err == -ENOSYS || err == -EAGAIN || err < 0)
       {
         if (err == -EAGAIN)
-          logM(LOGDEBUG, "CAESinkALSA", "({}) - snd_pcm_resume still EAGAIN, falling back to prepare", name);
+          logM(LOGDEBUG, "({}) - snd_pcm_resume still EAGAIN, falling back to prepare", name);
 
         if ((err = snd_pcm_prepare(m_pcm)) < 0)
           CLog::Log(LOGERROR, "CAESinkALSA::HandleError({}) - snd_pcm_prepare returned {} ({})",
@@ -1399,8 +1374,7 @@ void CAESinkALSA::HandleError(const char* name, int err)
     }
 
     default:
-      logM(LOGERROR, "CAESinkALSA", "({}) - snd_pcm_writei returned {} ({})", name,
-                                    err, snd_strerror(err));
+      logM(LOGERROR, "({}) - snd_pcm_writei returned {} ({})", name, err, snd_strerror(err));
       break;
   }
 }
@@ -1411,23 +1385,6 @@ void CAESinkALSA::Drain()
     return;
 
   snd_pcm_drain(m_pcm);
-}
-
-void CAESinkALSA::Flush()
-{
-  if (!m_pcm)
-    return;
-
-  // Drop any queued frames immediately (do not block like snd_pcm_drain).
-  int err = snd_pcm_drop(m_pcm);
-  if (err < 0)
-    logM(LOGERROR, "CAESinkALSA", "Flush - snd_pcm_drop returned {} ({})", err, snd_strerror(err));
-
-  err = snd_pcm_prepare(m_pcm);
-  if (err < 0)
-    logM(LOGERROR, "CAESinkALSA", "Flush - snd_pcm_prepare returned {} ({})", err, snd_strerror(err));
-  else
-    ApplySwParams();
 }
 
 void CAESinkALSA::AppendParams(std::string &device, std::string_view params)
@@ -1875,7 +1832,7 @@ void CAESinkALSA::EnumerateDevice(AEDeviceInfoList &list, const std::string &dev
             // Detection can go wrong on Intel, Nvidia and on all
             // AMD (fglrx) hardware, so it is not safe to close those handles
             if (badHDMI)
-              logM(LOGDEBUG, "CAESinkALSA", "HDMI device \"{}\" may be unconnected (no ELD data)", device);
+              logM(LOGDEBUG, "HDMI device \"{}\" may be unconnected (no ELD data)", device);
           }
           else
           {
@@ -2017,7 +1974,10 @@ void CAESinkALSA::EnumerateDevice(AEDeviceInfoList &list, const std::string &dev
     else if (info.m_deviceType != AE_DEVTYPE_HDMI)
     {
       if (device.substr(0, 10) == "surround71")
+      {
         info.m_displayNameExtra = "HDMI Multi Ch PCM";
+        info.m_onlyPCM = true;
+      }
       else
         info.m_displayNameExtra = "PCM";
     }

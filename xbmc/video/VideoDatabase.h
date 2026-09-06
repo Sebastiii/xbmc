@@ -676,14 +676,14 @@ public:
   void SetStackTimes(const std::string &filePath, const std::vector<uint64_t> &times);
 
   void GetBookMarksForFile(const std::string& strFilenameAndPath, VECBOOKMARKS& bookmarks, CBookmark::EType type = CBookmark::STANDARD, bool bAppend=false, long partNumber=0);
-  void AddBookMarkToFile(const std::string& strFilenameAndPath, const CBookmark &bookmark, CBookmark::EType type = CBookmark::STANDARD);
+  bool AddBookMarkToFile(const std::string& strFilenameAndPath, const CBookmark &bookmark, CBookmark::EType type = CBookmark::STANDARD);
   bool GetResumeBookMark(const std::string& strFilenameAndPath, CBookmark &bookmark);
   void DeleteResumeBookMark(const CFileItem& item);
   void ClearBookMarkOfFile(const std::string& strFilenameAndPath,
                            const CBookmark& bookmark,
                            CBookmark::EType type = CBookmark::STANDARD);
-  void ClearBookMarksOfFile(const std::string& strFilenameAndPath, CBookmark::EType type = CBookmark::STANDARD);
-  void ClearBookMarksOfFile(int idFile, CBookmark::EType type = CBookmark::STANDARD) const;
+  bool ClearBookMarksOfFile(const std::string& strFilenameAndPath, CBookmark::EType type = CBookmark::STANDARD);
+  bool ClearBookMarksOfFile(int idFile, CBookmark::EType type = CBookmark::STANDARD) const;
   bool GetBookMarkForEpisode(const CVideoInfoTag& tag, CBookmark& bookmark) const;
   void AddBookMarkForEpisode(const CVideoInfoTag& tag, const CBookmark& bookmark);
   void DeleteBookMarkForEpisode(const CVideoInfoTag& tag) const;
@@ -1199,6 +1199,12 @@ private:
   void UpdateTables(int version) override;
   void CreateLinkIndex(const char *table) const;
   void CreateForeignLinkIndex(const char *table, const char *foreignkey) const;
+
+  void AddMissingColumns();
+
+  void AddMissingColumn(const std::string& table,
+                        const std::string& column,
+                        const std::string& type);
 
   /*! \brief (Re)Create the generic database views for movies, tvshows,
      episodes and music videos

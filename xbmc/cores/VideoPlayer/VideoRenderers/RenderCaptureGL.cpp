@@ -10,6 +10,7 @@
 
 #include "ServiceBroker.h"
 #include "cores/IPlayer.h"
+#include "rendering/GLExtensions.h"
 #include "rendering/RenderSystem.h"
 #include "utils/log.h"
 

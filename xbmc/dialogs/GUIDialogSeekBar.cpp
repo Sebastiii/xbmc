@@ -35,8 +35,12 @@ bool CGUIDialogSeekBar::OnMessage(CGUIMessage& message)
   switch (message.GetMessage())
   {
   case GUI_MSG_WINDOW_INIT:
-  case GUI_MSG_WINDOW_DEINIT:
     return CGUIDialog::OnMessage(message);
+  case GUI_MSG_WINDOW_DEINIT:
+    m_dynamicResourceAlloc = false;
+    CGUIDialog::OnMessage(message);
+    m_dynamicResourceAlloc = true;
+    return true;
   case GUI_MSG_ITEM_SELECT:
     if (message.GetSenderId() == GetID() &&
         (message.GetControlId() == POPUP_SEEK_PROGRESS ||

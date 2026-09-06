@@ -10,6 +10,7 @@
 
 #include "ServiceBroker.h"
 #include "Texture.h"
+#include "guilib/TextureFormats.h"
 #include "rendering/gles/RenderSystemGLES.h"
 #include "utils/GLUtils.h"
 #include "utils/MathUtils.h"
@@ -56,13 +57,6 @@ void CGUITextureGLES::Begin(UTILS::COLOR::Color color)
   m_col[1] = KODI::UTILS::GL::GetChannelFromARGB(KODI::UTILS::GL::ColorChannel::G, color);
   m_col[2] = KODI::UTILS::GL::GetChannelFromARGB(KODI::UTILS::GL::ColorChannel::B, color);
   m_col[3] = KODI::UTILS::GL::GetChannelFromARGB(KODI::UTILS::GL::ColorChannel::A, color);
-
-  if (CServiceBroker::GetWinSystem()->UseLimitedColor())
-  {
-    m_col[0] = (235 - 16) * m_col[0] / 255 + 16;
-    m_col[1] = (235 - 16) * m_col[1] / 255 + 16;
-    m_col[2] = (235 - 16) * m_col[2] / 255 + 16;
-  }
 
   bool hasAlpha = m_texture.m_textures[m_currentFrame]->HasAlpha() || m_col[3] < 255;
 
@@ -114,11 +108,14 @@ void CGUITextureGLES::End()
     GLint tex0Loc = m_renderSystem->GUIShaderGetCoord0();
     GLint tex1Loc = m_renderSystem->GUIShaderGetCoord1();
     GLint uniColLoc = m_renderSystem->GUIShaderGetUniCol();
+    GLint depthLoc = m_renderSystem->GUIShaderGetDepth();
 
     if(uniColLoc >= 0)
     {
       glUniform4f(uniColLoc,(m_col[0] / 255.0f), (m_col[1] / 255.0f), (m_col[2] / 255.0f), (m_col[3] / 255.0f));
     }
+
+    glUniform1f(depthLoc, m_depth);
 
     if(m_diffuse.size())
     {
@@ -234,7 +231,9 @@ void CGUITextureGLES::Draw(float *x, float *y, float *z, const CRect &texture, c
 void CGUITextureGLES::DrawQuad(const CRect& rect,
                                UTILS::COLOR::Color color,
                                CTexture* texture,
-                               const CRect* texCoords)
+                               const CRect* texCoords,
+                               const float depth,
+                               const bool blending)
 {
   auto renderSystem = dynamic_cast<CRenderSystemGLES*>(CServiceBroker::GetRenderSystem());
   if (texture)
@@ -243,8 +242,15 @@ void CGUITextureGLES::DrawQuad(const CRect& rect,
     texture->BindToUnit(0);
   }
 
-  glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
-  glEnable(GL_BLEND);          // Turn Blending On
+  if (blending)
+  {
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_BLEND);
+  }
+  else
+  {
+    glDisable(GL_BLEND);
+  }
 
   VerifyGLState();
 
@@ -261,6 +267,7 @@ void CGUITextureGLES::DrawQuad(const CRect& rect,
   GLint posLoc   = renderSystem->GUIShaderGetPos();
   GLint tex0Loc  = renderSystem->GUIShaderGetCoord0();
   GLint uniColLoc= renderSystem->GUIShaderGetUniCol();
+  GLint depthLoc = renderSystem->GUIShaderGetDepth();
 
   glVertexAttribPointer(posLoc,  3, GL_FLOAT, 0, 0, ver);
   if (texture)
@@ -277,6 +284,7 @@ void CGUITextureGLES::DrawQuad(const CRect& rect,
   col[3] = KODI::UTILS::GL::GetChannelFromARGB(KODI::UTILS::GL::ColorChannel::A, color);
 
   glUniform4f(uniColLoc, col[0] / 255.0f, col[1] / 255.0f, col[2] / 255.0f, col[3] / 255.0f);
+  glUniform1f(depthLoc, depth);
 
   ver[0][0] = ver[3][0] = rect.x1;
   ver[0][1] = ver[1][1] = rect.y1;
@@ -300,5 +308,8 @@ void CGUITextureGLES::DrawQuad(const CRect& rect,
     glDisableVertexAttribArray(tex0Loc);
 
   renderSystem->DisableGUIShader();
+
+  if (!blending)
+    glEnable(GL_BLEND);
 }
 

@@ -836,11 +836,24 @@ namespace XBMCAddon
           const String& value = it.second;
 
           if (key == "codec")
-            audio->m_strCodec = value;
+          {
+            std::string codec = value;
+            StringUtils::Trim(codec);
+            StringUtils::ToLower(codec);
+            audio->SetCodecFromStream(codec);
+          }
           else if (key == "language")
             audio->m_strLanguage = value;
           else if (key == "channels")
             audio->m_iChannels = strtol(value.c_str(), nullptr, 10);
+          else if (key == "profile")
+            audio->m_strProfile = value;
+          else if (key == "objects")
+            audio->m_iAudioObjects = strtol(value.c_str(), nullptr, 10);
+          else if (key == "objectchannels")
+            audio->m_iAudioObjectChannels = strtol(value.c_str(), nullptr, 10);
+          else if (key == "bedchannels")
+            audio->m_iAudioBedChannels = strtol(value.c_str(), nullptr, 10);
         }
         xbmc::InfoTagVideo::addStreamRaw(infoTag, audio);
       }

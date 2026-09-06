@@ -12,6 +12,7 @@
 #include "GUIInfoManager.h"
 #include "ServiceBroker.h"
 #include "addons/Skin.h"
+#include "cores/DataCacheCore.h"
 #include "filesystem/SpecialProtocol.h"
 #include "guilib/GUIComponent.h"
 #include "guilib/GUIControlFactory.h"
@@ -42,7 +43,7 @@ CGUIWindowDebugInfo::~CGUIWindowDebugInfo(void) = default;
 
 void CGUIWindowDebugInfo::UpdateVisibility()
 {
-  if (LOG_LEVEL_DEBUG_FREEMEM <= CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_logLevel || g_SkinInfo->IsDebugging())
+  if (CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_showOnScreenDebugInfo || g_SkinInfo->IsDebugging())
     Open();
   else
     Close();
@@ -91,7 +92,7 @@ void CGUIWindowDebugInfo::Process(unsigned int currentTime, CDirtyRegionList &di
     return;
 
   std::string info;
-  if (LOG_LEVEL_DEBUG_FREEMEM <= CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_logLevel)
+  if (CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_showOnScreenDebugInfo)
   {
     KODI::MEMORY::MemoryStatus stat;
     KODI::MEMORY::GetMemoryStatus(&stat);
@@ -103,30 +104,35 @@ void CGUIWindowDebugInfo::Process(unsigned int currentTime, CDirtyRegionList &di
       strCores = "N/A";
     std::string lcAppName = CCompileInfo::GetAppName();
     StringUtils::ToLower(lcAppName);
+
+    float videoFps = CServiceBroker::GetDataCacheCore().GetVideoFps();
+    std::string fpsInfo;
+    if (videoFps > 0.0f)
+      fpsInfo = StringUtils::Format("FPS: {:.3f} RM: {:.3f}", videoFps,
+                                    CServiceBroker::GetGUI()
+                                            ->GetInfoManager()
+                                            .GetInfoProviders()
+                                            .GetSystemInfoProvider()
+                                            .GetFPS() /
+                                        videoFps);
+    else
+      fpsInfo = "FPS: 0 RM: -";
 #if !defined(TARGET_POSIX)
-    info = StringUtils::Format("LOG: {}{}.log\nMEM: {}/{} KB - FPS: {:2.1f} fps\nCPU: {}{}",
+    info = StringUtils::Format("LOG: {}{}.log\nMEM: {}/{} KB - {}\nCPU: {}{}",
                                CSpecialProtocol::TranslatePath("special://logpath"), lcAppName,
                                stat.availPhys / 1024, stat.totalPhys / 1024,
-                               CServiceBroker::GetGUI()
-                                   ->GetInfoManager()
-                                   .GetInfoProviders()
-                                   .GetSystemInfoProvider()
-                                   .GetFPS(),
+                               fpsInfo,
                                strCores, profiling);
 #else
     double dCPU = m_resourceCounter.GetCPUUsage();
     std::string ucAppName = lcAppName;
     StringUtils::ToUpper(ucAppName);
     info = StringUtils::Format("LOG: {}{}.log\n"
-                               "MEM: {}/{} KB - FPS: {:2.1f} fps\n"
+                               "MEM: {}/{} KB - {}\n"
                                "CPU: {} (CPU-{} {:4.2f}%{})",
                                CSpecialProtocol::TranslatePath("special://logpath"), lcAppName,
                                stat.availPhys / 1024, stat.totalPhys / 1024,
-                               CServiceBroker::GetGUI()
-                                   ->GetInfoManager()
-                                   .GetInfoProviders()
-                                   .GetSystemInfoProvider()
-                                   .GetFPS(),
+                               fpsInfo,
                                strCores, ucAppName, dCPU, profiling);
 #endif
   }
@@ -179,7 +185,13 @@ void CGUIWindowDebugInfo::Process(unsigned int currentTime, CDirtyRegionList &di
 
 void CGUIWindowDebugInfo::Render()
 {
+  RENDER_ORDER renderOrder = CServiceBroker::GetWinSystem()->GetGfxContext().GetRenderOrder();
+  if (renderOrder == RENDER_ORDER_FRONT_TO_BACK)
+    return;
+  else if (renderOrder == RENDER_ORDER_BACK_TO_FRONT)
+    CServiceBroker::GetWinSystem()->GetGfxContext().SetRenderOrder(RENDER_ORDER_ALL_BACK_TO_FRONT);
   CServiceBroker::GetWinSystem()->GetGfxContext().SetRenderingResolution(CServiceBroker::GetWinSystem()->GetGfxContext().GetResInfo(), false);
   if (m_layout)
     m_layout->RenderOutline(m_renderRegion.x1, m_renderRegion.y1, 0xffffffff, 0xff000000, 0, 0);
+  CServiceBroker::GetWinSystem()->GetGfxContext().SetRenderOrder(renderOrder);
 }

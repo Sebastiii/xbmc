@@ -40,9 +40,14 @@ bool CScreenshotSurfaceGLES::Capture()
   if (!gui)
     return false;
 
+  if (!gui->GetWindowManager().BeginRenderExclusion())
+    return false;
+
   std::lock_guard lock(winsystem->GetGfxContext());
 
   gui->GetWindowManager().Render();
+
+  gui->GetWindowManager().EndRenderExclusion();
 
   //get current viewport
   GLint viewport[4];

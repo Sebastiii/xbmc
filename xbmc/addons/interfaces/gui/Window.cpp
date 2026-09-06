@@ -190,15 +190,14 @@ KODI_GUI_WINDOW_HANDLE Interface_GUIWindow::create(KODI_HANDLE kodiBase,
     window = new CGUIAddonWindowDialog(id, strSkinPath, addon);
 
   Interface_GUIGeneral::lock();
-  CServiceBroker::GetGUI()->GetWindowManager().Add(window);
+  const bool added = CServiceBroker::GetGUI()->GetWindowManager().Add(window);
   Interface_GUIGeneral::unlock();
 
-  if (!CServiceBroker::GetGUI()->GetWindowManager().GetWindow(id))
+  if (!added || !CServiceBroker::GetGUI()->GetWindowManager().GetWindow(id))
   {
     CLog::Log(LOGERROR,
               "Interface_GUIWindow::{} - Requested window id '{}' does not exist for addon '{}'",
               __func__, id, addon->ID());
-    delete window;
     return nullptr;
   }
   window->SetCoordsRes(res);

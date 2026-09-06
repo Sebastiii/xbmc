@@ -8,7 +8,10 @@
 
 #include "GUIListLabel.h"
 
+#include "ServiceBroker.h"
 #include "addons/Skin.h"
+#include "settings/AdvancedSettings.h"
+#include "settings/SettingsComponent.h"
 
 #include <limits>
 
@@ -23,7 +26,8 @@ CGUIListLabel::CGUIListLabel(int parentID, int controlID, float posX, float posY
   m_scroll = scroll;
   if (m_info.IsConstant())
     SetLabel(m_info.GetLabel(m_parentID, true));
-  m_label.SetScrollLoopCount(2);
+  if (CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_guiSmartRedraw)
+    m_label.SetScrollLoopCount(2);
   ControlType = GUICONTROL_LISTLABEL;
 }
 
@@ -67,6 +71,9 @@ void CGUIListLabel::Process(unsigned int currentTime, CDirtyRegionList &dirtyreg
 
 void CGUIListLabel::Render()
 {
+  if (CServiceBroker::GetWinSystem()->GetGfxContext().GetRenderOrder() ==
+      RENDER_ORDER_FRONT_TO_BACK)
+    return;
   m_label.Render();
   CGUIControl::Render();
 }

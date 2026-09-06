@@ -32,6 +32,7 @@
 #include "settings/SettingsComponent.h"
 #include "settings/lib/Setting.h"
 #include "settings/lib/SettingDefinitions.h"
+#include "settings/lib/SettingDependency.h"
 #include "settings/lib/SettingsManager.h"
 #include "utils/FileUtils.h"
 #include "utils/LangCodeExpander.h"
@@ -101,7 +102,6 @@ void CGUIDialogSubtitleSettings::OnSettingChanged(const std::shared_ptr<const CS
     bool value = std::static_pointer_cast<const CSettingBool>(setting)->GetValue();
     if (value)
     {
-      // Ensure that we use/store the subtitle stream the user currently sees in the dialog.
       appPlayer->SetSubtitle(m_subtitleStream);
     }
     appPlayer->SetSubtitleVisible(value);
@@ -116,6 +116,24 @@ void CGUIDialogSubtitleSettings::OnSettingChanged(const std::shared_ptr<const CS
     m_subtitleStream = std::static_pointer_cast<const CSettingInt>(setting)->GetValue();
     appPlayer->SetSubtitle(m_subtitleStream);
   }
+  else if (settingId == CSettings::SETTING_SUBTITLES_PGSVERTICALMODE ||
+           settingId == CSettings::SETTING_SUBTITLES_PGSVERTICALOFFSET ||
+           settingId == CSettings::SETTING_SUBTITLES_BITMAPZOOM ||
+           settingId == CSettings::SETTING_SUBTITLES_DOLBYVISION_L5_SIGNAL_MODE)
+  {
+    CServiceBroker::GetSettingsComponent()->GetSettings()->SetInt(
+        settingId, std::static_pointer_cast<const CSettingInt>(setting)->GetValue());
+  }
+  else if (settingId == CSettings::SETTING_SUBTITLES_PGSMANUALACTIVEASPECT)
+  {
+    CServiceBroker::GetSettingsComponent()->GetSettings()->SetString(
+        settingId, std::static_pointer_cast<const CSettingString>(setting)->GetValue());
+  }
+  else if (settingId == CSettings::SETTING_SUBTITLES_RESTRICT_TO_ACTIVE_AREA)
+  {
+    CServiceBroker::GetSettingsComponent()->GetSettings()->SetBool(
+        settingId, std::static_pointer_cast<const CSettingBool>(setting)->GetValue());
+  }
 }
 
 std::string CGUIDialogSubtitleSettings::BrowseForSubtitle()
@@ -127,15 +145,19 @@ std::string CGUIDialogSubtitleSettings::BrowseForSubtitle()
       extras += '|' + vfsAddon->GetExtensions();
   }
 
-  std::string strPath;
-  const std::string dynPath{g_application.CurrentFileItem().GetDynPath()};
-  if (URIUtils::IsInRAR(dynPath) || URIUtils::IsInZIP(dynPath))
+  const auto currentItem{g_application.CurrentFileItem()};
+  std::string strPath{currentItem.GetProperty("BasePath").asString("")};
+  if (strPath.empty())
   {
-    strPath = CURL(dynPath).GetHostName();
-  }
-  else if (!URIUtils::IsPlugin(dynPath))
-  {
-    strPath = dynPath;
+    const std::string dynPath{currentItem.GetDynPath()};
+    if (URIUtils::IsInRAR(dynPath) || URIUtils::IsInZIP(dynPath))
+    {
+      strPath = CURL(dynPath).GetHostName();
+    }
+    else if (!URIUtils::IsPlugin(dynPath))
+    {
+      strPath = dynPath;
+    }
   }
 
   std::string strMask =
@@ -261,7 +283,6 @@ void CGUIDialogSubtitleSettings::InitializeSettings()
     return;
   }
 
-  // get all necessary setting groups
   const std::shared_ptr<CSettingGroup> groupAudio = AddGroup(category);
   if (groupAudio == nullptr)
   {
@@ -270,6 +291,12 @@ void CGUIDialogSubtitleSettings::InitializeSettings()
   }
   const std::shared_ptr<CSettingGroup> groupSubtitles = AddGroup(category);
   if (groupSubtitles == nullptr)
+  {
+    CLog::Log(LOGERROR, "CGUIDialogSubtitleSettings: unable to setup settings");
+    return;
+  }
+  const std::shared_ptr<CSettingGroup> groupPgs = AddGroup(category);
+  if (groupPgs == nullptr)
   {
     CLog::Log(LOGERROR, "CGUIDialogSubtitleSettings: unable to setup settings");
     return;
@@ -290,37 +317,140 @@ void CGUIDialogSubtitleSettings::InitializeSettings()
     appPlayer->GetSubtitleCapabilities(m_subtitleCapabilities);
   }
 
-  // subtitle settings
   m_subtitleVisible = appPlayer->GetSubtitleVisible();
 
-  // subtitle enabled setting
   AddToggle(groupSubtitles, SETTING_SUBTITLE_ENABLE, 13397, SettingLevel::Basic, m_subtitleVisible);
 
-  // subtitle delay setting
-  if (SupportsSubtitleFeature(IPC_SUBS_OFFSET))
+  if (SupportsSubtitleFeature(IPlayerSubtitleCaps::OFFSET))
   {
     std::shared_ptr<CSettingNumber> settingSubtitleDelay = AddSlider(groupSubtitles, SETTING_SUBTITLE_DELAY, 22006, SettingLevel::Basic, videoSettings.m_SubtitleDelay, 0, -CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_videoSubsDelayRange, 0.1f, CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_videoSubsDelayRange, 22006, usePopup);
     std::static_pointer_cast<CSettingControlSlider>(settingSubtitleDelay->GetControl())->SetFormatter(SettingFormatterDelay);
   }
 
-  // subtitle stream setting
-  if (SupportsSubtitleFeature(IPC_SUBS_SELECT))
+  if (SupportsSubtitleFeature(IPlayerSubtitleCaps::SELECT_STREAM))
     AddSubtitleStreams(groupSubtitles, SETTING_SUBTITLE_STREAM);
 
-  // subtitle browser setting
-  if (SupportsSubtitleFeature(IPC_SUBS_EXTERNAL))
+  if (SupportsSubtitleFeature(IPlayerSubtitleCaps::EXTERNAL))
     AddButton(groupSubtitles, SETTING_SUBTITLE_BROWSER, 13250, SettingLevel::Basic);
 
   AddButton(groupSubtitles, SETTING_SUBTITLE_SEARCH, 24134, SettingLevel::Basic);
 
-  // subtitle stream setting
+  const auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
+
+  CSettingDependency depPgsOffset(SettingDependencyType::Visible, GetSettingsManager());
+  depPgsOffset.And()->Add(std::make_shared<CSettingDependencyCondition>(
+      CSettings::SETTING_SUBTITLES_PGSVERTICALMODE, "5", SettingDependencyOperator::Equals, false,
+      GetSettingsManager()));
+  SettingDependencies depsPgsOffset;
+  depsPgsOffset.push_back(depPgsOffset);
+
+  CSettingDependency depPgsAspect(SettingDependencyType::Visible, GetSettingsManager());
+  auto depsAspectOr = depPgsAspect.Or();
+  depsAspectOr->Add(std::make_shared<CSettingDependencyCondition>(
+      CSettings::SETTING_SUBTITLES_PGSVERTICALMODE, "1", SettingDependencyOperator::Equals, false,
+      GetSettingsManager()));
+  depsAspectOr->Add(std::make_shared<CSettingDependencyCondition>(
+      CSettings::SETTING_SUBTITLES_PGSVERTICALMODE, "2", SettingDependencyOperator::Equals, false,
+      GetSettingsManager()));
+  SettingDependencies depsPgsAspect;
+  depsPgsAspect.push_back(depPgsAspect);
+
+  TranslatableIntegerSettingOptions pgsModeEntries;
+  pgsModeEntries.emplace_back(65102, 0);
+  pgsModeEntries.emplace_back(65103, 1);
+  pgsModeEntries.emplace_back(65104, 2);
+  pgsModeEntries.emplace_back(65105, 3);
+  pgsModeEntries.emplace_back(65106, 4);
+  pgsModeEntries.emplace_back(65107, 5);
+  AddSpinner(groupPgs, CSettings::SETTING_SUBTITLES_PGSVERTICALMODE, 65100, SettingLevel::Basic,
+             settings->GetInt(CSettings::SETTING_SUBTITLES_PGSVERTICALMODE), pgsModeEntries);
+
+  auto pgsOffset =
+      AddSpinner(groupPgs, CSettings::SETTING_SUBTITLES_PGSVERTICALOFFSET, 65108,
+                 SettingLevel::Basic,
+                 settings->GetInt(CSettings::SETTING_SUBTITLES_PGSVERTICALOFFSET), -60, 1, 60);
+  pgsOffset->SetDependencies(depsPgsOffset);
+
+  auto pgsAspect =
+      AddSpinner(groupPgs, CSettings::SETTING_SUBTITLES_PGSMANUALACTIVEASPECT, 65110,
+                 SettingLevel::Basic,
+                 settings->GetString(CSettings::SETTING_SUBTITLES_PGSMANUALACTIVEASPECT),
+                 PgsManualActiveAspectOptionFiller);
+  pgsAspect->SetDependencies(depsPgsAspect);
+
+  auto* globalSM = settings->GetSettingsManager();
+
+  CSettingDependency depRestrict(SettingDependencyType::Visible, globalSM);
+  auto restrictAnd = depRestrict.And();
+  restrictAnd->Add(std::make_shared<CSettingDependencyCondition>(
+      CSettings::SETTING_SUBTITLES_PGSVERTICALMODE, "0", SettingDependencyOperator::Equals, false,
+      globalSM));
+  restrictAnd->Add(std::make_shared<CSettingDependencyCondition>(
+      CSettings::SETTING_SUBTITLES_ALIGN, "5", SettingDependencyOperator::Equals, false,
+      globalSM));
+  SettingDependencies depsRestrict;
+  depsRestrict.push_back(depRestrict);
+
+  auto restrictSubs =
+      AddToggle(groupPgs, CSettings::SETTING_SUBTITLES_RESTRICT_TO_ACTIVE_AREA, 65119,
+                SettingLevel::Basic,
+                settings->GetBool(CSettings::SETTING_SUBTITLES_RESTRICT_TO_ACTIVE_AREA));
+  restrictSubs->SetDependencies(depsRestrict);
+
+  if (settings->GetSetting(CSettings::SETTING_SUBTITLES_DOLBYVISION_L5_SIGNAL_MODE))
+  {
+    CSettingDependency depL5DV(SettingDependencyType::Visible, globalSM);
+    auto l5DvAnd = depL5DV.And();
+    l5DvAnd->Add(std::make_shared<CSettingDependencyCondition>(
+        CSettings::SETTING_COREELEC_AMLOGIC_DV_MODE, "2", SettingDependencyOperator::Equals, true,
+        globalSM));
+    l5DvAnd->Add(std::make_shared<CSettingDependencyCondition>(
+        CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE, "0", SettingDependencyOperator::Equals, false,
+        globalSM));
+    l5DvAnd->Add(std::make_shared<CSettingDependencyCondition>(
+        CSettings::SETTING_COREELEC_AMLOGIC_DV_STD_SOURCE_LEVEL_5, "true",
+        SettingDependencyOperator::Equals, false, globalSM));
+
+    CSettingDependency depL5Gate(SettingDependencyType::Visible, globalSM);
+    auto l5GateOr = depL5Gate.Or();
+    l5GateOr->Add(std::make_shared<CSettingDependencyCondition>(
+        CSettings::SETTING_SUBTITLES_RESTRICT_TO_ACTIVE_AREA, "false",
+        SettingDependencyOperator::Equals, false, globalSM));
+    l5GateOr->Add(std::make_shared<CSettingDependencyCondition>(
+        CSettings::SETTING_SUBTITLES_PGSVERTICALMODE, "0", SettingDependencyOperator::Equals, true,
+        globalSM));
+    l5GateOr->Add(std::make_shared<CSettingDependencyCondition>(
+        CSettings::SETTING_SUBTITLES_ALIGN, "5", SettingDependencyOperator::Equals, true,
+        globalSM));
+
+    SettingDependencies depsL5;
+    depsL5.push_back(depL5DV);
+    depsL5.push_back(depL5Gate);
+
+    TranslatableIntegerSettingOptions l5ModeEntries;
+    l5ModeEntries.emplace_back(60322, 0);
+    l5ModeEntries.emplace_back(60328, 1);
+    l5ModeEntries.emplace_back(60329, 2);
+
+    auto l5Mode =
+        AddSpinner(groupPgs, CSettings::SETTING_SUBTITLES_DOLBYVISION_L5_SIGNAL_MODE, 60326,
+                   SettingLevel::Basic,
+                   settings->GetInt(CSettings::SETTING_SUBTITLES_DOLBYVISION_L5_SIGNAL_MODE),
+                   l5ModeEntries);
+    l5Mode->SetDependencies(depsL5);
+  }
+
+  AddSlider(groupPgs, CSettings::SETTING_SUBTITLES_BITMAPZOOM, 69215, SettingLevel::Basic,
+            settings->GetInt(CSettings::SETTING_SUBTITLES_BITMAPZOOM), 14047, 10, 5, 200);
+
   AddButton(groupSaveAsDefault, SETTING_MAKE_DEFAULT, 12376, SettingLevel::Basic);
 }
 
-bool CGUIDialogSubtitleSettings::SupportsSubtitleFeature(int feature) const {
-  for (auto item : m_subtitleCapabilities)
+bool CGUIDialogSubtitleSettings::SupportsSubtitleFeature(IPlayerSubtitleCaps feature) const
+{
+  for (IPlayerSubtitleCaps cap : m_subtitleCapabilities)
   {
-    if (item == feature || item == IPC_SUBS_ALL)
+    if (cap == feature || cap == IPlayerSubtitleCaps::ALL)
       return true;
   }
   return false;
@@ -382,6 +512,20 @@ void CGUIDialogSubtitleSettings::SubtitleStreamsOptionFiller(
     list.emplace_back(g_localizeStrings.Get(231), -1);
     current = -1;
   }
+}
+
+void CGUIDialogSubtitleSettings::PgsManualActiveAspectOptionFiller(
+    const SettingConstPtr& setting,
+    std::vector<StringSettingOption>& list,
+    std::string& current,
+    void* data)
+{
+  list.emplace_back(g_localizeStrings.Get(65112), "auto");
+  list.emplace_back(g_localizeStrings.Get(65113), "16:9");
+  list.emplace_back(g_localizeStrings.Get(65114), "1.85:1");
+  list.emplace_back(g_localizeStrings.Get(65115), "2.20:1");
+  list.emplace_back(g_localizeStrings.Get(65116), "2.35:1");
+  list.emplace_back(g_localizeStrings.Get(65117), "2.39:1");
 }
 
 std::string CGUIDialogSubtitleSettings::SettingFormatterDelay(

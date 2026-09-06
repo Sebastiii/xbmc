@@ -992,7 +992,10 @@ void* CWebServer::UriRequestLogger(void* cls, const char* uri)
 
   // log the full URI
   if (webServer == nullptr)
-    GetLogger()->debug("request received for {}", uri);
+  {
+    if (CServiceBroker::GetLogging().CanLogComponent(LOGWEBSERVER))
+      GetLogger()->debug("request received for {}", uri);
+  }
   else
     webServer->LogRequest(uri);
 
@@ -1003,6 +1006,9 @@ void* CWebServer::UriRequestLogger(void* cls, const char* uri)
 void CWebServer::LogRequest(const char* uri) const
 {
   if (uri == nullptr)
+    return;
+
+  if (!CServiceBroker::GetLogging().CanLogComponent(LOGWEBSERVER))
     return;
 
   m_logger->debug("request received for {}", uri);

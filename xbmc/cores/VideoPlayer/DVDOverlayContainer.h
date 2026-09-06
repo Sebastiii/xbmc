@@ -11,6 +11,7 @@
 #include "DVDCodecs/Overlay/DVDOverlay.h"
 #include "threads/CriticalSection.h"
 
+#include <atomic>
 #include <memory>
 
 class CDVDInputStreamNavigator;
@@ -56,4 +57,5 @@ private:
   VecOverlays::iterator Remove(VecOverlays::iterator itOverlay); // removes a specific overlay
 
   VecOverlays m_overlays;
+  std::atomic<size_t> m_size{0};
 };

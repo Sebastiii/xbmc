@@ -18,6 +18,7 @@
 #include "filesystem/SpecialProtocol.h"
 #include "windowing/GraphicContext.h"
 
+#include <chrono>
 #include <mutex>
 #if defined(HAS_GL)
 #include "GUIFontTTFGL.h"
@@ -441,7 +442,13 @@ bool GUIFontManager::LoadFontsFromFile(const std::string& fontsetFilePath,
           // Found the requested fontset, so load the fonts and return
           CLog::LogF(LOGINFO, "Loading <fontset> with name '{}' from '{}'", fontSet,
                      fontsetFilePath);
+          const auto loadStart = std::chrono::steady_clock::now();
+          const size_t before = m_vecFontFiles.size();
           LoadFonts(fontsetElement->FirstChild("font"));
+          const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now() - loadStart).count();
+          logM(LOGINFO, "Loaded {} TTF font file(s) for fontset '{}' in {} ms (total fonts: {})",
+               m_vecFontFiles.size() - before, fontSet, elapsedMs, m_vecFontFiles.size());
           return true;
         }
       }

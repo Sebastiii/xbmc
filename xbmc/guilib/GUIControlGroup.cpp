@@ -107,13 +107,27 @@ void CGUIControlGroup::Render()
 {
   CPoint pos(GetPosition());
   CServiceBroker::GetWinSystem()->GetGfxContext().SetOrigin(pos.x, pos.y);
-  CGUIControl *focusedControl = nullptr;
-  for (auto *control : m_children)
+  CGUIControl *focusedControl = NULL;
+  if (CServiceBroker::GetWinSystem()->GetGfxContext().GetRenderOrder() ==
+      RENDER_ORDER_FRONT_TO_BACK)
   {
-    if (m_renderFocusedLast && control->HasFocus())
-      focusedControl = control;
-    else
-      control->DoRender();
+    for (auto it = m_children.rbegin(); it != m_children.rend(); ++it)
+    {
+      if (m_renderFocusedLast && (*it)->HasFocus())
+        focusedControl = (*it);
+      else
+        (*it)->DoRender();
+    }
+  }
+  else
+  {
+    for (auto* control : m_children)
+    {
+      if (m_renderFocusedLast && control->HasFocus())
+        focusedControl = control;
+      else
+        control->DoRender();
+    }
   }
   if (focusedControl)
     focusedControl->DoRender();
@@ -286,6 +300,23 @@ bool CGUIControlGroup::CanFocus() const
   return false;
 }
 
+void CGUIControlGroup::AssignDepth()
+{
+  CGUIControl* focusedControl = nullptr;
+  if (m_children.size())
+  {
+    for (auto* control : m_children)
+    {
+      if (m_renderFocusedLast && control->HasFocus())
+        focusedControl = control;
+      else
+        control->AssignDepth();
+    }
+  }
+  if (focusedControl)
+    focusedControl->AssignDepth();
+}
+
 void CGUIControlGroup::SetInitialVisibility()
 {
   CGUIControl::SetInitialVisibility();
@@ -400,6 +431,30 @@ int CGUIControlGroup::GetFocusedControlID() const
   CGUIControl *control = GetFocusedControl();
   if (control) return control->GetID();
   return 0;
+}
+
+bool CGUIControlGroup::HasVisibleControlInRegions(const std::vector<CRect>& bars) const
+{
+  for (const CGUIControl* child : m_children)
+  {
+    if (!child->IsVisible())
+      continue;
+    if (child->IsGroup())
+    {
+      if (static_cast<const CGUIControlGroup*>(child)->HasVisibleControlInRegions(bars))
+        return true;
+    }
+    else
+    {
+      const CRect& region = child->GetRenderRegion();
+      for (const CRect& bar : bars)
+      {
+        if (region.Intersects(bar))
+          return true;
+      }
+    }
+  }
+  return false;
 }
 
 CGUIControl *CGUIControlGroup::GetFocusedControl() const

@@ -41,6 +41,7 @@ void CDVDStreamInfo::Clear()
   flags = 0;
   filename.clear();
   dvd = false;
+  bluray = false;
 
   extradata = {};
 
@@ -49,6 +50,7 @@ void CDVDStreamInfo::Clear()
 
   fpsscale = 0;
   fpsrate  = 0;
+  fpsrate_doubled = false;
   interlaced = false;
   height   = 0;
   width    = 0;
@@ -79,6 +81,7 @@ void CDVDStreamInfo::Clear()
 
   orientation = 0;
   bitdepth = 0;
+  pixelFormat = AV_PIX_FMT_NONE;
   m_3dSubtitlePlane = 0;
 }
 
@@ -108,6 +111,7 @@ bool CDVDStreamInfo::Equal(const CDVDStreamInfo& right, int compare) const {
   || forced_aspect != right.forced_aspect
   || bitsperpixel != right.bitsperpixel
   || bitdepth != right.bitdepth
+  || pixelFormat != right.pixelFormat
   || vfr != right.vfr
   || hdrType != right.hdrType
   || colorSpace != right.colorSpace
@@ -200,6 +204,7 @@ void CDVDStreamInfo::Assign(const CDVDStreamInfo& right, bool withextradata)
   flags = right.flags;
   filename = right.filename;
   dvd = right.dvd;
+  bluray = right.bluray;
 
   if (withextradata && right.extradata)
   {
@@ -216,6 +221,7 @@ void CDVDStreamInfo::Assign(const CDVDStreamInfo& right, bool withextradata)
   // VIDEO
   fpsscale = right.fpsscale;
   fpsrate  = right.fpsrate;
+  fpsrate_doubled = right.fpsrate_doubled;
   interlaced = right.interlaced;
   height   = right.height;
   width    = right.width;
@@ -228,6 +234,7 @@ void CDVDStreamInfo::Assign(const CDVDStreamInfo& right, bool withextradata)
   orientation = right.orientation;
   bitsperpixel = right.bitsperpixel;
   bitdepth = right.bitdepth;
+  pixelFormat = right.pixelFormat;
   vfr = right.vfr;
   codecOptions = right.codecOptions;
   hdrType = right.hdrType;
@@ -239,6 +246,8 @@ void CDVDStreamInfo::Assign(const CDVDStreamInfo& right, bool withextradata)
   contentLightMetadata = right.contentLightMetadata;
   stereo_mode = right.stereo_mode;
   dovi = right.dovi;
+  dovi_el_type = right.dovi_el_type;
+  is_dual_track = right.is_dual_track;
 
   // AUDIO
   channels      = right.channels;
@@ -295,6 +304,7 @@ void CDVDStreamInfo::Assign(const CDemuxStream& right, bool withextradata)
 
     fpsscale  = stream->iFpsScale;
     fpsrate   = stream->iFpsRate;
+    fpsrate_doubled = stream->bFpsRateDoubled;
     interlaced = stream->interlaced;
     height    = stream->iHeight;
     width     = stream->iWidth;
@@ -305,6 +315,7 @@ void CDVDStreamInfo::Assign(const CDemuxStream& right, bool withextradata)
     orientation = stream->iOrientation;
     bitsperpixel = stream->iBitsPerPixel;
     bitdepth = stream->bitDepth;
+    pixelFormat = stream->pixelFormat;
     hdrType = stream->hdr_type;
     colorSpace = stream->colorSpace;
     colorRange = stream->colorRange;
@@ -314,6 +325,7 @@ void CDVDStreamInfo::Assign(const CDemuxStream& right, bool withextradata)
     contentLightMetadata = stream->contentLightMetaData;
     stereo_mode = stream->stereo_mode;
     dovi = stream->dovi;
+    is_dual_track = stream->is_dual_track;
   }
   else if (right.type == STREAM_SUBTITLE)
   {

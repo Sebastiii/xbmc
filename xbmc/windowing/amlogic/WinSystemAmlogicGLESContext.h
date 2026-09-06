@@ -39,6 +39,19 @@ public:
                        bool fullScreen,
                        RESOLUTION_INFO& res) override;
   bool DestroyWindow() override;
+  void SetDirtyRegions(const CDirtyRegionList& dirtyRegions) override
+  {
+    m_pGLContext.SetDamagedRegions(dirtyRegions, m_height);
+  }
+  int GetBufferAge() override;
+
+  bool BindTextureUploadContext() override;
+  bool UnbindTextureUploadContext() override;
+  bool CreateOverlayContext() override;
+  bool BindOverlayContext() override;
+  bool UnbindOverlayContext() override;
+  void DestroyOverlayContext() override;
+  bool HasContext() override;
 
   bool ResizeWindow(int newWidth, int newHeight, int newLeft, int newTop) override;
   bool SetFullScreen(bool fullScreen, RESOLUTION_INFO& res, bool blankOtherDisplays) override;
@@ -58,6 +71,9 @@ protected:
 private:
   CEGLContextUtils m_pGLContext;
   StreamHdrType m_hdrType = StreamHdrType::HDR_TYPE_NONE;
+  bool m_failedSwap{false};
+  int m_vsyncFd{-1};
+  bool m_vsyncAlignFailed{false};
 };
 
 }

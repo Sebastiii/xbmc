@@ -85,16 +85,22 @@ void CGUIProgressControl::Render()
 {
   if (!IsDisabled())
   {
-    m_guiBackground->Render();
+    auto& gfxContext = CServiceBroker::GetWinSystem()->GetGfxContext();
+    const bool renderFrontToBack = gfxContext.GetRenderOrder() == RENDER_ORDER_FRONT_TO_BACK;
+
+    if (!renderFrontToBack)
+      m_guiBackground->Render(-1);
 
     if (m_guiLeft->GetFileName().empty() && m_guiRight->GetFileName().empty())
     {
       if (m_bReveal && !m_guiMidClipRect.IsEmpty())
       {
-        bool restore = CServiceBroker::GetWinSystem()->GetGfxContext().SetClipRegion(m_guiMidClipRect.x1, m_guiMidClipRect.y1, m_guiMidClipRect.Width(), m_guiMidClipRect.Height());
+        bool restore = gfxContext.SetClipRegion(m_guiMidClipRect.x1, m_guiMidClipRect.y1,
+                                                m_guiMidClipRect.Width(),
+                                                m_guiMidClipRect.Height());
         m_guiMid->Render();
         if (restore)
-          CServiceBroker::GetWinSystem()->GetGfxContext().RestoreClipRegion();
+          gfxContext.RestoreClipRegion();
       }
       else if (!m_bReveal && m_guiMid->GetWidth() > 0)
         m_guiMid->Render();
@@ -105,16 +111,21 @@ void CGUIProgressControl::Render()
 
       if (m_bReveal && !m_guiMidClipRect.IsEmpty())
       {
-        bool restore = CServiceBroker::GetWinSystem()->GetGfxContext().SetClipRegion(m_guiMidClipRect.x1, m_guiMidClipRect.y1, m_guiMidClipRect.Width(), m_guiMidClipRect.Height());
+        bool restore = gfxContext.SetClipRegion(m_guiMidClipRect.x1, m_guiMidClipRect.y1,
+                                                m_guiMidClipRect.Width(),
+                                                m_guiMidClipRect.Height());
         m_guiMid->Render();
         if (restore)
-          CServiceBroker::GetWinSystem()->GetGfxContext().RestoreClipRegion();
+          gfxContext.RestoreClipRegion();
       }
       else if (!m_bReveal && m_guiMid->GetWidth() > 0)
         m_guiMid->Render();
 
       m_guiRight->Render();
     }
+
+    if (renderFrontToBack)
+      m_guiBackground->Render(-1);
 
     m_guiOverlay->Render();
   }
@@ -264,7 +275,10 @@ bool CGUIProgressControl::UpdateLayout(void)
     }
     else
     {
-      bChanged |= m_guiMid->SetWidth(width);
+      const bool midVisible = width > 0.0f;
+      bChanged |= m_guiMid->SetVisible(midVisible);
+      if (midVisible)
+        bChanged |= m_guiMid->SetWidth(width);
       m_guiMidClipRect = CRect();
     }
   }
@@ -302,7 +316,10 @@ bool CGUIProgressControl::UpdateLayout(void)
     }
     else
     {
-      bChanged |= m_guiMid->SetWidth(fScaleX * fWidth);
+      const bool midVisible = fWidth > 0.0f;
+      bChanged |= m_guiMid->SetVisible(midVisible);
+      if (midVisible)
+        bChanged |= m_guiMid->SetWidth(fScaleX * fWidth);
       m_guiMidClipRect = CRect();
     }
 

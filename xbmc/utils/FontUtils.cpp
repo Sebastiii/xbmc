@@ -117,6 +117,14 @@ bool UTILS::FONT::GetFontFamilyNames(const std::vector<uint8_t>& buffer,
     std::string familyName = GetFamilyNameFromSfnt(face);
     if (familyName.empty())
     {
+      if (!face->family_name)
+      {
+        CLog::LogF(LOGERROR, "Family name missing in the font");
+        FT_Done_Face(face);
+        FT_Done_FreeType(m_library);
+        return false;
+      }
+
       CLog::LogF(LOGWARNING, "Failed to get the unicode family name for \"{}\", fallback to ASCII",
                  face->family_name);
       // ASCII font family name may differ from the unicode one, use this as fallback only
@@ -124,6 +132,8 @@ bool UTILS::FONT::GetFontFamilyNames(const std::vector<uint8_t>& buffer,
       if (familyName.empty())
       {
         CLog::LogF(LOGERROR, "Family name missing in the font");
+        FT_Done_Face(face);
+        FT_Done_FreeType(m_library);
         return false;
       }
     }
@@ -177,7 +187,7 @@ std::string UTILS::FONT::GetFontFamily(std::vector<uint8_t>& buffer)
   }
 
   // Load the font face
-  FT_Face face;
+  FT_Face face{nullptr};
   std::string familyName;
   if (FT_New_Memory_Face(m_library, reinterpret_cast<const FT_Byte*>(buffer.data()), buffer.size(),
                          0, &face) == 0)
@@ -185,20 +195,27 @@ std::string UTILS::FONT::GetFontFamily(std::vector<uint8_t>& buffer)
     familyName = GetFamilyNameFromSfnt(face);
     if (familyName.empty())
     {
-      CLog::LogF(LOGWARNING, "Failed to get the unicode family name for \"{}\", fallback to ASCII",
-                 face->family_name);
-      // ASCII font family name may differ from the unicode one, use this as fallback only
-      familyName = std::string{face->family_name};
-      if (familyName.empty())
+      if (!face->family_name)
+      {
         CLog::LogF(LOGERROR, "Family name missing in the font");
+      }
+      else
+      {
+        CLog::LogF(LOGWARNING, "Failed to get the unicode family name for \"{}\", fallback to ASCII",
+                   face->family_name);
+        // ASCII font family name may differ from the unicode one, use this as fallback only
+        familyName = std::string{face->family_name};
+        if (familyName.empty())
+          CLog::LogF(LOGERROR, "Family name missing in the font");
+      }
     }
+    FT_Done_Face(face);
   }
   else
   {
     CLog::LogF(LOGERROR, "Failed to process font memory buffer");
   }
 
-  FT_Done_Face(face);
   FT_Done_FreeType(m_library);
   return familyName;
 }

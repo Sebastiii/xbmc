@@ -43,3 +43,4 @@ std::vector<uint8_t> create_dovi_rpu_nalu_from_hdr10plus(
   const HDRStaticMetadataInfo& hdrStaticMetadataInfo);
 
 int max_pq_to_nits(int pq);
+int nits_to_max_pq(int nits);

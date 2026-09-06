@@ -10,6 +10,9 @@
 #include "XBDateTime.h"
 #include "windowing/GraphicContext.h"
 
+#include <chrono>
+#include <limits>
+
 #if   defined(TARGET_DARWIN)
 #include <mach/mach_time.h>
 #include <CoreVideo/CVHostTime.h>
@@ -58,36 +61,19 @@ int64_t CurrentHostFrequency(void)
 
 unsigned int CTimeUtils::frameTime = 0;
 
-static inline uint64_t GetTimeInMs()
-{
-  timeval now_time;
-
-  ::gettimeofday(&now_time, nullptr);
-
-  return now_time.tv_sec * 1000ll + now_time.tv_usec / 1000ll;
-}
-
-static unsigned int GetUptimeInMs()
-{
-  static bool start_time_set = false;
-  static uint64_t start_time = 0;
-
-  uint64_t now_ms = GetTimeInMs();
-
-  if (!start_time_set) {
-    start_time = now_ms;
-    start_time_set = true;
-  }
-
-  return (unsigned int) (now_ms - start_time);
-}
-
 void CTimeUtils::UpdateFrameTime(bool flip)
 {
-  unsigned int currentTime = GetUptimeInMs();
-  unsigned int framedur = (unsigned int)(1000.0 / static_cast<double>(CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS()));
+  const auto now = std::chrono::steady_clock::now();
+  const unsigned int currentTime = static_cast<unsigned int>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(now - startTime).count());
+  const unsigned int framedur = static_cast<unsigned int>(
+      1000.0 / static_cast<double>(CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS()));
+  const unsigned int elapsed = currentTime - frameTime;
 
-  frameTime += framedur * ((currentTime - frameTime + framedur - 1) / framedur);
+  if (framedur == 0 || elapsed > std::numeric_limits<unsigned int>::max() / 2)
+    return;
+
+  frameTime += framedur * ((elapsed + framedur - 1) / framedur);
 }
 
 unsigned int CTimeUtils::GetFrameTime()

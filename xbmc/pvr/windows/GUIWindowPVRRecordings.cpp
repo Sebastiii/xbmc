@@ -10,6 +10,7 @@
 
 #include "GUIInfoManager.h"
 #include "ServiceBroker.h"
+#include "URL.h"
 #include "guilib/GUIComponent.h"
 #include "guilib/GUIMessage.h"
 #include "guilib/GUIRadioButtonControl.h"
@@ -53,6 +54,14 @@ CGUIWindowPVRRecordingsBase::~CGUIWindowPVRRecordingsBase() = default;
 void CGUIWindowPVRRecordingsBase::OnWindowLoaded()
 {
   CONTROL_SELECT(CONTROL_BTNGROUPITEMS);
+}
+
+void CGUIWindowPVRRecordingsBase::OnInitWindow()
+{
+  const CURL url{m_vecItems->GetPath()};
+  const std::string viewMode{url.GetOption("view")};
+  m_forceUngrouped = (viewMode == "flat");
+  CGUIWindowPVRBase::OnInitWindow();
 }
 
 std::string CGUIWindowPVRRecordingsBase::GetDirectoryPath()
@@ -199,8 +208,11 @@ void CGUIWindowPVRRecordingsBase::UpdateButtons()
 
   SET_CONTROL_LABEL(CONTROL_BTNSHOWMODE, g_localizeStrings.Get(iStringId));
 
-  bool bGroupRecordings = m_settings.GetBoolValue(CSettings::SETTING_PVRRECORD_GROUPRECORDINGS);
+  bool bGroupRecordings =
+      !m_forceUngrouped && m_settings.GetBoolValue(CSettings::SETTING_PVRRECORD_GROUPRECORDINGS);
   SET_CONTROL_SELECTED(GetID(), CONTROL_BTNGROUPITEMS, bGroupRecordings);
+
+  CONTROL_ENABLE_ON_CONDITION(CONTROL_BTNGROUPITEMS, !m_forceUngrouped);
 
   auto btnShowDeleted =
       static_cast<CGUIRadioButtonControl*>(GetControl(CONTROL_BTNSHOWDELETED));

@@ -16,6 +16,7 @@
 #include "cores/AudioEngine/Utils/AEStreamData.h"
 #include "settings/AdvancedSettings.h"
 #include "settings/SettingsComponent.h"
+#include "utils/AudioDelayTrace.h"
 #include "utils/XTimeUtils.h"
 #include "utils/log.h"
 
@@ -59,6 +60,10 @@ bool CAudioSinkAE::Create(const DVDAudioFrame &audioframe, AVCodecID codec, bool
   options |= AESTREAM_PAUSED;
 
   AEAudioFormat format = audioframe.format;
+
+  if (codec == AV_CODEC_ID_FLAC && !audioframe.passthrough && format.m_sampleRate % 48000 != 0)
+    format.m_resample44to48Mult = true;
+
   m_pAudioStream = CServiceBroker::GetActiveAE()->MakeStream(
     format,
     options,
@@ -67,12 +72,27 @@ bool CAudioSinkAE::Create(const DVDAudioFrame &audioframe, AVCodecID codec, bool
   if (!m_pAudioStream)
     return false;
 
+  if (m_hybridFirstCycleInterval.count() > 0)
+    m_pAudioStream->SetHybridFirstCycleInterval(m_hybridFirstCycleInterval);
+
   m_dataFormat = audioframe.format.m_dataFormat;
   m_sampleRate = audioframe.format.m_sampleRate;
   m_iBitsPerSample = audioframe.bits_per_sample;
   m_bPassthrough = audioframe.passthrough;
   m_channelLayout = audioframe.format.m_channelLayout;
   m_dataType = audioframe.format.m_streamInfo.m_type;
+
+  AUDIODELAY_LOG("SinkAE.Create",
+                 "codecId={} passthrough={} dataFormat={} sampleRate={} channels={} bps={} "
+                 "streamType={} forceResample={}",
+                 static_cast<int>(codec),
+                 audioframe.passthrough ? 1 : 0,
+                 static_cast<int>(audioframe.format.m_dataFormat),
+                 audioframe.format.m_sampleRate,
+                 audioframe.format.m_channelLayout.Count(),
+                 audioframe.bits_per_sample,
+                 static_cast<int>(audioframe.format.m_streamInfo.m_type),
+                 (options & AESTREAM_FORCE_RESAMPLE) ? 1 : 0);
 
   return true;
 }
@@ -113,12 +133,14 @@ unsigned int CAudioSinkAE::AddPackets(const DVDAudioFrame &audioframe)
       m_syncErrorTime = info.errortime;
       m_syncError = info.error / 1000 * DVD_TIME_BASE;
       m_resampleRatio = info.rr;
+      m_syncFromFirstCycle = info.insyncFirstCycle;
     }
   }
   else
   {
     m_syncErrorTime = 0;
     m_syncError = 0.0;
+    m_syncFromFirstCycle = false;
   }
 
   // Use wall-clock deadline independent of playback speed (fixes dimensional error
@@ -145,6 +167,7 @@ unsigned int CAudioSinkAE::AddPackets(const DVDAudioFrame &audioframe)
     {
       ext.hasDownmix = true;
       ext.centerMixLevel = audioframe.centerMixLevel;
+      ext.surroundMixLevel = audioframe.surroundMixLevel;
     }
     unsigned int copied = m_pAudioStream->AddData(audioframe.data, offset, frames, &ext);
     offset += copied;
@@ -154,7 +177,7 @@ unsigned int CAudioSinkAE::AddPackets(const DVDAudioFrame &audioframe)
 
     if (copied == 0 && std::chrono::steady_clock::now() >= deadline)
     {
-      CLog::Log(LOGERROR, "CDVDAudio::AddPacketsRenderer - timeout adding data to renderer");
+      logM(LOGERROR, "CDVDAudio::AddPacketsRenderer - timeout adding data to renderer");
       break;
     }
 
@@ -199,7 +222,8 @@ void CAudioSinkAE::Pause()
 
   if (m_pAudioStream)
     m_pAudioStream->Pause();
-  CLog::Log(LOGDEBUG,"CDVDAudio::Pause - pausing audio stream");
+  logComponentM(LOGDEBUG, LOGAUDIO, "pausing audio stream");
+  AUDIODELAY_LOG("SinkAE.Pause", "hasStream={}", m_pAudioStream ? 1 : 0);
   m_playingPts = DVD_NOPTS_VALUE;
 }
 
@@ -209,7 +233,8 @@ void CAudioSinkAE::Resume()
 
   if (m_pAudioStream)
     m_pAudioStream->Resume();
-  CLog::Log(LOGDEBUG,"CDVDAudio::Resume - resume audio stream");
+  logComponentM(LOGDEBUG, LOGAUDIO, "resume audio stream");
+  AUDIODELAY_LOG("SinkAE.Resume", "hasStream={}", m_pAudioStream ? 1 : 0);
 }
 
 double CAudioSinkAE::GetDelay()
@@ -233,8 +258,9 @@ void CAudioSinkAE::Flush()
   if (m_pAudioStream)
   {
     m_pAudioStream->Flush();
-    CLog::Log(LOGDEBUG,"CDVDAudio::Flush - flush audio stream");
+    logComponentM(LOGDEBUG, LOGAUDIO, "flush audio stream");
   }
+  AUDIODELAY_LOG("SinkAE.Flush", "hasStream={}", m_pAudioStream ? 1 : 0);
   m_playingPts = DVD_NOPTS_VALUE;
   m_syncError = 0.0;
   m_syncErrorTime = 0;
@@ -300,7 +326,7 @@ double CAudioSinkAE::GetPlayingPts()
 
   double now = m_pClock->GetAbsoluteClock();
   double diff = now - m_timeOfPts;
-  double cache = GetCacheTime();
+  double cache = GetCacheTime() * DVD_TIME_BASE;
   double played = 0.0;
 
   if (diff < cache)
@@ -329,11 +355,19 @@ double CAudioSinkAE::GetResampleRatio() const {
 void CAudioSinkAE::SetResampleMode(int mode)
 {
   std::lock_guard lock(m_critSection);
-  
+
   if(m_pAudioStream)
   {
     m_pAudioStream->SetResampleMode(mode);
   }
+}
+
+void CAudioSinkAE::SetHybridFirstCycleInterval(std::chrono::milliseconds interval)
+{
+  std::lock_guard lock(m_critSection);
+  m_hybridFirstCycleInterval = interval;
+  if (m_pAudioStream)
+    m_pAudioStream->SetHybridFirstCycleInterval(interval);
 }
 
 double CAudioSinkAE::GetClock()

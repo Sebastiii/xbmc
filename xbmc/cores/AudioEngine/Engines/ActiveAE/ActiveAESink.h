@@ -12,6 +12,7 @@
 #include "cores/AudioEngine/Engines/ActiveAE/ActiveAEBuffer.h"
 #include "cores/AudioEngine/Interfaces/AE.h"
 #include "cores/AudioEngine/Interfaces/AESink.h"
+#include "threads/CriticalSection.h"
 #include "threads/Event.h"
 #include "threads/SystemClock.h"
 #include "threads/Thread.h"
@@ -147,6 +148,7 @@ protected:
   std::string m_deviceFriendlyName;
   std::string m_device;
   std::vector<AE::AESinkInfo> m_sinkInfoList;
+  mutable CCriticalSection m_sinkInfoLock;
   std::unique_ptr<IAESink> m_sink;
   AEAudioFormat m_sinkFormat, m_requestedFormat;
   CEngineStats *m_stats;

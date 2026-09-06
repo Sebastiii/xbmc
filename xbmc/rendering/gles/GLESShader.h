@@ -11,6 +11,7 @@
 #include "guilib/Shader.h"
 #include "settings/lib/ISettingCallback.h"
 
+#include <array>
 #include <string>
 
 class CGLESShader : public Shaders::CGLSLShaderProgram, public ISettingCallback
@@ -24,22 +25,29 @@ public:
   bool OnEnabled() override;
   void Free();
 
-  GLint GetPosLoc() const { return m_hPos;   }
-  GLint GetColLoc() const { return m_hCol;   }
-  GLint GetCord0Loc() const { return m_hCord0; }
-  GLint GetCord1Loc() const { return m_hCord1; }
-  GLint GetUniColLoc() const { return m_hUniCol; }
-  GLint GetCoord0MatrixLoc() const { return m_hCoord0Matrix; }
-  GLint GetFieldLoc() const { return m_hField; }
-  GLint GetStepLoc() const { return m_hStep; }
-  GLint GetContrastLoc() const { return m_hContrast; }
-  GLint GetBrightnessLoc() const { return m_hBrightness; }
-  GLint GetModelLoc() const { return m_hModel; }
-  bool HardwareClipIsPossible() const { return m_clipPossible; }
-  GLfloat GetClipXFactor() const { return m_clipXFactor; }
-  GLfloat GetClipXOffset() const { return m_clipXOffset; }
-  GLfloat GetClipYFactor() const { return m_clipYFactor; }
-  GLfloat GetClipYOffset() const { return m_clipYOffset; }
+  static void RefreshFrameGuiValues();
+
+  GLint GetPosLoc()   { return m_hPos;   }
+  GLint GetColLoc()   { return m_hCol;   }
+  GLint GetCord0Loc() { return m_hCord0; }
+  GLint GetCord1Loc() { return m_hCord1; }
+  GLint GetDepthLoc() { return m_hDepth; }
+  GLint GetUniColLoc() { return m_hUniCol; }
+  GLint GetCoord0MatrixLoc() { return m_hCoord0Matrix; }
+  GLint GetFieldLoc() { return m_hField; }
+  GLint GetStepLoc() { return m_hStep; }
+  GLint GetContrastLoc() { return m_hContrast; }
+  GLint GetBrightnessLoc() { return m_hBrightness; }
+  GLint GetModelLoc() { return m_hModel; }
+  GLint GetMatrixLoc() { return m_hMatrix; }
+  GLint GetShaderClipLoc() { return m_hShaderClip; }
+  GLint GetShaderCoordStepLoc() { return m_hCoordStep; }
+  bool HardwareClipIsPossible() { return m_clipPossible; }
+  GLfloat GetClipXFactor() { return m_clipXFactor; }
+  GLfloat GetClipXOffset() { return m_clipXOffset; }
+  GLfloat GetClipYFactor() { return m_clipYFactor; }
+  GLfloat GetClipYOffset() { return m_clipYOffset; }
+  GLint GetGuiTransferBypassLoc() { return m_guiTransferBypass; }
 
   void OnSettingChanged(const std::shared_ptr<const CSetting>& setting) override;
 
@@ -49,6 +57,9 @@ protected:
   GLint m_hUniCol = 0;
   GLint m_hProj = 0;
   GLint m_hModel = 0;
+  GLint m_hMatrix{0}; // m_hProj * m_hModel
+  GLint m_hShaderClip{0}; // clipping rect vec4(x1,y1,x2,y2)
+  GLint m_hCoordStep{0}; // step (1/resolution) for the two textures vec4(t1.x,t1.y,t2.x,t2.y)
   GLint m_hPos = 0;
   GLint m_hCol = 0;
   GLint m_hCord0 = 0;
@@ -58,6 +69,11 @@ protected:
   GLint m_hStep = 0;
   GLint m_hContrast = 0;
   GLint m_hBrightness = 0;
+  GLint m_hDepth = 0;
+  GLint m_hVertexBlock = -1;
+  GLint m_hFragmentBlock = -1;
+  GLuint m_vertexUBO = 0;
+  GLuint m_fragmentUBO = 0;
 
   const GLfloat *m_proj;
   const GLfloat *m_model;
@@ -72,9 +88,22 @@ protected:
   GLint m_sdrSaturation;
   GLint m_hdrPgsPeak;
   GLint m_hdrPgsSaturation;
+  GLint m_sdrPgsPeak;
+  GLint m_sdrPgsSaturation;
+  GLint m_guiSrgbDecode;
+  GLint m_guiDither8;
+  GLint m_guiTransferBypass{-1};
+  GLint m_guiCompositeDither{-1};
 
-  float m_cachedGuiSdrPeak = 0.0f;
-  float m_cachedGuiSdrSaturation = 1.0f;
   float m_cachedHdrPgsPeak = 1.0f;
   float m_cachedHdrPgsSaturation = 1.0f;
+  float m_cachedSdrPgsPeak = 1.0f;
+  float m_cachedSdrPgsSaturation = 1.0f;
+
+  bool m_vertexBlockValid = false;
+  bool m_fragmentBlockValid = false;
+  std::array<GLfloat, 16> m_lastProj{};
+  std::array<GLfloat, 16> m_lastModel{};
+  std::array<GLfloat, 4> m_lastGuiParams0{};
+  std::array<GLfloat, 4> m_lastGuiParams1{};
 };

@@ -16,6 +16,7 @@
 #include "utils/Variant.h"
 
 #include <algorithm>
+#include <limits>
 #include <inttypes.h>
 
 std::string ArrayToString(SortAttribute attributes, const CVariant &variant, const std::string &separator = " / ")
@@ -357,8 +358,12 @@ std::string ByEpisodeNumber(SortAttribute attributes, const SortItem &values)
 std::string BySeason(SortAttribute attributes, const SortItem &values)
 {
   int season = (int)values.at(FieldSeason).asInteger();
+
+  if (season == 0)
+    season = std::numeric_limits<int>::max();
+
   const CVariant &specialSeason = values.at(FieldSeasonSpecialSort);
-  if (!specialSeason.isNull())
+  if (!specialSeason.isNull() && specialSeason.asInteger() > 0)
     season = (int)specialSeason.asInteger();
 
   return StringUtils::Format("{} {}", season, ByLabel(attributes, values));

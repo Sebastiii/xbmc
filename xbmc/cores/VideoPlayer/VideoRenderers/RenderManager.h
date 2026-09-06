@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "ActiveAreaDetector.h"
 #include "DVDClock.h"
 #include "DebugRenderer.h"
 #include "cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodec.h"
@@ -24,9 +25,11 @@
 #include "windowing/Resolution.h"
 
 #include <atomic>
+#include <chrono>
 #include <deque>
 #include <list>
 #include <map>
+#include <optional>
 
 #include "PlatformDefs.h"
 
@@ -59,17 +62,23 @@ class CRenderManager
 {
 public:
   CRenderManager(CDVDClock &clock, IRenderMsg *player);
-  virtual ~CRenderManager();
+  ~CRenderManager();
 
   // Functions called from render thread
+  void SetVsyncAdjust(double adjustment);
   void GetVideoRect(CRect& source, CRect& dest, CRect& view) const;
   float GetAspectRatio() const;
   void FrameMove();
+  void SetAsyncVideoWorkerActive(bool active);
+  void RequestAsyncVideoWorkerStop();
+  bool AsyncVideoWorkerIteration();
+  bool CanRunAsyncVideoWorker();
   void FrameWait(std::chrono::milliseconds duration);
   void Render(bool clear, DWORD flags = 0, DWORD alpha = 255, bool gui = true);
   bool IsVideoLayer() const;
   RESOLUTION GetResolution() const;
   void UpdateResolution(bool force = false);
+  void SetActiveAreaScanSuspended(bool suspended);
   void TriggerUpdateResolution(float fps, int width, int height, std::string &stereomode);
   void TriggerUpdateResolutionHdr(StreamHdrType m_hdrType);
   void SetViewMode(int iViewMode) const;
@@ -98,12 +107,18 @@ public:
   bool Supports(ESCALINGMETHOD method) const;
 
   int GetSkippedFrames() const { return m_QueueSkip; }
-  void DisplayReset() { m_displayReset = true; }
+
+  bool HasFutureFrame(double clockPts) const;
 
   bool Configure(const VideoPicture& picture, float fps, unsigned int orientation, StreamHdrType hdrType, int buffers = 0);
   bool AddVideoPicture(const VideoPicture& picture, volatile std::atomic_bool& bStop, EINTERLACEMETHOD deintMethod, bool wait);
   void AddOverlay(std::shared_ptr<CDVDOverlay> o, double pts);
   void ShowVideo(bool enable);
+  void PauseAsyncVideoLayerPoll();
+  void WaitAsyncMainPace();
+  uint64_t GetVisibleOverlaySetSignature(bool& animated) const;
+
+  void DisplayReset() { m_displayReset = true; }
 
   /**
    * If player uses buffering it has to wait for a buffer before it calls
@@ -120,6 +135,8 @@ public:
    */
   bool GetStats(int &lateframes, double &pts, int &queued, int &discard);
 
+  double GetRenderPts();
+
   /**
    * Video player call this on flush in oder to discard any queued frames
    */
@@ -127,6 +144,9 @@ public:
 
   void SetDelay(int delay) { m_videoDelay = delay; }
   int GetDelay() { return m_videoDelay; }
+
+  void SetDeinterlaceDelay(int delay) { m_deinterlaceDelay = delay; }
+  int GetDeinterlaceDelay() { return m_deinterlaceDelay; }
 
   int GetVideoLatencyTweak() { return m_videoLatencyTweak; }
 
@@ -169,22 +189,60 @@ protected:
   void DeleteRenderer();
   void ManageCaptures();
 
+  void VideoBody(bool firstFrame);
+  void GetGuiVideoRect(CRect& source, CRect& dest, CRect& view);
+  void PublishAsyncPresentMirror(int source, double pts);
+  void PublishAsyncMirrorRects(const CRect& source, const CRect& dest, const CRect& view);
+  bool VideoWorkerParked();
+  bool ParkVideoWorker(std::chrono::milliseconds timeout);
+  void ResumeVideoWorker();
+
   void UpdateVideoLatencyTweak();
   void CheckEnableClockSync();
+  void UpdateActiveAreaInfo();
+  void UpdateDvOsdLift();
+  void FillDoViActiveAreaMeta(DOVIFrameMetadata& meta);
 
   CBaseRenderer *m_pRenderer = nullptr;
   OVERLAY::CRenderer m_overlays;
+  KODI::VIDEORENDERER::CActiveAreaDetector m_activeAreaDetector;
+  bool m_activeAreaStartPending{false};
+  int m_lastPushedActiveTopPx{-1};
+  int m_lastPushedActiveBottomPx{-1};
+  int m_lastActiveAreaTopPct{-1};
+  int m_lastActiveAreaBottomPct{-1};
+  int m_lastActiveAreaTopPx{-1};
+  int m_lastActiveAreaBottomPx{-1};
+  int m_contentAreaTopPx{0};
+  int m_contentAreaBottomPx{0};
+  bool m_l5DetectorMismatchLogged{false};
+  int m_kernelFrameWidth{0};
+  int m_kernelFrameHeight{0};
+  uint64_t m_lastKernelDimsKey{0};
+  std::chrono::steady_clock::time_point m_kernelFrameDimsRead{};
   CDebugRenderer m_debugRenderer;
   mutable CCriticalSection m_statelock;
   CCriticalSection m_resolutionlock;
-  CCriticalSection m_presentlock;
+  mutable CCriticalSection m_presentlock;
   CCriticalSection m_datalock;
-  bool m_bTriggerUpdateResolution = false;
-  bool m_bTriggerUpdateResolutionNoParams = false;
+  std::atomic_bool m_bTriggerUpdateResolution{false};
+  std::atomic_bool m_bTriggerUpdateResolutionNoParams{false};
+  std::atomic_bool m_triggerStereoNonEmpty{false};
   bool m_bRenderGUI = true;
-  bool m_renderedOverlay = false;
-  bool m_renderDebug = false;
-  bool m_renderDebugVideo = false;
+  std::atomic_bool m_asyncPinArmed{false};
+  std::atomic_bool m_asyncVideoWorkerActive{false};
+  std::atomic_bool m_asyncWorkerParked{false};
+  std::atomic_bool m_asyncParkRequest{false};
+  std::atomic_bool m_asyncWorkerStop{false};
+  std::atomic_bool m_asyncRefilling{false};
+  CEvent m_asyncParkedEvent;
+  CEvent m_asyncResumeEvent;
+  CEvent m_asyncFloorPaceEvent;
+  CEvent m_asyncMainPaceEvent;
+  std::atomic<uint32_t> m_asyncMainPaceSets{0};
+  std::atomic<bool> m_renderedOverlay{false};
+  std::atomic_bool m_renderDebug{false};
+  std::atomic_bool m_renderDebugVideo{false};
   XbmcThreads::EndTime<> m_debugTimer;
   std::atomic_bool m_showVideo = {false};
 
@@ -210,7 +268,9 @@ protected:
     STATE_CONFIGURING,
     STATE_CONFIGURED,
   };
-  ERENDERSTATE m_renderState = STATE_UNCONFIGURED;
+  
+  std::atomic<ERENDERSTATE> m_renderState{STATE_UNCONFIGURED};
+
   CEvent m_stateEvent;
 
   // Display latency tweak from AdvancedSettings for the current refresh rate and resolution in milliseconds
@@ -221,9 +281,12 @@ protected:
 
   // User set latency
   std::atomic_int m_videoDelay = {};
+  std::atomic_int m_deinterlaceDelay = {};
 
-  int m_QueueSize = 2;
-  int m_QueueSkip = 0;
+  std::atomic<double> m_displayLatency{0.0};
+
+  std::atomic_int m_QueueSize{2};
+  std::atomic_int m_QueueSkip{0};
 
   struct SPresent
   {
@@ -243,14 +306,26 @@ protected:
   float m_fps = 0.0;
   unsigned int m_orientation = 0;
   StreamHdrType m_hdrType = StreamHdrType::HDR_TYPE_NONE;
-  StreamHdrType m_hdrType_override = StreamHdrType::HDR_TYPE_NONE;
+  std::atomic<StreamHdrType> m_hdrType_override{StreamHdrType::HDR_TYPE_NONE};
   int m_NumberBuffers = 0;
-  int m_lateframes = -1;
-  double m_presentpts = 0.0;
+  std::atomic<int> m_lateframes{-1};
+  std::atomic<double> m_presentpts{0.0};
   EPRESENTSTEP m_presentstep = PRESENT_IDLE;
+  bool m_cadenceArmed = false;
+  int m_cadenceCalls = 0;
+  int m_cadenceAdvance = 0;
+  int m_cadenceHalf = 0;
+  int m_cadenceEmpty = 0;
+  int m_cadenceQueueIn = 0;
+  int m_cadenceQueueMin = 0;
+  int m_cadenceQueueMax = 0;
+  int m_cadenceSkipBase = 0;
+  double m_cadencePtsBase = 0.0;
+  std::chrono::steady_clock::time_point m_cadenceStamp{};
   XbmcThreads::EndTime<> m_presentTimer;
   bool m_forceNext = false;
   bool m_presentstarted = false;
+  bool m_asyncDiscardPause = false;
   int m_presentsource = 0;
   int m_presentsourcePast = -1;
   std::atomic_uint m_presentWaiters{0};
@@ -264,11 +339,26 @@ protected:
   {
     void Reset();
     double m_error;
+    double m_ref;
+    bool m_refValid;
     int m_errCount;
-    double m_syncOffset;
+    std::atomic<double> m_syncOffset;
     bool m_enabled;
   };
   CClockSync m_clockSync;
+
+  struct AsyncPresentMirror
+  {
+    int presentsource = 0;
+    double pts = 0.0;
+    CRect srcRect;
+    CRect dstRect;
+    CRect viewRect;
+  };
+  AsyncPresentMirror m_asyncMirror;
+  std::optional<bool> m_lastPublishedClockSync;
+  std::vector<CRect> m_l5Bars;
+  int m_lastOsdKey = -1;
 
   void RenderCapture(CRenderCapture* capture) const;
   void RemoveCaptures();
@@ -280,8 +370,10 @@ protected:
   //std::list::empty() isn't thread safe, using an extra bool will save a lock per render when no captures are requested
   bool m_hasCaptures = false;
 
-  bool m_displayReset = false;
+  std::atomic_bool m_displayReset{false};
 
 private:
+  void RenderUpdate(bool clear, unsigned int flags, unsigned int alpha);
+
   CDataCacheCore &m_dataCacheCore;
 };

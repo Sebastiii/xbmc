@@ -35,6 +35,7 @@ public:
 
   int TranslateBool(const std::string &setting);
   bool GetBool(int setting) const;
+  bool GetBool(const std::string &setting) const;
   void SetBool(int setting, bool set);
 
   /*! \brief Get the skin setting value as an integer value

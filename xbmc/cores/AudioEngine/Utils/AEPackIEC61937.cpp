@@ -8,6 +8,9 @@
 
 #include "AEPackIEC61937.h"
 
+#include "utils/LogThrottle.h"
+#include "utils/log.h"
+
 #include <cassert>
 #include <string.h>
 
@@ -17,7 +20,7 @@
 inline void SwapEndian(uint16_t *dst, uint16_t *src, unsigned int size)
 {
   for (unsigned int i = 0; i < size; ++i, ++dst, ++src)
-    *dst = ((*src & 0xFF00) >> 8) | ((*src & 0x00FF) << 8);
+    *dst = __builtin_bswap16(*src);
 }
 
 int CAEPackIEC61937::PackAC3(uint8_t *data, unsigned int size, uint8_t *dest)
@@ -95,6 +98,15 @@ int CAEPackIEC61937::PackTrueHD(const uint8_t* data, unsigned int size, uint8_t*
   if (size == 0)
     return OUT_FRAMESTOBYTES(TRUEHD_FRAME_SIZE);
 
+  if (size > OUT_FRAMESTOBYTES(TRUEHD_FRAME_SIZE) - IEC61937_DATA_OFFSET)
+  {
+    LOG_THROTTLE_PERIODIC(LOGERROR, LOGAUDIO, 1000,
+                          "CAEPackIEC61937::PackTrueHD - frame of {} bytes exceeds {} byte burst "
+                          "payload, dropping",
+                          size, OUT_FRAMESTOBYTES(TRUEHD_FRAME_SIZE) - IEC61937_DATA_OFFSET);
+    return 0;
+  }
+
   assert(size <= OUT_FRAMESTOBYTES(TRUEHD_FRAME_SIZE));
   auto packet = (struct IEC61937Packet*)dest;
   packet->m_preamble1 = IEC61937_PREAMBLE1;
@@ -132,6 +144,16 @@ int CAEPackIEC61937::PackDTSHD(uint8_t *data, unsigned int size, uint8_t *dest, 
       return 0;
   }
 
+  unsigned int burstsize = period << 2;
+  if (size > burstsize - IEC61937_DATA_OFFSET)
+  {
+    LOG_THROTTLE_PERIODIC(LOGERROR, LOGAUDIO, 1000,
+                          "CAEPackIEC61937::PackDTSHD - frame of {} bytes exceeds {} byte burst "
+                          "payload (period {}), dropping",
+                          size, burstsize - IEC61937_DATA_OFFSET, period);
+    return 0;
+  }
+
   auto packet = (struct IEC61937Packet*)dest;
   packet->m_preamble1 = IEC61937_PREAMBLE1;
   packet->m_preamble2 = IEC61937_PREAMBLE2;
@@ -151,7 +173,6 @@ int CAEPackIEC61937::PackDTSHD(uint8_t *data, unsigned int size, uint8_t *dest, 
   SwapEndian((uint16_t*)packet->m_data, (uint16_t*)data, size >> 1);
 #endif
 
-  unsigned int burstsize = period << 2;
   memset(packet->m_data + size, 0, burstsize - IEC61937_DATA_OFFSET - size);
   return burstsize;
 }

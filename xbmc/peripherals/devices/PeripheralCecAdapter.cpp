@@ -9,6 +9,7 @@
 #include "PeripheralCecAdapter.h"
 
 #include "ServiceBroker.h"
+#include "application/ApplicationActionListeners.h"
 #include "application/ApplicationComponents.h"
 #include "application/ApplicationEnums.h"
 #include "application/ApplicationPlayer.h"
@@ -29,7 +30,9 @@
 #include "xbmc/interfaces/AnnouncementManager.h"
 #include "xbmc/interfaces/legacy/configini.h"
 
+#include <cstdio>
 #include <mutex>
+#include <stdexcept>
 
 #include <libcec/cec.h>
 
@@ -41,9 +44,13 @@ using namespace XBMCAddon;
 
 #define CEC_LIB_SUPPORTED_VERSION LIBCEC_VERSION_TO_UINT(4, 0, 0)
 
+#define CEC_FUNC_CONFIG_BASE 0x27
+
 /* time in seconds to ignore standby commands from devices after the screensaver has been activated
  */
 #define SCREENSAVER_TIMEOUT 20
+#define STANDBY_WAKE_COOLDOWN 5
+#define ACTIVATE_SOURCE_COOLDOWN 5
 #define VOLUME_CHANGE_TIMEOUT 250
 #define VOLUME_REFRESH_TIMEOUT 100
 
@@ -66,6 +73,34 @@ using namespace XBMCAddon;
 /* time in seconds to suppress source activation after receiving OnStop */
 #define CEC_SUPPRESS_ACTIVATE_SOURCE_AFTER_ON_STOP 2
 
+#define CEC_ACTIVE_SOURCE_FLAG_FILE "/run/kodi_cec_startup_done"
+
+static bool IsActiveSourceFromFlag(ICECAdapter* adapter, bool allowQuery = true)
+{
+  FILE* fp = fopen(CEC_ACTIVE_SOURCE_FLAG_FILE, "r");
+  if (fp)
+  {
+    char buf[2] = {0};
+    if (fread(buf, 1, 1, fp) == 1)
+    {
+      fclose(fp);
+      return buf[0] == '1';
+    }
+    fclose(fp);
+  }
+  return (allowQuery && adapter) ? adapter->IsLibCECActiveSource() : false;
+}
+
+static void WriteActiveSourceFlag(bool bActiveSource)
+{
+  FILE* fp = fopen(CEC_ACTIVE_SOURCE_FLAG_FILE, "w");
+  if (fp)
+  {
+    fputs(bActiveSource ? "1\n" : "0\n", fp);
+    fclose(fp);
+  }
+}
+
 CPeripheralCecAdapter::CPeripheralCecAdapter(CPeripherals& manager,
                                              const PeripheralScanResult& scanResult,
                                              CPeripheralBus* bus)
@@ -74,10 +109,30 @@ CPeripheralCecAdapter::CPeripheralCecAdapter(CPeripherals& manager,
   ResetMembers();
   m_features.push_back(FEATURE_CEC);
   m_strComPort = scanResult.m_strLocation;
+
+  try
+  {
+    CServiceBroker::GetAppComponents()
+        .GetComponent<CApplicationActionListeners>()
+        ->RegisterActionListener(this);
+  }
+  catch (const std::logic_error&)
+  {
+  }
 }
 
 CPeripheralCecAdapter::~CPeripheralCecAdapter(void)
 {
+  try
+  {
+    CServiceBroker::GetAppComponents()
+        .GetComponent<CApplicationActionListeners>()
+        ->UnregisterActionListener(this);
+  }
+  catch (const std::logic_error&)
+  {
+  }
+
   {
     std::lock_guard lock(m_critSection);
 
@@ -92,6 +147,38 @@ CPeripheralCecAdapter::~CPeripheralCecAdapter(void)
   {
     CECDestroy(m_cecAdapter);
     m_cecAdapter = nullptr;
+  }
+}
+
+void CPeripheralCecAdapter::OnActionPre(const CAction& action)
+{
+  const int id = action.GetID();
+  if (id == ACTION_NONE || id == ACTION_MOUSE_MOVE || id == ACTION_ANALOG_MOVE ||
+      id == ACTION_MOUSE_DRAG || id == ACTION_MOUSE_WHEEL_UP || id == ACTION_MOUSE_WHEEL_DOWN)
+    return;
+
+  const auto now = std::chrono::steady_clock::now();
+  if (now - m_lastActionPreCheckTime < std::chrono::milliseconds(1000))
+    return;
+  m_lastActionPreCheckTime = now;
+
+  if (!GetSettingBool("activate_source") || !GetSettingBool("activate_on_activity"))
+    return;
+
+  if (!m_cecAdapter || IsActiveSourceFromFlag(m_cecAdapter, false))
+    return;
+
+  const auto appPower =
+      CServiceBroker::GetAppComponents().GetComponent<CApplicationPowerHandling>();
+  if (appPower && appPower->IsInScreenSaver())
+    return;
+
+  if (now - m_lastCecKeypressTime > std::chrono::milliseconds(1000) &&
+      now - m_lastSourceDeactivatedTime > std::chrono::seconds(5) &&
+      now - m_lastActivateSourceTime >= std::chrono::seconds(5))
+  {
+    m_lastActivateSourceTime = now;
+    ActivateSource();
   }
 }
 
@@ -118,6 +205,8 @@ void CPeripheralCecAdapter::ResetMembers(void)
   m_bDeviceRemoved = false;
   m_bActiveSourcePending = false;
   m_bStandbyPending = false;
+  m_bExplicitStandbyPending = false;
+  m_bInactiveViewPending = false;
   m_bActiveSourceBeforeStandby = false;
   m_bOnPlayReceived = false;
   m_bPlaybackPaused = false;
@@ -133,6 +222,7 @@ void CPeripheralCecAdapter::ResetMembers(void)
   m_currentButton.iDuration = 0;
   m_standbySent.SetValid(false);
   m_ScreensaverStandbySent.SetValid(false);
+  m_tvStandbyReceived.SetValid(false);
   m_configuration.Clear();
 }
 
@@ -144,18 +234,30 @@ void CPeripheralCecAdapter::Announce(ANNOUNCEMENT::AnnouncementFlag flag,
   if (flag == ANNOUNCEMENT::System && sender == CAnnouncementManager::ANNOUNCEMENT_SENDER &&
       message == "OnQuit" && m_bIsReady)
   {
-    std::lock_guard lock(m_critSection);
+    int iExitCode;
+    {
+      std::lock_guard lock(m_critSection);
 
-    m_iExitCode = static_cast<int>(data["exitcode"].asInteger(EXITCODE_QUIT));
-    CServiceBroker::GetAnnouncementManager()->RemoveAnnouncer(this);
-    StopThread(false);
+      m_iExitCode = static_cast<int>(data["exitcode"].asInteger(EXITCODE_QUIT));
+      iExitCode = m_iExitCode;
+      CServiceBroker::GetAnnouncementManager()->RemoveAnnouncer(this);
+    }
+
+    if (iExitCode == EXITCODE_POWERDOWN)
+      StopThread(true);
+    else
+      StopThread(false);
   }
   else if (flag == ANNOUNCEMENT::GUI && sender == CAnnouncementManager::ANNOUNCEMENT_SENDER &&
            message == "OnScreensaverDeactivated" && m_bIsReady)
   {
     bool bIgnoreDeactivate(false);
-    m_ScreensaverStandbySent.SetValid(false);
-    m_bStandbyPending = false;
+    {
+      std::lock_guard lock(m_critSection);
+      m_ScreensaverStandbySent.SetValid(false);
+      m_bStandbyPending = false;
+      m_bExplicitStandbyPending = false;
+    }
     if (data["shuttingdown"].isBoolean())
     {
       // don't respond to the deactivation if we are just going to suspend/shutdown anyway
@@ -237,13 +339,12 @@ void CPeripheralCecAdapter::Announce(ANNOUNCEMENT::AnnouncementFlag flag,
       std::lock_guard lock(m_critSection);
 
       bActivateSource = (m_configuration.bActivateSource && !m_bOnPlayReceived &&
-                         !m_cecAdapter->IsLibCECActiveSource() &&
                          (!m_preventActivateSourceOnPlay.IsValid() ||
                           CDateTime::GetCurrentDateTime() - m_preventActivateSourceOnPlay >
                               CDateTimeSpan(0, 0, 0, CEC_SUPPRESS_ACTIVATE_SOURCE_AFTER_ON_STOP)));
       m_bOnPlayReceived = true;
     }
-    if (bActivateSource)
+    if (bActivateSource && !IsActiveSourceFromFlag(m_cecAdapter, false))
       ActivateSource();
   }
 }
@@ -400,6 +501,9 @@ void CPeripheralCecAdapter::Process(void)
 
     if (!m_bStop)
       ProcessStandbyDevices();
+
+    if (!m_bStop)
+      ProcessInactiveView();
 
     if (!m_bStop)
       CThread::Sleep(5ms);
@@ -612,6 +716,8 @@ void CPeripheralCecAdapter::SetMenuLanguage(const char* strLanguage) const {
 }
 
 void CPeripheralCecAdapter::OnTvStandby(void) const {
+  CServiceBroker::GetAnnouncementManager()->Announce(ANNOUNCEMENT::Other, "OnTVStandby");
+
   int iActionOnTvStandby = GetSettingInt("standby_pc_on_tv_standby");
   switch (iActionOnTvStandby)
   {
@@ -657,11 +763,21 @@ void CPeripheralCecAdapter::CecCommand(void* cbParam, const cec_command* command
     switch (command->opcode)
     {
       case CEC_OPCODE_STANDBY:
-        if (command->initiator == CECDEVICE_TV &&
+        if ((command->initiator == CECDEVICE_TV ||
+             command->destination == CECDEVICE_TV ||
+             command->destination == CECDEVICE_BROADCAST) &&
             (!adapter->m_standbySent.IsValid() ||
              CDateTime::GetCurrentDateTime() - adapter->m_standbySent >
                  CDateTimeSpan(0, 0, 0, SCREENSAVER_TIMEOUT)))
         {
+          {
+            std::lock_guard lock(adapter->m_critSection);
+            adapter->m_tvStandbyReceived = CDateTime::GetCurrentDateTime();
+            if (adapter->m_bSendInactiveSource)
+              adapter->m_bInactiveViewPending = true;
+          }
+          if (adapter->m_bSendInactiveSource)
+            logM(LOGDEBUG, "pending inactive source command because TV initiated standby");
           adapter->OnTvStandby();
         }
         break;
@@ -801,6 +917,8 @@ void CPeripheralCecAdapter::PushCecKeypress(const CecButtonPress& key)
 {
   CLog::Log(LOGDEBUG, "{} - received key {:2x} duration {}", __FUNCTION__, key.iButton,
             key.iDuration);
+
+  m_lastCecKeypressTime = std::chrono::steady_clock::now();
 
   std::lock_guard lock(m_critSection);
 
@@ -1160,6 +1278,13 @@ void CPeripheralCecAdapter::OnSettingChanged(const std::string& strChangedSettin
     if (!bEnabled && IsRunning())
     {
       CLog::Log(LOGDEBUG, "{} - closing the CEC connection", __FUNCTION__);
+      if (m_cecAdapter)
+      {
+        CEC::libcec_configuration config = m_configuration;
+        config.bPowerOffOnStandby = 0;
+        config.powerOffDevices.Clear();
+        m_cecAdapter->SetConfiguration(&config);
+      }
       SetConfigurationFromSettings();
       StopThread(true);
     }
@@ -1172,12 +1297,10 @@ void CPeripheralCecAdapter::OnSettingChanged(const std::string& strChangedSettin
   }
   else if (StringUtils::StartsWithNoCase(strChangedSetting, "wakeup_"))
   {
-    m_iCec_func_config &= ~(1 << AUTO_POWER_ON_MASK);
-    m_iCec_func_config |= ((int)GetSettingBool("wakeup_cec_auto_power") << AUTO_POWER_ON_MASK);
-    m_iCec_func_config &= ~(1 << STREAMPATH_POWER_ON_MASK);
-    m_iCec_func_config |= ((int)GetSettingBool("wakeup_cec_streaming") << STREAMPATH_POWER_ON_MASK);
-    m_iCec_func_config &= ~(1 << ACTIVE_SOURCE_MASK);
-    m_iCec_func_config |= ((int)GetSettingBool("wakeup_cec_active_route") << ACTIVE_SOURCE_MASK);
+    if (!m_bFuncConfigLoaded)
+      LoadCecFuncConfig();
+
+    SetWakeupBitsFromSettings();
 
     auto config_ini = new XBMCAddon::xbmcvfs::configini();
     config_ini->set("cec_func_config", StringUtils::Format("{:x}", m_iCec_func_config));
@@ -1219,6 +1342,19 @@ void CPeripheralCecAdapter::CecSourceActivated(void* cbParam,
   auto adapter = static_cast<CPeripheralCecAdapter*>(cbParam);
   if (!adapter)
     return;
+
+  if (adapter->m_cecAdapter)
+    WriteActiveSourceFlag(adapter->m_cecAdapter->IsLibCECActiveSource());
+
+  if (activated == 0 &&
+      adapter->GetSettingInt("pause_or_stop_playback_on_deactivate") != LOCALISED_ID_NONE)
+  {
+    std::lock_guard lock(adapter->m_critSection);
+    adapter->m_bOnPlayReceived = false;
+  }
+
+  CServiceBroker::GetAnnouncementManager()->Announce(
+      ANNOUNCEMENT::Other, activated == 1 ? "OnCECSourceActivated" : "OnCECSourceDeactivated");
 
   // wake up the screensaver, so the user doesn't switch to a black screen
   if (activated == 1)
@@ -1349,6 +1485,37 @@ void CPeripheralCecAdapter::SetConfigurationFromLibCEC(const CEC::libcec_configu
     CLog::Log(LOGDEBUG, "SetConfigurationFromLibCEC - settings updated by libCEC");
 }
 
+void CPeripheralCecAdapter::SetWakeupBitsFromSettings(void)
+{
+  m_iCec_func_config &= ~(1 << AUTO_POWER_ON_MASK);
+  m_iCec_func_config |= ((int)GetSettingBool("wakeup_cec_auto_power") << AUTO_POWER_ON_MASK);
+  m_iCec_func_config &= ~(1 << STREAMPATH_POWER_ON_MASK);
+  m_iCec_func_config |= ((int)GetSettingBool("wakeup_cec_streaming") << STREAMPATH_POWER_ON_MASK);
+  m_iCec_func_config &= ~(1 << ACTIVE_SOURCE_MASK);
+  m_iCec_func_config |= ((int)GetSettingBool("wakeup_cec_active_route") << ACTIVE_SOURCE_MASK);
+}
+
+bool CPeripheralCecAdapter::LoadCecFuncConfig(void)
+{
+  auto config_ini = new XBMCAddon::xbmcvfs::configini();
+  std::string cec_func_config = config_ini->get("cec_func_config");
+  delete(config_ini);
+
+  bool bHasEntry = !cec_func_config.empty();
+  if (bHasEntry)
+  {
+    m_iCec_func_config = std::stoul(cec_func_config, nullptr, 16);
+  }
+  else
+  {
+    m_iCec_func_config = CEC_FUNC_CONFIG_BASE;
+    SetWakeupBitsFromSettings();
+  }
+
+  m_bFuncConfigLoaded = true;
+  return bHasEntry;
+}
+
 void CPeripheralCecAdapter::SetConfigurationFromSettings(void)
 {
   // client version matches the version of libCEC that we originally used the API from
@@ -1440,9 +1607,9 @@ void CPeripheralCecAdapter::SetConfigurationFromSettings(void)
     SetSetting("pause_playback_on_deactivate", false);
   }
 
+  bool bHasFuncConfig = LoadCecFuncConfig();
+
   auto config_ini = new XBMCAddon::xbmcvfs::configini();
-  std::string cec_func_config = config_ini->get("cec_func_config", "7f");
-  m_iCec_func_config = std::stoul(cec_func_config, nullptr, 16);
 
   if (GetSettingBool("enabled") != ((m_iCec_func_config >> CEC_FUNC_MASK) & 0x1))
   {
@@ -1454,9 +1621,12 @@ void CPeripheralCecAdapter::SetConfigurationFromSettings(void)
 
   delete(config_ini);
 
-  SetSetting("wakeup_cec_auto_power", (bool)((m_iCec_func_config >> AUTO_POWER_ON_MASK) & 0x1));
-  SetSetting("wakeup_cec_streaming", (bool)((m_iCec_func_config >> STREAMPATH_POWER_ON_MASK) & 0x1));
-  SetSetting("wakeup_cec_active_route", (bool)((m_iCec_func_config >> ACTIVE_SOURCE_MASK) & 0x1));
+  if (bHasFuncConfig)
+  {
+    SetSetting("wakeup_cec_auto_power", (bool)((m_iCec_func_config >> AUTO_POWER_ON_MASK) & 0x1));
+    SetSetting("wakeup_cec_streaming", (bool)((m_iCec_func_config >> STREAMPATH_POWER_ON_MASK) & 0x1));
+    SetSetting("wakeup_cec_active_route", (bool)((m_iCec_func_config >> ACTIVE_SOURCE_MASK) & 0x1));
+  }
 }
 
 void CPeripheralCecAdapter::ReadLogicalAddresses(const std::string& strString,
@@ -1633,17 +1803,35 @@ std::string CPeripheralCecAdapterUpdateThread::UpdateAudioSystemStatus(void) con
 
 bool CPeripheralCecAdapterUpdateThread::SetInitialConfiguration(void)
 {
+  bool bStealFocus = true;
+  FILE* fp = fopen(CEC_ACTIVE_SOURCE_FLAG_FILE, "r");
+  if (fp)
+  {
+    char buf[2] = {0};
+    if (fread(buf, 1, 1, fp) == 1 && buf[0] == '0')
+      bStealFocus = false;
+    fclose(fp);
+  }
+
+  bool bIsActiveSource = false;
+
   // the option to make XBMC the active source is set
-  if (m_configuration.bActivateSource == 1)
+  if (m_configuration.bActivateSource == 1 && bStealFocus)
+  {
     m_adapter->m_cecAdapter->SetActiveSource();
+    bIsActiveSource = true;
+  }
 
   // devices to wake are set
   cec_logical_addresses tvOnly;
   tvOnly.Clear();
   tvOnly.Set(CECDEVICE_TV);
   if (!m_configuration.wakeDevices.IsEmpty() &&
-      (m_configuration.wakeDevices != tvOnly || m_configuration.bActivateSource == 0))
+      (m_configuration.wakeDevices != tvOnly || m_configuration.bActivateSource == 0) &&
+      bStealFocus)
     m_adapter->m_cecAdapter->PowerOnDevices(CECDEVICE_BROADCAST);
+
+  WriteActiveSourceFlag(bIsActiveSource);
 
   // wait until devices are powered up
   if (!WaitReady())
@@ -1796,10 +1984,40 @@ void CPeripheralCecAdapter::ProcessActivateSource(void)
 
     bActivate = m_bActiveSourcePending;
     m_bActiveSourcePending = false;
+
+    const CDateTime now = CDateTime::GetCurrentDateTime();
+    if (m_bStandbyPending ||
+        (m_standbySent.IsValid() &&
+         now - m_standbySent < CDateTimeSpan(0, 0, 0, STANDBY_WAKE_COOLDOWN)) ||
+        (m_tvStandbyReceived.IsValid() &&
+         now - m_tvStandbyReceived < CDateTimeSpan(0, 0, 0, STANDBY_WAKE_COOLDOWN)))
+    {
+      if (bActivate)
+        logM(LOGDEBUG, "swallowing pending ActivateSource due to pending or recent standby");
+      bActivate = false;
+    }
   }
 
-  if (bActivate)
+  if (bActivate && m_cecAdapter && !m_cecAdapter->IsLibCECActiveSource())
     m_cecAdapter->SetActiveSource();
+}
+
+void CPeripheralCecAdapter::ProcessInactiveView(void)
+{
+  bool bInactiveView(false);
+
+  {
+    std::lock_guard lock(m_critSection);
+    bInactiveView = m_bInactiveViewPending;
+    m_bInactiveViewPending = false;
+  }
+
+  if (bInactiveView && m_cecAdapter)
+  {
+    logM(LOGDEBUG, "sending inactive source command");
+    m_cecAdapter->SetInactiveView();
+    m_lastSourceDeactivatedTime = std::chrono::steady_clock::now();
+  }
 }
 
 void CPeripheralCecAdapter::UnregisterDevice(void)
@@ -1809,7 +2027,9 @@ void CPeripheralCecAdapter::UnregisterDevice(void)
     || m_bDeviceRemoved)
       return;
 
-  bool bActiveSource = m_cecAdapter->IsLibCECActiveSource();
+  bool bActiveSource = IsActiveSourceFromFlag(m_cecAdapter);
+  if (!bActiveSource)
+    bActiveSource = m_cecAdapter->IsLibCECActiveSource();
 
   if (m_bGoingToStandby)
     m_bActiveSourceBeforeStandby = bActiveSource;
@@ -1827,6 +2047,7 @@ void CPeripheralCecAdapter::UnregisterDevice(void)
     {
       CLog::Log(LOGDEBUG, "{} - sending inactive source commands", __FUNCTION__);
       m_cecAdapter->SetInactiveView();
+      m_lastSourceDeactivatedTime = std::chrono::steady_clock::now();
     }
   }
   else
@@ -1835,20 +2056,29 @@ void CPeripheralCecAdapter::UnregisterDevice(void)
   }
 }
 
-void CPeripheralCecAdapter::StandbyDevices(void)
+void CPeripheralCecAdapter::StandbyDevices(bool bBypassTimer)
 {
   std::lock_guard lock(m_critSection);
 
   m_bStandbyPending = true;
-  m_ScreensaverStandbySent = CDateTime::GetCurrentDateTime();
+  if (bBypassTimer)
+    m_ScreensaverStandbySent.SetValid(false);
+  else if (!m_bExplicitStandbyPending)
+    m_ScreensaverStandbySent = CDateTime::GetCurrentDateTime();
 }
 
 void CPeripheralCecAdapter::ProcessStandbyDevices(void)
 {
-  std::lock_guard lock(m_critSection);
-  
-  if (m_bStandbyPending)
+  bool bExplicitStandby(false);
+  bool bSendInactiveSource(false);
+  bool bHasPowerOffDevices(false);
+
   {
+    std::lock_guard lock(m_critSection);
+
+    if (!m_bStandbyPending)
+      return;
+
     int iScreensaverDelay = GetSettingInt("screensaver_delay_standby");
 
     if ((iScreensaverDelay > 0) && m_ScreensaverStandbySent.IsValid())
@@ -1857,21 +2087,69 @@ void CPeripheralCecAdapter::ProcessStandbyDevices(void)
 
     m_bStandbyPending = false;
     m_ScreensaverStandbySent.SetValid(false);
+    bExplicitStandby = m_bExplicitStandbyPending;
+    m_bExplicitStandbyPending = false;
+    bSendInactiveSource = (m_bSendInactiveSource == 1);
+    bHasPowerOffDevices = !m_configuration.powerOffDevices.IsEmpty();
+  }
 
-    if (!m_cecAdapter->IsLibCECActiveSource())
-      return;
+  if (!bExplicitStandby && !IsActiveSourceFromFlag(m_cecAdapter) &&
+      !m_cecAdapter->IsLibCECActiveSource())
+    return;
 
+  {
+    std::lock_guard lock(m_critSection);
     m_bGoingToStandby = true;
+  }
 
-    if (!m_configuration.powerOffDevices.IsEmpty())
+  if (bHasPowerOffDevices)
+  {
     {
+      std::lock_guard lock(m_critSection);
       m_standbySent = CDateTime::GetCurrentDateTime();
-      m_cecAdapter->StandbyDevices(CECDEVICE_BROADCAST);
     }
-    else if (m_bSendInactiveSource == 1)
+    m_cecAdapter->StandbyDevices(CECDEVICE_BROADCAST);
+  }
+  if (bSendInactiveSource)
+  {
+    CLog::Log(LOGDEBUG, "{} - sending inactive source commands", __FUNCTION__);
+    m_cecAdapter->SetInactiveView();
+    std::lock_guard lock(m_critSection);
+    m_lastSourceDeactivatedTime = std::chrono::steady_clock::now();
+  }
+
+  if (bExplicitStandby)
+  {
+    switch (GetSettingInt("action_on_explicit_standby"))
     {
-      CLog::Log(LOGDEBUG, "{} - sending inactive source commands", __FUNCTION__);
-      m_cecAdapter->SetInactiveView();
+      case LOCALISED_ID_POWEROFF:
+        CServiceBroker::GetAppMessenger()->PostMsg(TMSG_SYSTEM_POWERDOWN, TMSG_SHUTDOWN);
+        break;
+      case LOCALISED_ID_SUSPEND:
+        CServiceBroker::GetAppMessenger()->PostMsg(TMSG_SYSTEM_POWERDOWN, TMSG_SUSPEND);
+        break;
+      case LOCALISED_ID_HIBERNATE:
+        CServiceBroker::GetAppMessenger()->PostMsg(TMSG_SYSTEM_POWERDOWN, TMSG_HIBERNATE);
+        break;
+      case LOCALISED_ID_QUIT:
+        CServiceBroker::GetAppMessenger()->PostMsg(TMSG_QUIT);
+        break;
+      case LOCALISED_ID_PAUSE:
+        CServiceBroker::GetAppMessenger()->PostMsg(TMSG_MEDIA_PAUSE_IF_PLAYING);
+        break;
+      case LOCALISED_ID_STOP:
+      {
+        const auto& components = CServiceBroker::GetAppComponents();
+        const auto appPlayer = components.GetComponent<CApplicationPlayer>();
+        if (appPlayer->IsPlaying())
+          CServiceBroker::GetAppMessenger()->PostMsg(TMSG_MEDIA_STOP);
+        break;
+      }
+      case LOCALISED_ID_IGNORE:
+        break;
+      default:
+        logM(LOGERROR, "unexpected [action_on_explicit_standby] setting value");
+        break;
     }
   }
 }
@@ -1881,11 +2159,26 @@ bool CPeripheralCecAdapter::ToggleDeviceState(CecStateChange mode /*= STATE_SWIT
 {
   if (!IsRunning())
     return false;
-  if (m_cecAdapter->IsLibCECActiveSource() &&
-      (mode == STATE_SWITCH_TOGGLE || mode == STATE_STANDBY))
+
+  if (mode == STATE_STANDBY)
   {
     CLog::Log(LOGDEBUG, "{} - putting CEC device on standby...", __FUNCTION__);
-    StandbyDevices();
+    {
+      std::lock_guard lock(m_critSection);
+      m_bExplicitStandbyPending = true;
+    }
+    StandbyDevices(true);
+    return false;
+  }
+
+  if (IsActiveSourceFromFlag(m_cecAdapter) && mode == STATE_SWITCH_TOGGLE)
+  {
+    CLog::Log(LOGDEBUG, "{} - putting CEC device on standby...", __FUNCTION__);
+    {
+      std::lock_guard lock(m_critSection);
+      m_bExplicitStandbyPending = true;
+    }
+    StandbyDevices(true);
     return false;
   }
   else if (mode == STATE_SWITCH_TOGGLE || mode == STATE_ACTIVATE_SOURCE)

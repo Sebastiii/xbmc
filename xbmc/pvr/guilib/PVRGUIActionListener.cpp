@@ -16,6 +16,7 @@
 #include "dialogs/GUIDialogNumeric.h"
 #include "guilib/GUIComponent.h"
 #include "guilib/GUIWindowManager.h"
+#include "guilib/LocalizeStrings.h"
 #include "guilib/WindowIDs.h"
 #include "input/actions/Action.h"
 #include "input/actions/ActionIDs.h"
@@ -54,7 +55,8 @@ CPVRGUIActionListener::CPVRGUIActionListener()
        CSettings::SETTING_PVRMANAGER_CLIENTPRIORITIES, CSettings::SETTING_PVRMANAGER_CHANNELMANAGER,
        CSettings::SETTING_PVRMANAGER_GROUPMANAGER, CSettings::SETTING_PVRMANAGER_CHANNELSCAN,
        CSettings::SETTING_PVRMENU_SEARCHICONS, CSettings::SETTING_PVRCLIENT_MENUHOOK,
-       CSettings::SETTING_EPG_PAST_DAYSTODISPLAY, CSettings::SETTING_EPG_FUTURE_DAYSTODISPLAY});
+       CSettings::SETTING_EPG_PAST_DAYSTODISPLAY, CSettings::SETTING_EPG_FUTURE_DAYSTODISPLAY,
+       CSettings::SETTING_PVRPOWERMANAGEMENT_DAILYWAKEUPTIME});
 }
 
 CPVRGUIActionListener::~CPVRGUIActionListener()
@@ -414,6 +416,15 @@ void CPVRGUIActionListener::OnSettingAction(const std::shared_ptr<const CSetting
     const std::vector<std::string> params{"addons://default_binary_addons_source/kodi.pvrclient",
                                           "return"};
     CServiceBroker::GetGUI()->GetWindowManager().ActivateWindow(WINDOW_ADDON_BROWSER, params);
+  }
+  else if (settingId == CSettings::SETTING_PVRPOWERMANAGEMENT_DAILYWAKEUPTIME)
+  {
+    const auto settings{CServiceBroker::GetSettingsComponent()->GetSettings()};
+    std::string waketime{settings->GetString(settingId)};
+    if (CGUIDialogNumeric::ShowAndGetSeconds(waketime, g_localizeStrings.Get(19248), TIME_FORMAT_HH_MM_SS))
+    {
+      settings->SetString(settingId, waketime);
+    }
   }
 }
 

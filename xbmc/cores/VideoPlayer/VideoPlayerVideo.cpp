@@ -7,19 +7,23 @@
  */
 
 #include "VideoPlayerVideo.h"
+#include "cores/VideoPlayer/BDStageTrace.h"
 
 #include "DVDCodecs/DVDCodecUtils.h"
 #include "DVDCodecs/DVDFactoryCodec.h"
 #include "DVDCodecs/Overlay/DVDOverlay.h"
 #include "DVDCodecs/Video/DVDVideoCodecFFmpeg.h"
 #include "ServiceBroker.h"
+#include "cores/DataCacheCore.h"
 #include "cores/VideoPlayer/DVDCodecs/Overlay/DVDOverlayLibass.h"
 #include "cores/VideoPlayer/Interface/DemuxPacket.h"
 #include "cores/VideoPlayer/Interface/TimingConstants.h"
 #include "settings/AdvancedSettings.h"
+#include "settings/Settings.h"
 #include "settings/SettingsComponent.h"
 #include "utils/MathUtils.h"
 #include "utils/log.h"
+#include "utils/LogThrottle.h"
 #include "windowing/GraphicContext.h"
 #include "windowing/WinSystem.h"
 
@@ -32,8 +36,32 @@
 #include <numeric>
 #include <sstream>
 #include <chrono>
+#include <string_view>
 
 using namespace std::chrono_literals;
+
+namespace
+{
+struct ScopedAtomicTrue
+{
+  std::atomic_bool& flag;
+  explicit ScopedAtomicTrue(std::atomic_bool& f) : flag(f) { flag.store(true); }
+  ~ScopedAtomicTrue() { flag.store(false); }
+  ScopedAtomicTrue(const ScopedAtomicTrue&) = delete;
+  ScopedAtomicTrue& operator=(const ScopedAtomicTrue&) = delete;
+};
+
+bool aml_keep_prog_film_enabled()
+{
+  const auto settingsComponent = CServiceBroker::GetSettingsComponent();
+  if (!settingsComponent)
+    return false;
+  const auto settings = settingsComponent->GetSettings();
+  if (!settings)
+    return false;
+  return settings->GetBool(CSettings::SETTING_VIDEOPLAYER_AMLMPEG2KEEPPROG);
+}
+}
 
 class CDVDMsgVideoCodecChange : public CDVDMsg
 {
@@ -68,7 +96,7 @@ CVideoPlayerVideo::CVideoPlayerVideo(
   m_bRenderSubs = false;
   m_paused = false;
   m_syncState = IDVDStreamPlayer::SYNC_STARTING;
-  m_iSubtitleDelay = 0;
+  m_iSubtitleDelay.store(0.0, std::memory_order_relaxed);
   m_iLateFrames = 0;
   m_iDroppedRequest = 0;
   m_fForcedAspectRatio = 0;
@@ -85,6 +113,11 @@ CVideoPlayerVideo::CVideoPlayerVideo(
   m_iFrameRateErr = 0;
   m_iFrameRateLength = 0;
   m_bFpsInvalid = false;
+  m_telecineProbe = 0;
+  m_telecine = false;
+  m_halvedFieldRate = 0.0;
+  m_telecineTwoFieldPackets = 0;
+  m_telecineProbeStart = std::chrono::steady_clock::now();
 }
 
 CVideoPlayerVideo::~CVideoPlayerVideo()
@@ -124,7 +157,7 @@ bool CVideoPlayerVideo::OpenStream(CDVDStreamInfo hint)
         hint.codec == AV_CODEC_ID_WMV3 ||
         hint.codec == AV_CODEC_ID_VC1)
     {
-      CLog::LogF(LOGERROR, "Codec id {} require extradata.", hint.codec);
+      logComponentM(LOGDEBUG, LOGVIDEO, "Codec id {} require extradata.", hint.codec);
       return false;
     }
     // clang-format on
@@ -141,7 +174,11 @@ bool CVideoPlayerVideo::OpenStream(CDVDStreamInfo hint)
     std::unique_ptr<CDVDVideoCodec> codec = CDVDFactoryCodec::CreateVideoCodec(hint, m_processInfo);
 
     if (!codec)
+    {
       CLog::Log(LOGDEBUG, "CVideoPlayerVideo::OpenStream - could not open video codec");
+      if (!m_pVideoCodec)
+        m_processInfo.ResetVideoCodecInfo();
+    }
 
     SendMessage(std::make_shared<CDVDMsgVideoCodecChange>(hint, std::move(codec)), 0);
   }
@@ -157,6 +194,8 @@ bool CVideoPlayerVideo::OpenStream(CDVDStreamInfo hint)
       return false;
     }
 
+    if (!hint.stereo_mode.empty() && hint.stereo_mode != "mono")
+      m_processInfo.SetVideoStereoMode(hint.stereo_mode);
     OpenStream(hint, std::move(codec));
 
     CLog::Log(LOGDEBUG, "Creating video thread");
@@ -182,14 +221,15 @@ void CVideoPlayerVideo::OpenStream(CDVDStreamInfo& hint, std::unique_ptr<CDVDVid
 
     m_bFpsInvalid = false;
 
+    const bool isVC1 = (hint.codec == AV_CODEC_ID_VC1 || hint.codec == AV_CODEC_ID_WMV3);
     if (hint.codecOptions & CODEC_UNKNOWN_I_P)
     {
-      if (MathUtils::FloatEquals(static_cast<float>(m_fFrameRate), 25.0f, 0.01f))
+      if (!isVC1 && MathUtils::FloatEquals(static_cast<float>(m_fFrameRate), 25.0f, 0.01f))
       {
         m_fFrameRate = 50.0;
         m_processInfo.SetVideoInterlaced(true);
       }
-      else if (MathUtils::FloatEquals(static_cast<float>(m_fFrameRate), 29.97f, 0.01f))
+      else if (!isVC1 && MathUtils::FloatEquals(static_cast<float>(m_fFrameRate), 29.97f, 0.01f))
       {
         m_fFrameRate = 60000.0 / 1001.0;
         m_processInfo.SetVideoInterlaced(true);
@@ -199,6 +239,12 @@ void CVideoPlayerVideo::OpenStream(CDVDStreamInfo& hint, std::unique_ptr<CDVDVid
     }
     else
       m_processInfo.SetVideoInterlaced((hint.codecOptions & CODEC_INTERLACED) == CODEC_INTERLACED);
+
+    if (isVC1)
+      logComponentM(LOGDEBUG, LOGVIDEO,
+        "CVideoPlayerVideo::OpenStream VC1 codecOptions=0x{:02x} m_fFrameRate={:.3f} "
+        "(doubling skipped for VC1; codec FrameRateTracking will confirm scan type)",
+        hint.codecOptions, m_fFrameRate);
 
     m_retryProgressive = 0;
     m_processInfo.SetVideoFps(static_cast<float>(m_fFrameRate));
@@ -243,7 +289,7 @@ void CVideoPlayerVideo::OpenStream(CDVDStreamInfo& hint, std::unique_ptr<CDVDVid
 
   if (!codec)
   {
-    CLog::Log(LOGINFO, "CVideoPlayerVideo::OpenStream - Creating video codec with codec id: {:d} fps:{:d}/{:d} options:{:02x}",
+    CLog::Log(LOGDEBUG, "CVideoPlayerVideo::OpenStream - Creating video codec with codec id: {:d} fps:{:d}/{:d} options:{:02x}",
       hint.codec, hint.fpsrate, hint.fpsscale, hint.codecOptions);
     hint.pClock = m_pClock;
     hint.codecOptions |= CODEC_ALLOW_FALLBACK;
@@ -258,6 +304,20 @@ void CVideoPlayerVideo::OpenStream(CDVDStreamInfo& hint, std::unique_ptr<CDVDVid
 
   m_pVideoCodec = std::move(codec);
   m_hints = hint;
+  m_telecineProbe = 0;
+  m_telecine = false;
+  m_halvedFieldRate = 0.0;
+  m_telecineTwoFieldPackets = 0;
+  const bool mpegFieldRate =
+      (hint.codec == AV_CODEC_ID_MPEG1VIDEO || hint.codec == AV_CODEC_ID_MPEG2VIDEO) &&
+      (hint.codecOptions & CODEC_INTERLACED) &&
+      m_fFrameRate > 55.0 && m_fFrameRate < 61.0;
+  if (mpegFieldRate &&
+      (!m_processInfo.IsVideoHwDecoder() || aml_keep_prog_film_enabled()))
+  {
+    m_telecineProbe = 6;
+    m_telecineProbeStart = std::chrono::steady_clock::now();
+  }
   m_stalled = m_messageQueue.GetPacketCount(CDVDMsg::DEMUXER_PACKET) == 0;
   m_playbackStalled = false;
   m_isEOS = false;
@@ -268,6 +328,8 @@ void CVideoPlayerVideo::OpenStream(CDVDStreamInfo& hint, std::unique_ptr<CDVDVid
 
 void CVideoPlayerVideo::CloseStream(bool bWaitForBuffers)
 {
+  m_renderManager.SetDeinterlaceDelay(0);
+
   // wait until buffers are empty
   if (bWaitForBuffers && m_speed > 0)
   {
@@ -318,6 +380,8 @@ bool CVideoPlayerVideo::IsEOS()
 
 inline void CVideoPlayerVideo::SendMessage(std::shared_ptr<CDVDMsg> pMsg, int priority)
 {
+  if (!m_messageQueue.IsInited())
+    return;
   m_messageQueue.Put(pMsg, priority);
 }
 
@@ -341,7 +405,7 @@ inline MsgQueueReturnCode CVideoPlayerVideo::GetMessage(std::shared_ptr<CDVDMsg>
 
 void CVideoPlayerVideo::Process()
 {
-  CLog::Log(LOGDEBUG, "running thread: video_thread");
+  logComponentM(LOGDEBUG, LOGVIDEO, "running thread: video_thread");
 
   double pts = 0;
   double frametime = (double)DVD_TIME_BASE / m_fFrameRate;
@@ -350,10 +414,11 @@ void CVideoPlayerVideo::Process()
   int iDropDirective;
   bool onlyPrioMsgs = false;
 
-  std::string vfmt;
+  m_vfmt.clear();
   int vfmtCheckCount = 0;
 
   m_picture.Reset();
+  m_swBlockResetPending = true;
   m_videoStats.Start();
   m_droppingStats.Reset();
   m_iDroppedFrames = 0;
@@ -379,14 +444,32 @@ void CVideoPlayerVideo::Process()
     }
 
     std::shared_ptr<CDVDMsg> pMsg;
+    if (m_swBlockResetPending)
+    {
+      m_swBlockResetPending = false;
+      m_swBlockStamp = {};
+      m_swQWaitUs = 0;
+      m_swWaitUs = 0;
+      m_swAddUs = 0;
+      m_swBlockAgain = 0;
+      m_swBlockDropped = 0;
+      m_swVqMin = -1;
+      m_swVqMax = -1;
+    }
+    const auto qEnter = m_swBlockArmed ? std::chrono::steady_clock::now()
+                                       : std::chrono::steady_clock::time_point{};
     MsgQueueReturnCode ret = GetMessage(pMsg, timeout, iPriority);
+    if (m_swBlockArmed)
+      m_swQWaitUs += std::chrono::duration_cast<std::chrono::microseconds>(
+                         std::chrono::steady_clock::now() - qEnter)
+                         .count();
 
     onlyPrioMsgs = false;
 
     if (MSGQ_IS_ERROR(ret))
     {
       if (!m_messageQueue.ReceivedAbortRequest())
-        CLog::Log(LOGERROR, "MSGQ_IS_ERROR returned true ({})", ret);
+        logM(LOGERROR, "MSGQ_IS_ERROR returned true ({})", ret);
 
       break;
     }
@@ -399,7 +482,7 @@ void CVideoPlayerVideo::Process()
         if (m_processInfo.IsVideoHwDecoder())
         {
           vfmtCheckCount = 16;
-          CLog::Log(LOGDEBUG, "CVideoPlayerVideo - OUTPUT_AGAIN - vfmt, interlace should be checked.");
+          LOG_THROTTLE_PERIODIC(LOGDEBUG, LOGVIDEO, 1000, "CVideoPlayerVideo - OUTPUT_AGAIN - vfmt, interlace should be checked.");
         }
         if (m_outputSate == OUTPUT_AGAIN)
         {
@@ -424,8 +507,11 @@ void CVideoPlayerVideo::Process()
       if (iPriority)
         continue;
 
+      if (m_isEOS && !m_processInfo.GetInMenu())
+        continue;
+
       //Okey, start rendering at stream fps now instead, we are likely in a stillframe
-      if (!m_stalled)
+      if (!m_stalled && m_telecineProbe == 0)
       {
         // squeeze pictures out
         while (!m_bStop && m_pVideoCodec)
@@ -435,7 +521,7 @@ void CVideoPlayerVideo::Process()
             break;
         }
 
-        CLog::Log(LOGDEBUG, "CVideoPlayerVideo - Stillframe detected, switching to forced {:f} fps", m_fFrameRate);
+        logComponentM(LOGDEBUG, LOGVIDEO, "CVideoPlayerVideo - Stillframe detected, switching to forced {:f} fps", m_fFrameRate);
         m_stalled = true;
         pts += frametime * 4;
       }
@@ -454,7 +540,7 @@ void CVideoPlayerVideo::Process()
     if (pMsg->IsType(CDVDMsg::GENERAL_SYNCHRONIZE))
     {
       if (std::static_pointer_cast<CDVDMsgGeneralSynchronize>(pMsg)->Wait(100ms, SYNCSOURCE_VIDEO))
-        CLog::Log(LOGDEBUG, "CVideoPlayerVideo - CDVDMsg::GENERAL_SYNCHRONIZE");
+        logComponentM(LOGDEBUG, LOGVIDEO, "CVideoPlayerVideo - CDVDMsg::GENERAL_SYNCHRONIZE");
       else
         SendMessage(pMsg, 1); /* push back as prio message, to process other prio messages */
 
@@ -469,22 +555,38 @@ void CVideoPlayerVideo::Process()
       m_playbackStalled = false;
       m_renderManager.ShowVideo(true);
 
-      CLog::Log(LOGDEBUG, "CVideoPlayerVideo - CDVDMsg::GENERAL_RESYNC({:f})", pts);
+      logComponentM(LOGDEBUG, LOGVIDEO, "CVideoPlayerVideo - CDVDMsg::GENERAL_RESYNC({:f})", pts);
       if (m_processInfo.IsVideoHwDecoder())
       {
         vfmtCheckCount = 16;
-        CLog::Log(LOGDEBUG, "CVideoPlayerVideo - OUTPUT_AGAIN - vfmt, interlace should be checked.");
+        logComponentM(LOGDEBUG, LOGVIDEO, "CVideoPlayerVideo - OUTPUT_AGAIN - vfmt, interlace should be checked.");
       }
     }
     else if (pMsg->IsType(CDVDMsg::VIDEO_SET_ASPECT))
     {
-      CLog::Log(LOGDEBUG, "CVideoPlayerVideo - CDVDMsg::VIDEO_SET_ASPECT");
+      logComponentM(LOGDEBUG, LOGVIDEO, "CVideoPlayerVideo - CDVDMsg::VIDEO_SET_ASPECT");
       m_fForcedAspectRatio = static_cast<float>(*std::static_pointer_cast<CDVDMsgDouble>(pMsg));
     }
     else if (pMsg->IsType(CDVDMsg::GENERAL_RESET))
     {
+      m_swBlockResetPending = true;
       if(m_pVideoCodec)
         m_pVideoCodec->Reset();
+
+      if (m_telecineProbe > 0)
+        m_telecineProbeStart = std::chrono::steady_clock::now();
+
+      if (m_telecine && m_hints.fpsrate && m_hints.fpsscale &&
+          !m_processInfo.IsVideoHwDecoder())
+      {
+        m_telecine = false;
+        m_fFrameRate = DVD_TIME_BASE / CDVDCodecUtils::NormalizeFrameduration(
+                                           (double)DVD_TIME_BASE * m_hints.fpsscale / m_hints.fpsrate);
+        m_processInfo.SetVideoFps(static_cast<float>(m_fFrameRate));
+        m_telecineProbe = 6;
+        m_telecineTwoFieldPackets = 0;
+        m_telecineProbeStart = std::chrono::steady_clock::now();
+      }
 
       if (m_picture.videoBuffer)
       {
@@ -500,7 +602,9 @@ void CVideoPlayerVideo::Process()
     }
     else if (pMsg->IsType(CDVDMsg::GENERAL_FLUSH)) // private message sent by (CVideoPlayerVideo::Flush())
     {
+      m_swBlockResetPending = true;
       bool sync = std::static_pointer_cast<CDVDMsgBool>(pMsg)->m_value;
+      m_renderManager.PauseAsyncVideoLayerPoll();
       if(m_pVideoCodec)
         m_pVideoCodec->Reset();
 
@@ -529,6 +633,7 @@ void CVideoPlayerVideo::Process()
 
       m_renderManager.DiscardBuffer();
       FlushMessages();
+      m_messageQueue.Flush(CDVDMsg::VIDEO_DRAIN);
     }
     else if (pMsg->IsType(CDVDMsg::PLAYER_SETSPEED))
     {
@@ -543,6 +648,8 @@ void CVideoPlayerVideo::Process()
       auto msg = std::static_pointer_cast<CDVDMsgVideoCodecChange>(pMsg);
 
       m_isEOS = false;
+      if (m_telecineProbe > 0 && m_processInfo.IsVideoHwDecoder())
+        ResolveTelecineProbe(frametime, true);
       while (!m_bStop && m_pVideoCodec)
       {
         m_pVideoCodec->SetCodecControl(DVD_CODEC_CTRL_DRAIN);
@@ -563,6 +670,8 @@ void CVideoPlayerVideo::Process()
     else if (pMsg->IsType(CDVDMsg::VIDEO_DRAIN))
     {
       m_isEOS = false;
+      if (m_telecineProbe > 0 && m_processInfo.IsVideoHwDecoder())
+        ResolveTelecineProbe(frametime, true);
       while (!m_bStop && m_pVideoCodec)
       {
         m_pVideoCodec->SetCodecControl(DVD_CODEC_CTRL_DRAIN);
@@ -573,7 +682,7 @@ void CVideoPlayerVideo::Process()
     else if (pMsg->IsType(CDVDMsg::GENERAL_PAUSE))
     {
       m_paused = std::static_pointer_cast<CDVDMsgBool>(pMsg)->m_value;
-      CLog::Log(LOGDEBUG, "CVideoPlayerVideo - CDVDMsg::GENERAL_PAUSE: {}", m_paused);
+      logComponentM(LOGDEBUG, LOGVIDEO, "CVideoPlayerVideo - CDVDMsg::GENERAL_PAUSE: {}", m_paused);
     }
     else if (pMsg->IsType(CDVDMsg::PLAYER_REQUEST_STATE))
     {
@@ -588,9 +697,41 @@ void CVideoPlayerVideo::Process()
       DemuxPacket* pPacket = std::static_pointer_cast<CDVDMsgDemuxerPacket>(pMsg)->GetPacket();
       bool bPacketDrop = std::static_pointer_cast<CDVDMsgDemuxerPacket>(pMsg)->GetPacketDrop();
 
+      if (pPacket->iSize == 0 && !pPacket->pData)
+      {
+        LOG_THROTTLE_PERIODIC(LOGDEBUG, LOGVIDEO, 1000,
+                              "CVideoPlayerVideo - discarding empty demux packet");
+        continue;
+      }
+
+      if (m_telecineProbe > 0)
+      {
+        const double fieldTime = (double)DVD_TIME_BASE / m_fFrameRate;
+        if (pPacket->duration > fieldTime * 2.5 && pPacket->duration < fieldTime * 3.5)
+        {
+          m_telecineProbe = 0;
+          m_telecine = true;
+          m_fFrameRate *= 0.4;
+          frametime = (double)DVD_TIME_BASE / m_fFrameRate;
+          m_processInfo.SetVideoFps(static_cast<float>(m_fFrameRate));
+          logM(LOGINFO,
+               "soft telecine: three-field packet ({:.1f} ms) in a field-rate MPEG-2 stream, "
+               "opening at {:.3f} fps",
+               pPacket->duration / 1000.0, m_fFrameRate);
+        }
+        else
+        {
+          if (pPacket->duration > fieldTime * 1.5 && pPacket->duration < fieldTime * 2.5)
+            m_telecineTwoFieldPackets++;
+
+          if (--m_telecineProbe == 0)
+            ResolveTelecineProbe(frametime, false);
+        }
+      }
+
       if (m_stalled)
       {
-        CLog::Log(LOGDEBUG, "CVideoPlayerVideo - Stillframe left, switching to normal playback");
+        logComponentM(LOGDEBUG, LOGVIDEO, "Stillframe left, switching to normal playback");
         m_stalled = false;
       }
 
@@ -651,10 +792,14 @@ void CVideoPlayerVideo::Process()
         {
           CSysfsPath frame_format{"/sys/class/deinterlace/di0/frame_format"};
           if (frame_format.Exists())
-            vfmt = frame_format.Get<std::string>().value();
-          if (vfmt.size() > 4)
-            m_processInfo.SetVideoInterlaced(vfmt.compare("progressive"));
-          CLog::Log(LOGDEBUG, "CVideoPlayerVideo - CDVDMsg::DEMUXER_PACKET - checking interlace vfmt: {}", vfmt);
+            m_vfmt = frame_format.Get<std::string>().value();
+          if (m_vfmt.size() > 4)
+          {
+            bool vfmtIsInterlaced = m_vfmt.compare("progressive") != 0;
+            if (vfmtIsInterlaced || !(m_hints.codecOptions & CODEC_INTERLACED))
+              m_processInfo.SetVideoInterlaced(vfmtIsInterlaced);
+          }
+          logComponentM(LOGDEBUG, LOGVIDEO, "CDVDMsg::DEMUXER_PACKET - checking interlace vfmt: {}", m_vfmt);
         }
       }
       else
@@ -665,7 +810,7 @@ void CVideoPlayerVideo::Process()
     }
     else if (pMsg->IsType(CDVDMsg::PLAYER_DISPLAY_RESET))
     {
-      CLog::Log(LOGDEBUG, "CVideoPlayerVideo: display reset occurred, clear skipped frames");
+      logComponentM(LOGDEBUG, LOGVIDEO, "CVideoPlayerVideo: display reset occurred, clear skipped frames");
       m_displayReset = true;
       m_lastDisplayReset = std::chrono::steady_clock::now();
       m_renderManager.DisplayReset();
@@ -675,10 +820,8 @@ void CVideoPlayerVideo::Process()
 
 void CVideoPlayerVideo::UpdatePlayerInfo()
 {
-  // Rate-limit DataCache updates: lock + bitrate stats + atomic writes
-  // at decode rate (25-60fps) is wasteful; 10Hz is sufficient for UI.
   if (!m_playerInfoTimer.IsTimePast()) return;
-  m_playerInfoTimer.Set(100ms);
+  m_playerInfoTimer.Set(167ms);
 
   int level, dataLevel;
   m_messageQueue.GetLevels(level, dataLevel);
@@ -689,6 +832,14 @@ void CVideoPlayerVideo::UpdatePlayerInfo()
 
 bool CVideoPlayerVideo::ProcessDecoderOutput(double &frametime, double &pts)
 {
+  if (m_telecineProbe > 0)
+  {
+    if (std::chrono::steady_clock::now() - m_telecineProbeStart < 500ms)
+      return false;
+
+    ResolveTelecineProbe(frametime, true);
+  }
+
   CDVDVideoCodec::VCReturn decoderState = m_pVideoCodec->GetPicture(&m_picture);
 
   if (decoderState == CDVDVideoCodec::VC_BUFFER)
@@ -699,7 +850,7 @@ bool CVideoPlayerVideo::ProcessDecoderOutput(double &frametime, double &pts)
   // if decoder was flushed, we need to seek back again to resume rendering
   if (decoderState == CDVDVideoCodec::VC_FLUSHED)
   {
-    CLog::Log(LOGDEBUG, "CVideoPlayerVideo - video decoder was flushed");
+    logComponentM(LOGDEBUG, LOGVIDEO, "CVideoPlayerVideo - video decoder was flushed");
 
     while (!m_packets.empty())
     {
@@ -708,6 +859,7 @@ bool CVideoPlayerVideo::ProcessDecoderOutput(double &frametime, double &pts)
       SendMessage(msg, 10);
     }
 
+    m_renderManager.PauseAsyncVideoLayerPoll();
     m_pVideoCodec->Reset();
     m_packets.clear();
     // picture.iFlags &= ~DVP_FLAG_ALLOCATED;
@@ -724,6 +876,7 @@ bool CVideoPlayerVideo::ProcessDecoderOutput(double &frametime, double &pts)
       SendMessage(msg, 10);
     }
 
+    m_renderManager.PauseAsyncVideoLayerPoll();
     m_pVideoCodec->Reopen();
     m_packets.clear();
     m_renderManager.DiscardBuffer();
@@ -733,7 +886,7 @@ bool CVideoPlayerVideo::ProcessDecoderOutput(double &frametime, double &pts)
   // if decoder had an error, tell it to reset to avoid more problems
   if (decoderState == CDVDVideoCodec::VC_ERROR)
   {
-    CLog::Log(LOGDEBUG, "CVideoPlayerVideo - video decoder returned error");
+    logComponentM(LOGDEBUG, LOGVIDEO, "CVideoPlayerVideo - video decoder returned error");
     m_isEOS = true;
     return false;
   }
@@ -758,15 +911,17 @@ bool CVideoPlayerVideo::ProcessDecoderOutput(double &frametime, double &pts)
   {
     m_isEOS = false;
 
-    // Re-check interlace
     if (m_processInfo.GetVideoInterlaced() &&
+        !(m_hints.codecOptions & CODEC_INTERLACED) &&
+        m_vfmt == "progressive" &&
         MathUtils::FloatEquals(static_cast<float>(m_picture.iDuration), static_cast<float>(2 * DVD_TIME_BASE) / m_processInfo.GetVideoFps(), 700.0f))
     {
       if (++m_retryProgressive > 3)
       {
-        m_processInfo.SetVideoFps(m_processInfo.GetVideoFps() / 2.0f);
+        float halvedFps = m_processInfo.GetVideoFps() / 2.0f;
+        m_processInfo.SetVideoFps(halvedFps);
         m_processInfo.SetVideoInterlaced(false);
-        m_renderManager.TriggerUpdateResolution(m_processInfo.GetVideoFps() / 2.0f, m_hints.width, m_hints.height, m_hints.stereo_mode);
+        m_renderManager.TriggerUpdateResolution(halvedFps, m_hints.width, m_hints.height, m_hints.stereo_mode);
       }
     }
     else
@@ -792,7 +947,10 @@ bool CVideoPlayerVideo::ProcessDecoderOutput(double &frametime, double &pts)
     if (m_picture.iRepeatPicture)
     {
         double extraDelay = m_picture.iRepeatPicture * m_picture.iDuration;
-        m_picture.iDuration += extraDelay;
+        if (m_telecine)
+          extraDelay *= 0.4;
+        else
+          m_picture.iDuration += extraDelay;
         m_picture.pts += extraDelay;
     }
 
@@ -814,22 +972,23 @@ bool CVideoPlayerVideo::ProcessDecoderOutput(double &frametime, double &pts)
     // set stereo mode if not set by decoder
     if (m_picture.stereoMode.empty())
     {
-      std::string stereoMode;
-      switch(m_processInfo.GetVideoSettings().m_StereoMode)
+      const auto videoSettings = m_processInfo.GetVideoSettings();
+      std::string_view stereoMode;
+      switch (static_cast<RENDER_STEREO_MODE>(videoSettings.m_StereoMode))
       {
         case RENDER_STEREO_MODE_SPLIT_VERTICAL:
           stereoMode = "left_right";
-          if (m_processInfo.GetVideoSettings().m_StereoInvert)
+          if (videoSettings.m_StereoInvert)
             stereoMode = "right_left";
           break;
         case RENDER_STEREO_MODE_SPLIT_HORIZONTAL:
           stereoMode = "top_bottom";
-          if (m_processInfo.GetVideoSettings().m_StereoInvert)
+          if (videoSettings.m_StereoInvert)
             stereoMode = "bottom_top";
           break;
         case RENDER_STEREO_MODE_HARDWAREBASED:
           stereoMode = "block_lr";
-          if (m_processInfo.GetVideoSettings().m_StereoInvert)
+          if (videoSettings.m_StereoInvert)
             stereoMode = "block_rl";
           break;
         default:
@@ -853,10 +1012,19 @@ bool CVideoPlayerVideo::ProcessDecoderOutput(double &frametime, double &pts)
       m_isEOS = true;
       return false;
     }
-    else if ((m_outputSate == OUTPUT_DROPPED) && !(m_picture.iFlags & DVP_FLAG_DROPPED))
+    else if (m_outputSate == OUTPUT_DROPPED)
     {
-      m_iDroppedFrames++;
-      m_ptsTracker.Flush();
+      if (!(m_picture.iFlags & DVP_FLAG_DROPPED))
+      {
+        m_iDroppedFrames++;
+        m_ptsTracker.Flush();
+      }
+
+      if (m_picture.videoBuffer)
+      {
+        m_picture.videoBuffer->Release();
+        m_picture.videoBuffer = nullptr;
+      }
     }
 
     if (m_syncState == IDVDStreamPlayer::SYNC_STARTING &&
@@ -868,7 +1036,32 @@ bool CVideoPlayerVideo::ProcessDecoderOutput(double &frametime, double &pts)
       msg.player = VideoPlayer_VIDEO;
       msg.cachetime = DVD_MSEC_TO_TIME(50); //! @todo implement
       msg.cachetotal = DVD_MSEC_TO_TIME(100); //! @todo implement
-      msg.timestamp = hasTimestamp ? (pts + m_renderManager.GetDelay() * 1000) : DVD_NOPTS_VALUE;
+      const bool vc1VfmtOnlyInterlace =
+          (m_hints.codec == AV_CODEC_ID_VC1 || m_hints.codec == AV_CODEC_ID_WMV3) &&
+          !(m_hints.codecOptions & CODEC_INTERLACED);
+      const auto settingsComponent = CServiceBroker::GetSettingsComponent();
+      const auto advancedSettings =
+          settingsComponent ? settingsComponent->GetAdvancedSettings() : nullptr;
+      const bool diCompensation =
+          !advancedSettings || advancedSettings->m_videoDeinterlaceDelayCompensation;
+      const bool diInterlaced = m_processInfo.GetVideoInterlaced();
+      const bool diHwDecoder = diInterlaced && m_processInfo.IsVideoHwDecoder();
+      const bool diSysfs =
+          diInterlaced && CSysfsPath{"/sys/class/deinterlace/di0/frame_format"}.Exists();
+      const bool diApply =
+          diCompensation && diInterlaced && diHwDecoder && !vc1VfmtOnlyInterlace && diSysfs;
+      constexpr int DI_PIPELINE_FIELDS = 12;
+      const int diDelayMs =
+          diApply ? static_cast<int>(DI_PIPELINE_FIELDS * 1000.0 / m_fFrameRate) : 0;
+      m_renderManager.SetDeinterlaceDelay(diDelayMs);
+      if (diInterlaced)
+        logComponentM(LOGDEBUG, LOGVIDEO,
+            "DI compensation: applied={} delayMs={:d} setting={} hwdec={} vc1VfmtOnly={} "
+            "sysfs={} fps={:.3f}",
+            diApply, diDelayMs, diCompensation, diHwDecoder, vc1VfmtOnlyInterlace, diSysfs,
+            m_fFrameRate);
+
+      msg.timestamp = hasTimestamp ? (pts + (m_renderManager.GetDelay() + m_renderManager.GetDeinterlaceDelay()) * 1000) : DVD_NOPTS_VALUE;
       m_messageParent.Put(std::make_shared<CDVDMsgType<SStartMsg>>(CDVDMsg::PLAYER_STARTED, msg));
     }
 
@@ -896,23 +1089,30 @@ void CVideoPlayerVideo::Flush(bool sync)
   /* flush using message as this get's called from VideoPlayer thread */
   /* and any demux packet that has been taken out of queue need to */
   /* be disposed of before we flush */
+  if (m_pVideoCodec)
+    m_pVideoCodec->Abort();
   SendMessage(std::make_shared<CDVDMsgBool>(CDVDMsg::GENERAL_FLUSH, sync), 1);
   m_bAbortOutput = true;
 }
 
 void CVideoPlayerVideo::ProcessOverlays(const VideoPicture& picture, double pts) const {
-  double subsPts = pts - m_iSubtitleDelay;
+  double subsPts = pts - m_iSubtitleDelay.load(std::memory_order_relaxed);
 
   // remove any overlays that are out of time
   if (m_syncState == IDVDStreamPlayer::SYNC_INSYNC)
     m_pOverlayContainer->CleanUp(subsPts);
 
   VecOverlays overlays;
+  size_t containerSize = 0;
+  size_t skippedNonForced = 0;
+  size_t filteredByTime = 0;
+  size_t groupsExpanded = 0;
 
   {
-    std::unique_lock<CCriticalSection> lock(*m_pOverlayContainer);
+    std::unique_lock lock(*m_pOverlayContainer);
 
     VecOverlays* pVecOverlays = m_pOverlayContainer->GetOverlays();
+    containerSize = pVecOverlays->size();
     auto it = pVecOverlays->begin();
 
     //Check all overlays and render those that should be rendered, based on time and forced
@@ -921,7 +1121,10 @@ void CVideoPlayerVideo::ProcessOverlays(const VideoPicture& picture, double pts)
     {
       std::shared_ptr<CDVDOverlay>& pOverlay = *it++;
       if(!pOverlay->bForced && !m_bRenderSubs)
+      {
+        skippedNonForced++;
         continue;
+      }
 
       double pts2 = pOverlay->bForced ? pts : subsPts;
 
@@ -935,16 +1138,36 @@ void CVideoPlayerVideo::ProcessOverlays(const VideoPicture& picture, double pts)
 
       if((pOverlay->iPTSStartTime <= pts2 && (pOverlay->iPTSStopTime > pts2 || pOverlay->iPTSStopTime == 0LL)))
       {
-
-        pOverlay->m_3dSubtitleDepth = picture.m_3dSubtitleDepth;
-
         if(pOverlay->IsOverlayType(DVDOVERLAY_TYPE_GROUP))
-          overlays.insert(overlays.end(),
-                          static_cast<CDVDOverlayGroup&>(*pOverlay).m_overlays.begin(),
-                          static_cast<CDVDOverlayGroup&>(*pOverlay).m_overlays.end());
+        {
+          const auto& g = static_cast<CDVDOverlayGroup&>(*pOverlay).m_overlays;
+          overlays.insert(overlays.end(), g.begin(), g.end());
+          groupsExpanded++;
+        }
         else
           overlays.push_back(pOverlay);
       }
+      else
+        filteredByTime++;
+    }
+  }
+
+  {
+    static int s_lastSyncState = -1;
+    static size_t s_lastContainerSize = ~static_cast<size_t>(0);
+    static size_t s_lastOverlayCount = ~static_cast<size_t>(0);
+    if (static_cast<int>(m_syncState) != s_lastSyncState ||
+        containerSize != s_lastContainerSize ||
+        overlays.size() != s_lastOverlayCount)
+    {
+      logComponentM(LOGDEBUG, LOGVIDEO,
+                    "ProcessOverlays pts={:.3f} syncState={} containerSize={} skipNonForced={} "
+                    "filteredByTime={} groupsExpanded={} addToRenderer={}",
+                    pts / DVD_TIME_BASE, static_cast<int>(m_syncState), containerSize,
+                    skippedNonForced, filteredByTime, groupsExpanded, overlays.size());
+      s_lastSyncState = static_cast<int>(m_syncState);
+      s_lastContainerSize = containerSize;
+      s_lastOverlayCount = overlays.size();
     }
   }
 
@@ -958,7 +1181,9 @@ void CVideoPlayerVideo::ProcessOverlays(const VideoPicture& picture, double pts)
 
 CVideoPlayerVideo::EOutputState CVideoPlayerVideo::OutputPicture(const VideoPicture& picture)
 {
+  ScopedAtomicTrue inFlightGuard(m_outputPictureInFlight);
   m_bAbortOutput = false;
+  const auto videoSettings = m_processInfo.GetVideoSettings();
 
   if (m_processInfo.GetVideoStereoMode() != picture.stereoMode)
   {
@@ -967,11 +1192,13 @@ CVideoPlayerVideo::EOutputState CVideoPlayerVideo::OutputPicture(const VideoPict
     m_messageParent.Put(std::make_shared<CDVDMsg>(CDVDMsg::PLAYER_AVCHANGE));
   }
 
-  double config_framerate = m_bFpsInvalid ?
-    static_cast<double>(CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS()) :
-    m_fFrameRate;
+  double config_framerate = m_bFpsInvalid
+    ? static_cast<double>(CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS())
+    : m_fFrameRate;
 
-  if (m_processInfo.GetVideoInterlaced())
+  if (m_halvedFieldRate > 0.0 && !m_bFpsInvalid)
+    config_framerate = m_halvedFieldRate;
+  else if (m_processInfo.GetVideoInterlaced())
   {
     if (MathUtils::FloatEquals(static_cast<float>(config_framerate), 25.0f, 0.02f))
       config_framerate = 50.0;
@@ -979,7 +1206,7 @@ CVideoPlayerVideo::EOutputState CVideoPlayerVideo::OutputPicture(const VideoPict
       config_framerate = 59.94;
   }
 
-  int sorient = m_processInfo.GetVideoSettings().m_Orientation;
+  int sorient = videoSettings.m_Orientation;
   int orientation = sorient != 0 ? (sorient + m_hints.orientation) % 360
                                  : m_hints.orientation;
 
@@ -997,7 +1224,7 @@ CVideoPlayerVideo::EOutputState CVideoPlayerVideo::OutputPicture(const VideoPict
     const auto retryElapsed = now - m_rendererConfigureRetryStart;
     if (retryElapsed < 5s)
     {
-      logM(LOGWARNING, "CVideoPlayerVideo", "renderer configure not ready, retrying ({} ms)",
+      logM(LOGWARNING, "renderer configure not ready, retrying ({} ms)",
                                             std::chrono::duration_cast<std::chrono::milliseconds>(retryElapsed).count());
       return OUTPUT_AGAIN;
     }
@@ -1043,9 +1270,32 @@ CVideoPlayerVideo::EOutputState CVideoPlayerVideo::OutputPicture(const VideoPict
   if (m_speed > DVD_PLAYSPEED_NORMAL)
     maxWaitTime = std::max(timeToDisplay, 0ms);
 
+  m_swBlockArmed = CServiceBroker::GetLogging().IsLogLevelLogged(LOGDEBUG) &&
+                   CServiceBroker::GetLogging().CanLogComponent(LOGVIDEO);
+  if (m_swBlockArmed)
+  {
+    const int vq = m_messageQueue.GetLevel();
+    m_swVqMin = (m_swVqMin < 0) ? vq : std::min(m_swVqMin, vq);
+    m_swVqMax = (m_swVqMax < 0) ? vq : std::max(m_swVqMax, vq);
+  }
+  else
+  {
+    m_swBlockStamp = {};
+  }
+  const auto waitEnter = m_swBlockArmed ? std::chrono::steady_clock::now()
+                                        : std::chrono::steady_clock::time_point{};
+
   int buffer = m_renderManager.WaitForBuffer(m_bAbortOutput, maxWaitTime);
-  // logM(LOGDEBUG, "CVideoPlayerVideo", "ttd:{:d}ms pts:{:.3f} Clock:{:.3f} Level:{:d}",
-  //   timeToDisplay.count(), picture.pts / DVD_TIME_BASE, static_cast<double>(iPlayingClock) / DVD_TIME_BASE, buffer);
+
+  if (m_swBlockArmed)
+    m_swWaitUs += std::chrono::duration_cast<std::chrono::microseconds>(
+                      std::chrono::steady_clock::now() - waitEnter)
+                      .count();
+  LOG_THROTTLE_PERIODIC(LOGDEBUG, LOGVIDEO, 1000, "ttd:{:d}ms pts:{:.3f} Clock:{:.3f} Level:{:d}",
+    timeToDisplay.count(), picture.pts / DVD_TIME_BASE, static_cast<double>(iPlayingClock) / DVD_TIME_BASE, buffer);
+  if (timeToDisplay.count() <= 0 && buffer >= 0)
+    BDSTAGE::PictureShown();
+
   if (buffer < 0)
   {
     m_playbackStalled = true;
@@ -1053,20 +1303,65 @@ CVideoPlayerVideo::EOutputState CVideoPlayerVideo::OutputPicture(const VideoPict
     if (m_speed != DVD_PLAYSPEED_PAUSE)
       CLog::Log(LOGWARNING, "{} - timeout waiting for buffer", __FUNCTION__);
 
+    if (m_swBlockArmed)
+      m_swBlockAgain++;
+
     return OUTPUT_AGAIN;
   }
 
   ProcessOverlays(picture, picture.pts);
 
-  EINTERLACEMETHOD deintMethod = EINTERLACEMETHOD::VS_INTERLACEMETHOD_NONE;
-  deintMethod = m_processInfo.GetVideoSettings().m_InterlaceMethod;
+  EINTERLACEMETHOD deintMethod = videoSettings.m_InterlaceMethod;
   if (!m_processInfo.Supports(deintMethod))
     deintMethod = m_processInfo.GetDeinterlacingMethodDefault();
 
-  if (!m_renderManager.AddVideoPicture(picture, m_bAbortOutput, deintMethod, (m_syncState == ESyncState::SYNC_STARTING)))
+  const auto addEnter = m_swBlockArmed ? std::chrono::steady_clock::now()
+                                       : std::chrono::steady_clock::time_point{};
+  const bool added = m_renderManager.AddVideoPicture(picture, m_bAbortOutput, deintMethod,
+                                                     (m_syncState == ESyncState::SYNC_STARTING));
+  if (m_swBlockArmed)
+  {
+    const auto addNow = std::chrono::steady_clock::now();
+    m_swAddUs += std::chrono::duration_cast<std::chrono::microseconds>(addNow - addEnter).count();
+    if (m_swBlockStamp.time_since_epoch().count() == 0)
+    {
+      m_swBlockStamp = addNow;
+      m_swQWaitUs = 0;
+      m_swWaitUs = 0;
+      m_swAddUs = 0;
+      m_swVqMin = -1;
+      m_swVqMax = -1;
+      m_swBlockAgain = 0;
+    }
+    else if (addNow - m_swBlockStamp >= std::chrono::seconds(1))
+    {
+      const double secs = std::chrono::duration<double>(addNow - m_swBlockStamp).count();
+      const int64_t windowUs = static_cast<int64_t>(secs * 1000000.0);
+      const int64_t otherUs =
+          std::max<int64_t>(0, windowUs - m_swQWaitUs - m_swWaitUs - m_swAddUs);
+      logComponentM(LOGDEBUG, LOGVIDEO,
+                    "swblock: win={:.2f} vq={}-{} qwaitUs={} waitUs={} addUs={} otherUs={} "
+                    "blocked={:.1f}% idle={:.1f}% again={} dropped={}",
+                    secs, m_swVqMin, m_swVqMax, m_swQWaitUs, m_swWaitUs, m_swAddUs, otherUs,
+                    100.0 * (m_swWaitUs + m_swAddUs) / (secs * 1000000.0),
+                    100.0 * m_swQWaitUs / (secs * 1000000.0), m_swBlockAgain, m_swBlockDropped);
+      m_swBlockStamp = addNow;
+      m_swQWaitUs = 0;
+      m_swWaitUs = 0;
+      m_swAddUs = 0;
+      m_swBlockAgain = 0;
+      m_swBlockDropped = 0;
+      m_swVqMin = -1;
+      m_swVqMax = -1;
+    }
+  }
+
+  if (!added)
   {
     m_playbackStalled = true;
     m_droppingStats.AddOutputDropGain(picture.pts, 1);
+    if (m_swBlockArmed)
+      m_swBlockDropped++;
     return OUTPUT_DROPPED;
   }
   m_playbackStalled = false;
@@ -1115,12 +1410,7 @@ void CVideoPlayerVideo::ResetFrameRateCalc()
 
 double CVideoPlayerVideo::GetCurrentPts()
 {
-  double renderPts;
-  int sleepTime;
-  int queued, discard;
-
-  // get render stats
-  m_renderManager.GetStats(sleepTime, renderPts, queued, discard);
+  double renderPts = m_renderManager.GetRenderPts();
 
   if (renderPts == DVD_NOPTS_VALUE)
     return DVD_NOPTS_VALUE;
@@ -1136,6 +1426,29 @@ double CVideoPlayerVideo::GetCurrentPts()
 
 #define MAXFRAMERATEDIFF   0.01
 #define MAXFRAMESERR    1000
+
+void CVideoPlayerVideo::ResolveTelecineProbe(double& frametime, bool timedOut)
+{
+  m_telecineProbe = 0;
+
+  if (m_telecineTwoFieldPackets > 0 && m_hints.fpsrate_doubled &&
+      !m_processInfo.IsVideoHwDecoder())
+  {
+    m_halvedFieldRate = m_fFrameRate;
+    m_fFrameRate /= 2.0;
+    frametime = (double)DVD_TIME_BASE / m_fFrameRate;
+    m_processInfo.SetVideoInterlaced(true);
+    m_processInfo.SetVideoFps(static_cast<float>(m_fFrameRate));
+    logM(LOGINFO,
+         "no three-field packet: this stream is truly interlaced and the software decoder emits "
+         "frames, so playing at {:.3f} fps and displaying at {:.3f}",
+         m_fFrameRate, m_halvedFieldRate);
+    return;
+  }
+
+  logComponentM(LOGDEBUG, LOGVIDEO, "soft telecine probe: {}, keeping {:.3f} fps",
+                timedOut ? "no verdict within 500 ms" : "no three-field packet seen", m_fFrameRate);
+}
 
 void CVideoPlayerVideo::CalcFrameRate()
 {
@@ -1156,7 +1469,8 @@ void CVideoPlayerVideo::CalcFrameRate()
     frameduration = m_ptsTracker.GetMinFrameDuration();
 
   if ((frameduration==DVD_NOPTS_VALUE) ||
-      ((videoFpsDetect == 1) && ((m_ptsTracker.GetPatternLength() > 1) && !m_ptsTracker.VFRDetection())))
+      ((videoFpsDetect == 1 || m_hints.bluray) &&
+       ((m_ptsTracker.GetPatternLength() > 1) && !m_ptsTracker.VFRDetection())))
   {
     //reset the stored framerates if no good framerate was detected
     m_fStableFrameRate = 0.0;
@@ -1194,11 +1508,25 @@ void CVideoPlayerVideo::CalcFrameRate()
       //store the calculated framerate if it differs too much from m_fFrameRate
       if (fabs(m_fFrameRate - (m_fStableFrameRate / m_iFrameRateCount)) > MAXFRAMERATEDIFF || m_bFpsInvalid)
       {
-        CLog::Log(LOGDEBUG, "{} framerate was:{:f} calculated:{:f}", __FUNCTION__, m_fFrameRate,
-                  m_fStableFrameRate / m_iFrameRateCount);
-        m_fFrameRate = m_fStableFrameRate / m_iFrameRateCount;
-        m_bFpsInvalid = false;
-        m_processInfo.SetVideoFps(static_cast<float>(m_fFrameRate));
+        double calculated = m_fStableFrameRate / m_iFrameRateCount;
+        bool skipHalving = (m_hints.codecOptions & CODEC_INTERLACED) &&
+                           m_processInfo.IsVideoHwDecoder() &&
+                           calculated > 0 &&
+                           fabs(m_fFrameRate - 2.0 * calculated) < MAXFRAMERATEDIFF;
+        if (skipHalving)
+        {
+          LOG_THROTTLE_PERIODIC(LOGDEBUG, LOGVIDEO, 1000,
+                        "skipping halve: interlaced stream, keeping fps {:f} (measured {:f})",
+                        m_fFrameRate, calculated);
+        }
+        else
+        {
+          logM(LOGDEBUG, "framerate was:{:f} calculated:{:f}", m_fFrameRate, calculated);
+          m_fFrameRate = calculated;
+          m_telecine = false;
+          m_bFpsInvalid = false;
+          m_processInfo.SetVideoFps(static_cast<float>(m_fFrameRate));
+        }
       }
 
       //reset the stored framerates

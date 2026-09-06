@@ -69,7 +69,7 @@ class BaseYUV2RGBGLSLShader : public CGLSLShaderProgram
     bool m_hasLightMetadata{false};
     AVContentLightMetadata m_lightMetadata;
     bool m_toneMapping{false};
-    ETONEMAPMETHOD m_toneMappingMethod{VS_TONEMAPMETHOD_REINHARD};
+    ETONEMAPMETHOD m_toneMappingMethod{VS_TONEMAPMETHOD_OFF};
     float m_toneMappingParam{1.0};
 
     bool m_colorConversion{false};
@@ -98,9 +98,13 @@ class BaseYUV2RGBGLSLShader : public CGLSLShaderProgram
     GLint m_hYcoord{-1};
     GLint m_hUcoord{-1};
     GLint m_hVcoord{-1};
+    GLint m_hVertexBlock{-1};
+    GLint m_hFragmentBlock{-1};
     GLint m_hProj{-1};
     GLint m_hModel{-1};
     GLint m_hAlpha{-1};
+    GLuint m_vertexUBO{0};
+    GLuint m_fragmentUBO{0};
 
     const GLfloat *m_proj{nullptr};
     const GLfloat *m_model{nullptr};
@@ -133,6 +137,26 @@ class BaseYUV2RGBGLSLShader : public CGLSLShaderProgram
     GLint m_hStepX = -1;
     GLint m_hStepY = -1;
     GLint m_hField = -1;
+  };
+
+  class YUV2RGBFilterShader : public BaseYUV2RGBGLSLShader
+  {
+  public:
+    YUV2RGBFilterShader(EShaderFormat format,
+                        AVColorPrimaries dstPrimaries,
+                        AVColorPrimaries srcPrimaries,
+                        bool toneMap,
+                        ETONEMAPMETHOD toneMapMethod,
+                        ESCALINGMETHOD method);
+    ~YUV2RGBFilterShader() override;
+
+  protected:
+    void OnCompiledAndLinked() override;
+    bool OnEnabled() override;
+
+    GLuint m_kernelTex = 0;
+    GLint m_hKernTex = -1;
+    ESCALINGMETHOD m_scaling = VS_SCALINGMETHOD_LANCZOS3_FAST;
   };
 
   } // namespace GLES

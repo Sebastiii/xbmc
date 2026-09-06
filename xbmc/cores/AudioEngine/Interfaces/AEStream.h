@@ -9,6 +9,7 @@
 #pragma once
 
 #include "cores/AudioEngine/Utils/AEAudioFormat.h"
+#include <chrono>
 #include <stdint.h>
 
 extern "C" {
@@ -44,6 +45,7 @@ public:
     SYNC_ADJUST
   };
   AESyncState state;
+  bool insyncFirstCycle = false;
 };
 
 /**
@@ -62,6 +64,7 @@ public:
     double pts = 0;
     bool hasDownmix = false;
     double centerMixLevel = 1;
+    double surroundMixLevel = 1;
   };
 
 public:
@@ -268,5 +271,7 @@ public:
    * Slave a stream to resume when this stream has drained
    */
   virtual void RegisterSlave(IAEStream *stream) = 0;
+
+  virtual void SetHybridFirstCycleInterval(std::chrono::milliseconds interval) {}
 };
 

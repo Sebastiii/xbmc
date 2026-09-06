@@ -14,20 +14,25 @@
 #include "DVDStreamInfo.h"
 #include "DVDSubtitles/DVDFactorySubtitle.h"
 #include "IVideoPlayer.h"
+#include "cores/VideoPlayer/Interface/TimingConstants.h"
+#include "threads/Thread.h"
+
+#include <atomic>
 
 class CDVDInputStream;
 class CDVDSubtitleStream;
 class CDVDSubtitleParser;
 class CDVDInputStreamNavigator;
 class CDVDOverlayCodec;
+class CDemuxStreamSSIF;
 
-class CVideoPlayerSubtitle : public IDVDStreamPlayer
+class CVideoPlayerSubtitle : public CThread, public IDVDStreamPlayer
 {
 public:
   CVideoPlayerSubtitle(CDVDOverlayContainer* pOverlayContainer, CProcessInfo &processInfo);
   ~CVideoPlayerSubtitle() override;
 
-  void Process(double pts, double offset);
+  void UpdatePlaybackPosition(double pts, double offset);
   void Flush();
   void FindSubtitles(const char* strFilename);
   int GetSubtitleCount();
@@ -39,14 +44,22 @@ public:
 
   bool AcceptsData() const override;
   void SendMessage(std::shared_ptr<CDVDMsg> pMsg, int priority = 0) override;
-  void FlushMessages() override {}
+  void FlushMessages() override { m_messageQueue.Flush(); }
   bool OpenStream(CDVDStreamInfo hints) override { return OpenStream(hints, hints.filename); }
   bool OpenStream(CDVDStreamInfo &hints, std::string& filename);
   void CloseStream(bool bWaitForBuffers) override;
 
   bool IsInited() const override { return true; }
   bool IsStalled() const override { return m_pOverlayContainer->GetSize() == 0; }
+  void SetSSIF(CDemuxStreamSSIF* pSSIF) { m_pSSIF.store(pSSIF, std::memory_order_release); }
+
+protected:
+  void Process() override;
+  void ProcessParser(double pts, double offset);
+  void HandleMessage(const std::shared_ptr<CDVDMsg>& pMsg);
+
 private:
+  std::atomic<CDemuxStreamSSIF*> m_pSSIF{nullptr};
   CDVDOverlayContainer* m_pOverlayContainer;
 
   std::unique_ptr<CDVDSubtitleParser> m_pSubtitleFileParser;
@@ -58,6 +71,15 @@ private:
 
 
   CCriticalSection    m_section;
+
+  CDVDMessageQueue m_messageQueue;
+  CEvent m_wakeEvent{true};
+  std::atomic_bool m_asyncParse{false};
+  std::atomic_bool m_usesTimedParser{false};
+  std::atomic_bool m_hasPendingTiming{false};
+  std::atomic_bool m_hasOverlayCodec{false};
+  std::atomic<double> m_latestPts{DVD_NOPTS_VALUE};
+  std::atomic<double> m_latestOffset{0.0};
 };
 
 

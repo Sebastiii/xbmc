@@ -64,11 +64,12 @@ public:
   bool IsExtSupported(const char* extension) const;
 
   // OpenGL(ES) rendering functions
-  void EnableGUIShader(GL_SHADER_METHOD method) const;
-  void DisableGUIShader() const;
-  int GUIShaderGetPos() const;
-  int GUIShaderGetCoord0() const;
-  int GUIShaderGetUniCol() const;
+  void EnableGUIShader(GL_SHADER_METHOD method);
+  void DisableGUIShader();
+  int GUIShaderGetPos();
+  int GUIShaderGetCoord0();
+  int GUIShaderGetUniCol();
+  int GUIShaderGetDepth();
 
   // DirectX rendering functions
   CGUIShaderDX* GetGUIShader();

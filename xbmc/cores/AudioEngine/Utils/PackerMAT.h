@@ -43,6 +43,7 @@ public:
   int GetSamplesOffset() const { return m_lavStyleEnabled ? m_lastOutputSamplesOffset : 0; }
   bool HadDiscontinuity() const { return m_lavStyleEnabled ? m_lastOutputHadDiscontinuity : false; }
   void Reset();
+  void SoftReset();
   
   // Toggle LAV seamless branching support
   void SetLavStyleEnabled(bool enabled) { m_lavStyleEnabled = enabled; }
@@ -120,7 +121,9 @@ public:
     int dat = 0;
     for (int i = index; i < index + bits; i++)
     {
-      dat = dat * 2 + getbit(data[i / 8], i % 8);
+      const int byteIndex = i / 8;
+      const int bit = (byteIndex < size) ? getbit(data[byteIndex], i % 8) : 0;
+      dat = dat * 2 + bit;
     }
     index += bits;
     return dat;

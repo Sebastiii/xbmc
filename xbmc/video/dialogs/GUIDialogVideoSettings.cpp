@@ -23,6 +23,7 @@
 #include "settings/SettingsComponent.h"
 #include "settings/lib/Setting.h"
 #include "settings/lib/SettingDefinitions.h"
+#include "settings/lib/SettingDependency.h"
 #include "settings/lib/SettingsManager.h"
 #include "utils/LangCodeExpander.h"
 #include "utils/StringUtils.h"
@@ -34,6 +35,9 @@
 #include <utility>
 
 #define SETTING_VIDEO_VIEW_MODE           "video.viewmode"
+#define SETTING_VIDEO_HDR10_LIMITER       "video.hdr10limiter"
+#define SETTING_VIDEO_HDR10_MAX_LUM       "video.hdr10maxlum"
+#define SETTING_VIDEO_HDR10_MAX_CLL       "video.hdr10maxcll"
 #define SETTING_VIDEO_ZOOM                "video.zoom"
 #define SETTING_VIDEO_PIXEL_RATIO         "video.pixelratio"
 #define SETTING_VIDEO_BRIGHTNESS          "video.brightness"
@@ -78,6 +82,29 @@ void CGUIDialogVideoSettings::OnSettingChanged(const std::shared_ptr<const CSett
   const auto appPlayer = components.GetComponent<CApplicationPlayer>();
 
   const std::string &settingId = setting->GetId();
+#if defined(HAS_LIBAMCODEC)
+  if (settingId == SETTING_VIDEO_HDR10_LIMITER)
+  {
+    CServiceBroker::GetSettingsComponent()->GetSettings()->SetBool(
+        CSettings::SETTING_COREELEC_AMLOGIC_HDR10_LIMITER,
+        std::static_pointer_cast<const CSettingBool>(setting)->GetValue());
+    return;
+  }
+  if (settingId == SETTING_VIDEO_HDR10_MAX_LUM)
+  {
+    CServiceBroker::GetSettingsComponent()->GetSettings()->SetInt(
+        CSettings::SETTING_COREELEC_AMLOGIC_HDR10_MAX_LUMINANCE,
+        std::static_pointer_cast<const CSettingInt>(setting)->GetValue());
+    return;
+  }
+  if (settingId == SETTING_VIDEO_HDR10_MAX_CLL)
+  {
+    CServiceBroker::GetSettingsComponent()->GetSettings()->SetInt(
+        CSettings::SETTING_COREELEC_AMLOGIC_HDR10_MAX_CLL,
+        std::static_pointer_cast<const CSettingInt>(setting)->GetValue());
+    return;
+  }
+#endif
   if (settingId == SETTING_VIDEO_INTERLACEMETHOD)
   {
     CVideoSettings vs = appPlayer->GetVideoSettings();
@@ -404,6 +431,30 @@ void CGUIDialogVideoSettings::InitializeSettings()
 
   AddVideoStreams(groupVideoStream, SETTING_VIDEO_STREAM);
 
+#if defined(HAS_LIBAMCODEC)
+  {
+    const auto coreelecSettings = CServiceBroker::GetSettingsComponent()->GetSettings();
+    AddToggle(groupVideo, SETTING_VIDEO_HDR10_LIMITER, 60652, SettingLevel::Basic,
+              coreelecSettings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_HDR10_LIMITER));
+    const std::shared_ptr<CSettingInt> settingHdr10MaxLum =
+        AddSlider(groupVideo, SETTING_VIDEO_HDR10_MAX_LUM, 60622, SettingLevel::Basic,
+                  coreelecSettings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_HDR10_MAX_LUMINANCE),
+                  "{}", 0, 100, 10000, 60622);
+    const std::shared_ptr<CSettingInt> settingHdr10MaxCll =
+        AddSlider(groupVideo, SETTING_VIDEO_HDR10_MAX_CLL, 60624, SettingLevel::Basic,
+                  coreelecSettings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_HDR10_MAX_CLL),
+                  "{}", 0, 100, 10000, 60624);
+
+    CSettingDependency dependencyLimiterOn(SettingDependencyType::Visible, GetSettingsManager());
+    dependencyLimiterOn.And()->Add(std::make_shared<CSettingDependencyCondition>(
+        SETTING_VIDEO_HDR10_LIMITER, "true", SettingDependencyOperator::Equals, false,
+        GetSettingsManager()));
+    SettingDependencies hdr10Deps;
+    hdr10Deps.push_back(dependencyLimiterOn);
+    settingHdr10MaxLum->SetDependencies(hdr10Deps);
+    settingHdr10MaxCll->SetDependencies(hdr10Deps);
+  }
+#endif
   if (appPlayer->Supports(RENDERFEATURE_STRETCH) || appPlayer->Supports(RENDERFEATURE_PIXEL_RATIO))
   {
     AddList(groupVideo, SETTING_VIDEO_VIEW_MODE, 629, SettingLevel::Basic, videoSettings.m_ViewMode, CViewModeSettings::ViewModesFiller, 629);

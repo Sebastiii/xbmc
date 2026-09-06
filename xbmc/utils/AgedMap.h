@@ -1,8 +1,17 @@
+/*
+ *  Copyright (C) 2026 Team Kodi
+ *  This file is part of Kodi - https://kodi.tv
+ *
+ *  SPDX-License-Identifier: GPL-2.0-or-later
+ *  See LICENSES/README.md for more information.
+ */
+
 #pragma once
 
 #include <unordered_map>
 #include <deque>
 #include <limits>
+#include <utility>
 
 template<typename K, typename V, size_t MaxSize = 512>
 class AgedMap {
@@ -23,7 +32,7 @@ template<typename K, typename V, size_t MaxSize>
 void AgedMap<K, V, MaxSize>::insert(K key, V value) {
   bool isNewKey = (map.find(key) == map.end());
 
-  map[key] = value;
+  map[key] = std::move(value);
   mostRecentKey = key;
   hasEntries = true;
 

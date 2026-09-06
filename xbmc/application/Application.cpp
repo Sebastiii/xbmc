@@ -48,10 +48,15 @@
 #include "cores/DataCacheCore.h"
 #include "cores/FFmpeg.h"
 #include "cores/IPlayer.h"
+#include "cores/VideoPlayer/DVDDemuxers/DVDDemux.h"
+#include "cores/VideoPlayer/DVDDemuxers/DVDFactoryDemuxer.h"
+#include "cores/VideoPlayer/DVDInputStreams/DVDFactoryInputStream.h"
+#include "cores/VideoPlayer/DVDInputStreams/DVDInputStream.h"
 #include "cores/playercorefactory/PlayerCoreFactory.h"
 #include "dialogs/GUIDialogBusy.h"
 #include "dialogs/GUIDialogCache.h"
 #include "dialogs/GUIDialogKaiToast.h"
+#include "dialogs/GUIDialogSelect.h"
 #include "dialogs/GUIDialogSimpleMenu.h"
 #include "events/EventLog.h"
 #include "events/NotificationEvent.h"
@@ -76,6 +81,7 @@
 #include "guilib/LocalizeStrings.h"
 #include "guilib/StereoscopicsManager.h"
 #include "guilib/TextureManager.h"
+#include "guilib/WindowIDs.h"
 #include "input/InertialScrollingHandler.h"
 #include "input/InputManager.h"
 #include "input/actions/Action.h"
@@ -141,6 +147,7 @@
 #include "utils/URIUtils.h"
 #include "utils/Variant.h"
 #include "utils/XTimeUtils.h"
+#include "utils/GuiActivity.h"
 #include "utils/log.h"
 #include "video/Bookmark.h"
 #include "video/PlayerController.h"
@@ -209,6 +216,40 @@ using KODI::MESSAGING::HELPERS::DialogResponse;
 using namespace std::chrono_literals;
 
 #define MAX_FFWD_SPEED 5
+
+namespace
+{
+bool g_guiFrameProbe = false;
+int64_t g_guiFrameProcessUs = 0;
+int64_t g_guiFrameRenderUs = 0;
+int64_t g_guiFrameFlipUs = 0;
+int64_t g_guiFrameProcessMaxUs = 0;
+int64_t g_guiFrameRenderMaxUs = 0;
+uint32_t g_guiFrameN = 0;
+
+void AccumulateGuiFrameSpan(int64_t& total, int64_t& peak, std::chrono::steady_clock::time_point from)
+{
+  const int64_t span = std::chrono::duration_cast<std::chrono::microseconds>(
+                           std::chrono::steady_clock::now() - from)
+                           .count();
+  total += span;
+  if (span > peak)
+    peak = span;
+}
+
+void LimitGuiFrameRate()
+{
+  static auto s_lastGuiFrame = std::chrono::steady_clock::now();
+  const float fps = CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS();
+  const auto interval =
+      std::chrono::microseconds(static_cast<int64_t>(1000000.0f / (fps > 1.0f ? fps : 60.0f)));
+  const auto target = s_lastGuiFrame + interval;
+  const auto now = std::chrono::steady_clock::now();
+  if (target > now)
+    KODI::TIME::Sleep(std::chrono::duration_cast<std::chrono::milliseconds>(target - now));
+  s_lastGuiFrame = std::chrono::steady_clock::now();
+}
+}
 
 CApplication::CApplication(void)
   :
@@ -879,12 +920,29 @@ void CApplication::Render()
     appPower->ResetScreenSaver();
   }
 
-  if (!CServiceBroker::GetRenderSystem()->BeginRender())
+  const auto settingsComponent = CServiceBroker::GetSettingsComponent();
+  const auto advancedSettings =
+      settingsComponent ? settingsComponent->GetAdvancedSettings() : nullptr;
+  const bool asyncFullscreenOsdWorker =
+      advancedSettings && advancedSettings->m_videoAsyncFullscreenOSD == 2;
+  if (asyncFullscreenOsdWorker)
+    CServiceBroker::GetGUI()->GetWindowManager().QuiesceFullscreenOverlayWorker();
+
+  if (!CServiceBroker::GetGUI()->GetWindowManager().BeginRenderExclusion())
     return;
+
+  if (!CServiceBroker::GetRenderSystem()->BeginRender())
+  {
+    CServiceBroker::GetGUI()->GetWindowManager().EndRenderExclusion();
+    return;
+  }
 
   // render video layer
   CServiceBroker::GetGUI()->GetWindowManager().RenderEx();
 
+  std::chrono::steady_clock::time_point guiRenderStart;
+  if (g_guiFrameProbe)
+    guiRenderStart = std::chrono::steady_clock::now();
   // render gui layer
   if (appPower->GetRenderGUI() && !m_skipGuiRender)
   {
@@ -909,6 +967,8 @@ void CApplication::Render()
 
     m_lastRenderTime = std::chrono::steady_clock::now();
   }
+  if (g_guiFrameProbe)
+    AccumulateGuiFrameSpan(g_guiFrameRenderUs, g_guiFrameRenderMaxUs, guiRenderStart);
 
   CServiceBroker::GetRenderSystem()->EndRender();
 
@@ -924,14 +984,55 @@ void CApplication::Render()
     infoMgr.GetInfoProviders().GetSystemInfoProvider().UpdateFPS();
   }
 
-  CServiceBroker::GetWinSystem()->GetGfxContext().Flip(hasRendered,
-                                                       appPlayer->IsRenderingVideoLayer());
+  const bool videoLayer = appPlayer->IsRenderingVideoLayer();
+  std::chrono::steady_clock::time_point guiFlipStart;
+  if (g_guiFrameProbe)
+    guiFlipStart = std::chrono::steady_clock::now();
+  CServiceBroker::GetWinSystem()->GetGfxContext().Flip(hasRendered, videoLayer);
+  if (g_guiFrameProbe)
+  {
+    g_guiFrameFlipUs += std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now() - guiFlipStart)
+                            .count();
+    ++g_guiFrameN;
+    static auto s_guiFrameWindow = std::chrono::steady_clock::now();
+    const auto guiFrameNow = std::chrono::steady_clock::now();
+    if (guiFrameNow - s_guiFrameWindow >= KODI::UTILS::GUIACTIVITY::HeartbeatInterval())
+    {
+      logComponentM(LOGDEBUG, LOGWINDOWING,
+                    "guiframe: n={} processUs={} renderUs={} flipUs={} procMaxUs={} rendMaxUs={}",
+                    g_guiFrameN, g_guiFrameProcessUs, g_guiFrameRenderUs, g_guiFrameFlipUs,
+                    g_guiFrameProcessMaxUs, g_guiFrameRenderMaxUs);
+      g_guiFrameProcessUs = g_guiFrameRenderUs = g_guiFrameFlipUs = 0;
+      g_guiFrameProcessMaxUs = g_guiFrameRenderMaxUs = 0;
+      g_guiFrameN = 0;
+      s_guiFrameWindow = guiFrameNow;
+    }
+  }
+
+  CServiceBroker::GetGUI()->GetWindowManager().EndRenderExclusion();
+
+  if (asyncFullscreenOsdWorker)
+    CServiceBroker::GetGUI()->GetWindowManager().ScheduleAsyncFullscreenOverlayRender();
 
   CTimeUtils::UpdateFrameTime(hasRendered);
+
+  if (videoLayer && advancedSettings && advancedSettings->m_guiBufferAgePartialRedraw >= 1)
+  {
+    if (CServiceBroker::GetGUI()->GetWindowManager().GetActiveWindow() == WINDOW_FULLSCREEN_VIDEO)
+      appPlayer->WaitAsyncMainPace();
+    else
+      LimitGuiFrameRate();
+  }
 }
 
 bool CApplication::OnAction(const CAction &action)
 {
+  logComponentM(LOGDEBUG, LOGWINDOWING, "inputact: id={} name={}", action.GetID(),
+                action.GetName());
+
+  GetComponent<CApplicationActionListeners>()->NotifyActionListenersPre(action);
+
   // special case for switching between GUI & fullscreen mode.
   if (action.GetID() == ACTION_SHOW_GUI)
   { // Switch to fullscreen mode if we can
@@ -1496,6 +1597,14 @@ void CApplication::OnApplicationMessage(ThreadMessage* pMsg)
     appPlayer->FlushRenderer();
     break;
 
+  case TMSG_RENDERER_PREINIT:
+    appPlayer->PreInitRenderer();
+    break;
+
+  case TMSG_RENDERER_UNINIT:
+    appPlayer->UnInitRenderer();
+    break;
+
   case TMSG_HIBERNATE:
     CServiceBroker::GetPowerManager().Hibernate();
     break;
@@ -1553,6 +1662,7 @@ void CApplication::OnApplicationMessage(ThreadMessage* pMsg)
 
   case TMSG_RESUMEAPP:
   {
+    m_ServiceManager->GetNetwork().NetworkMessage(CNetworkBase::SERVICES_UP, 0);
     CGUIComponent* gui = CServiceBroker::GetGUI();
     if (gui)
       gui->GetWindowManager().MarkDirty();
@@ -1828,6 +1938,9 @@ void CApplication::FrameMove(bool processEvents, bool processGUI)
     {
       std::lock_guard lock(CServiceBroker::GetWinSystem()->GetGfxContext());
 
+      if (CServiceBroker::GetWinSystem()->GetGfxContext().ConsumeGuiTransferChange())
+        CServiceBroker::GetGUI()->GetWindowManager().MarkDirty();
+
       // check if there are notifications to display
       CGUIDialogKaiToast *toast = CServiceBroker::GetGUI()->GetWindowManager().GetWindow<CGUIDialogKaiToast>(WINDOW_DIALOG_KAI_TOAST);
       if (toast && toast->DoWork())
@@ -1873,6 +1986,8 @@ void CApplication::FrameMove(bool processEvents, bool processGUI)
   {
     m_skipGuiRender = false;
 
+    const auto advancedSettings = CServiceBroker::GetSettingsComponent()->GetAdvancedSettings();
+
     /*! @todo look into the possibility to use this for GBM
     int fps = 0;
 
@@ -1888,18 +2003,63 @@ void CApplication::FrameMove(bool processEvents, bool processGUI)
       m_skipGuiRender = true;
     */
 
-    if (CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_guiSmartRedraw && m_guiRefreshTimer.IsTimePast())
+    KODI::UTILS::GUIACTIVITY::g_idleSeconds.store(
+        GetComponent<CApplicationPowerHandling>()->GlobalIdleTime(), std::memory_order_relaxed);
+    const int idleCapFps = advancedSettings->m_guiMenuIdleFrameRateCap;
+    if (idleCapFps > 0)
+    {
+      const auto capAppPower = GetComponent<CApplicationPowerHandling>();
+      const bool capScreenSaver = capAppPower->IsInScreenSaver();
+      const int capIdleSecs = capAppPower->GlobalIdleTime();
+      const int activeId = CServiceBroker::GetGUI()->GetWindowManager().GetActiveWindow();
+      if (!capScreenSaver && capIdleSecs >= 1 && activeId != WINDOW_FULLSCREEN_VIDEO &&
+          activeId != WINDOW_FULLSCREEN_GAME && activeId != WINDOW_VISUALISATION &&
+          activeId != WINDOW_SLIDESHOW && activeId != WINDOW_SCREENSAVER)
+      {
+        const auto sinceRenderMs =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
+                                                                  m_lastRenderTime)
+                .count();
+        if (sinceRenderMs * idleCapFps < 1000)
+          m_skipGuiRender = true;
+      }
+      static uint32_t s_capFrames = 0;
+      static uint32_t s_capSkips = 0;
+      static auto s_capWindow = std::chrono::steady_clock::now();
+      ++s_capFrames;
+      if (m_skipGuiRender)
+        ++s_capSkips;
+      const auto capNow = std::chrono::steady_clock::now();
+      if (capNow - s_capWindow >= KODI::UTILS::GUIACTIVITY::HeartbeatInterval())
+      {
+        logComponentM(LOGDEBUG, LOGWINDOWING, "menucap: fps={} frames={} skips={} idle={} ss={} win={}",
+                      idleCapFps, s_capFrames, s_capSkips, capIdleSecs,
+                      static_cast<int>(capScreenSaver), activeId);
+        s_capFrames = 0;
+        s_capSkips = 0;
+        s_capWindow = capNow;
+      }
+    }
+
+    if (advancedSettings->m_guiSmartRedraw && m_guiRefreshTimer.IsTimePast())
     {
       CServiceBroker::GetGUI()->GetWindowManager().SendMessage(GUI_MSG_REFRESH_TIMER, 0, 0);
       m_guiRefreshTimer.Set(500ms);
     }
 
+    g_guiFrameProbe = CServiceBroker::GetLogging().IsLogLevelLogged(LOGDEBUG) &&
+                      CServiceBroker::GetLogging().CanLogComponent(LOGWINDOWING);
+    std::chrono::steady_clock::time_point guiProcessStart;
+    if (g_guiFrameProbe)
+      guiProcessStart = std::chrono::steady_clock::now();
     if (!m_bStop)
     {
       if (!m_skipGuiRender)
         CServiceBroker::GetGUI()->GetWindowManager().Process(CTimeUtils::GetFrameTime());
     }
     CServiceBroker::GetGUI()->GetWindowManager().FrameMove();
+    if (g_guiFrameProbe)
+      AccumulateGuiFrameSpan(g_guiFrameProcessUs, g_guiFrameProcessMaxUs, guiProcessStart);
   }
 
   appPlayer->FrameMove();
@@ -2222,23 +2382,23 @@ namespace
 class CCreateAndLoadPlayList : public IRunnable
 {
 public:
-  CCreateAndLoadPlayList(CFileItem& item, std::unique_ptr<PLAYLIST::CPlayList>& playlist)
+  CCreateAndLoadPlayList(const CFileItem& item, std::unique_ptr<PLAYLIST::CPlayList>& playlist)
     : m_item(item), m_playlist(playlist)
   {
   }
 
   void Run() override
   {
-    const std::unique_ptr<PLAYLIST::CPlayList> playlist(PLAYLIST::CPlayListFactory::Create(m_item));
+    std::unique_ptr<PLAYLIST::CPlayList> playlist(PLAYLIST::CPlayListFactory::Create(m_item));
     if (playlist)
     {
       if (playlist->Load(m_item.GetPath()))
-        *m_playlist = *playlist;
+        m_playlist = std::move(playlist);
     }
   }
 
 private:
-  CFileItem& m_item;
+  const CFileItem& m_item;
   std::unique_ptr<PLAYLIST::CPlayList>& m_playlist;
 };
 } // namespace
@@ -2589,6 +2749,51 @@ bool CApplication::PlayFile(CFileItem item, const std::string& player, bool bRes
       CLog::LogF(LOGDEBUG, "Ignored {} playback thread messages", dMsgCount);
   }
 
+  const bool editionsEnabled = CServiceBroker::GetSettingsComponent()->GetSettings()->GetBool(
+      CSettings::SETTING_COREELEC_MKV_EDITIONS);
+  if (editionsEnabled && !bRestart && !item.m_bIsFolder)
+  {
+    std::string realPath = item.GetPath();
+    if (item.HasVideoInfoTag() && !item.GetVideoInfoTag()->m_strFileNameAndPath.empty())
+      realPath = item.GetVideoInfoTag()->m_strFileNameAndPath;
+
+    if (StringUtils::EndsWithNoCase(realPath, ".mkv"))
+    {
+      CFileItem tempItem(realPath, false);
+      auto pInputStream = CDVDFactoryInputStream::CreateInputStream(nullptr, tempItem);
+      if (pInputStream && pInputStream->Open())
+      {
+        std::unique_ptr<CDVDDemux> pDemuxer(CDVDFactoryDemuxer::CreateDemuxer(pInputStream, true));
+        const int editionCount = pDemuxer ? pDemuxer->GetEditionCount() : 0;
+        if (editionCount > 1)
+        {
+          auto* pDlg = CServiceBroker::GetGUI()->GetWindowManager().GetWindow<CGUIDialogSelect>(
+              WINDOW_DIALOG_SELECT);
+          if (pDlg)
+          {
+            pDlg->Reset();
+            pDlg->SetHeading(CVariant{g_localizeStrings.Get(60672)});
+            for (int i = 0; i < editionCount; i++)
+              pDlg->Add(pDemuxer->GetEditionName(i));
+            pDlg->Open();
+            const int selected = pDlg->GetSelectedItem();
+            if (selected < 0)
+            {
+              logComponentM(LOGDEBUG, LOGVIDEO,
+                            "MKV edition selection cancelled, playing the default edition");
+            }
+            else
+            {
+              item.SetProperty("mkv_edition", selected);
+              logComponentM(LOGDEBUG, LOGVIDEO, "MKV edition {} selected for {}", selected,
+                            CURL::GetRedacted(realPath));
+            }
+          }
+        }
+      }
+    }
+  }
+
   const auto appVolume = GetComponent<CApplicationVolumeHandling>();
   aml_reset_audio_from_player_open();
   appPlayer->OpenFile(item, options, m_ServiceManager->GetPlayerCoreFactory(), player, *this);
@@ -2933,6 +3138,8 @@ bool CApplication::OnMessage(CGUIMessage& message)
     m_playerEvent.Set();
     ResetCurrentItem();
     PlaybackCleanup();
+    if (auto winSystem = CServiceBroker::GetWinSystem())
+      winSystem->GetGfxContext().VerifyAndRestoreGuiResolution();
 #ifdef HAS_PYTHON
     CServiceBroker::GetXBPython().OnPlayBackStopped();
 #endif
@@ -2968,6 +3175,8 @@ bool CApplication::OnMessage(CGUIMessage& message)
         GetComponent<CApplicationPlayer>()->ClosePlayer();
 
       PlaybackCleanup();
+      if (auto winSystem = CServiceBroker::GetWinSystem())
+        winSystem->GetGfxContext().VerifyAndRestoreGuiResolution();
     }
 
 #ifdef HAS_PYTHON
@@ -2981,6 +3190,8 @@ bool CApplication::OnMessage(CGUIMessage& message)
     if (GetComponent<CApplicationPlayer>()->IsPlaying())
       StopPlaying();
     PlaybackCleanup();
+    if (auto winSystem = CServiceBroker::GetWinSystem())
+      winSystem->GetGfxContext().VerifyAndRestoreGuiResolution();
     return true;
 
   case GUI_MSG_PLAYBACK_AVSTARTED:

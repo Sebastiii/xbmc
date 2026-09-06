@@ -11,6 +11,12 @@
 #include "windowing/Resolution.h"
 #include "utils/StreamDetails.h"
 
+extern "C" {
+#include <libavutil/pixfmt.h>
+}
+
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -93,10 +99,26 @@ enum DV_COLORIMETRY : int
 int  aml_get_cpufamily_id();
 bool aml_display_support_hdr_pq();
 bool aml_display_support_hdr_hlg();
+bool aml_display_support_hdr10plus();
 bool aml_display_support_dv();
+struct AMLHdmiAudioCaps
+{
+  bool valid{false};
+  int pcm_ch{0};
+  bool pcm_192k{false};
+  int truehd_ch{0};
+  int ddp_ch{0};
+  bool ddp_atmos{false};
+  int ac3_ch{0};
+  int dtshd_ch{0};
+  int dts_ch{0};
+};
+AMLHdmiAudioCaps aml_get_hdmi_audio_caps();
 bool aml_display_support_dv_ll();
 bool aml_display_support_dv_std();
 bool aml_display_support_3d();
+bool aml_display_is_widescreen();
+bool aml_display_support_12bit(int force_cs = 0);
 bool aml_support_hevc();
 bool aml_support_hevc_4k2k();
 bool aml_support_hevc_8k4k();
@@ -109,28 +131,82 @@ bool aml_dolby_vision_enabled();
 std::string aml_dv_output_mode_to_string(unsigned int mode);
 std::string aml_dv_mode_to_string(enum DV_MODE mode);
 std::string aml_dv_type_to_string(enum DV_TYPE type);
-void aml_dv_set_vs10_mode(unsigned int mode, StreamHdrType hdrType);
+void aml_dv_set_vs10_mode(unsigned int mode, StreamHdrType hdrType, bool force = false);
 void aml_dv_wait_video_off(int timeout);
 int aml_blackout_policy(int new_blackout);
-unsigned int aml_dv_on(unsigned int mode);
-void aml_dv_off();
+void aml_set_mpeg2_keep_progressive(bool enable);
+int aml_osd_blank(int fbIndex, int blankMode);
+unsigned int aml_dv_on(unsigned int mode, bool force = false);
+void aml_dv_off(bool restoreFollows = false);
+void aml_set_perf_governors_for_playback();
+void aml_restore_governors_after_playback();
+
 unsigned int aml_dv_dolby_vision_mode();
-void aml_dv_open(StreamHdrType hdrType, unsigned int bitDepth);
+void aml_dv_open(StreamHdrType hdrType, unsigned int bitDepth, AVColorPrimaries colorPrimaries = AVCOL_PRI_UNSPECIFIED, bool swDecoded = false);
 void aml_dv_close();
+bool aml_dv_playback_active();
+void aml_dv_restore_gui_osd_max();
 void aml_dv_set_osd_max(int max);
+int aml_dv_osd_max_nits();
+bool aml_dv_bdj_overlay_visible();
+int  aml_dv_sdr_boost_param();
+void aml_dv_set_sdr_source_max_nits(int value);
+void aml_apply_hdr10_overrides();
 bool aml_is_dv_enable();
+bool aml_is_force_422_override_active();
+bool aml_dv_player_led_output_active(StreamHdrType hdrType, unsigned int bitDepth);
+bool aml_dv_eotf_override_active();
+void aml_set_bdj_overlay_active(bool active);
+std::string aml_get_plane_state_diag();
 void aml_dv_display_trigger();
+void aml_dv_display_trigger_tick();
 void aml_dv_display_auto_now();
+
+class CAmlHdmiWireGuard
+{
+public:
+  explicit CAmlHdmiWireGuard(const char* tag);
+  ~CAmlHdmiWireGuard();
+  bool Serialised() const { return m_owns; }
+  CAmlHdmiWireGuard(const CAmlHdmiWireGuard&) = delete;
+  CAmlHdmiWireGuard& operator=(const CAmlHdmiWireGuard&) = delete;
+
+private:
+  const char* m_prevHolder{nullptr};
+  int m_prevHolderTid{0};
+  bool m_owns{false};
+};
+
+class CAmlDvWireStep
+{
+public:
+  explicit CAmlDvWireStep(const char* tag);
+  ~CAmlDvWireStep();
+  CAmlDvWireStep(const CAmlDvWireStep&) = delete;
+  CAmlDvWireStep& operator=(const CAmlDvWireStep&) = delete;
+
+private:
+  const char* m_prevTag;
+  int64_t m_prevSinceMs;
+};
 void aml_dv_start();
 void aml_dv_set_subtitles(bool visible);
-void aml_dv_set_xbmc_osd();
+int aml_dv_l5_subs_signal_mode();
+void aml_dv_push_l5_flags();
+void aml_dv_set_xbmc_osd(bool osd_active);
 unsigned int aml_vs10_by_setting(const std::string setting);
 enum DV_MODE aml_dv_mode();
 enum DV_TYPE aml_dv_type();
+bool aml_display_connected();
 void aml_dv_enable_fel();
 void aml_hevc_nal_skip_policy(const int value);
-void aml_set_transfer_pq(StreamHdrType hdrType, unsigned int bitDepth);
+void aml_set_transfer_pq(StreamHdrType hdrType, unsigned int bitDepth,
+                         std::optional<unsigned int> override_mode = std::nullopt);
 void aml_set_osd_pq_bypass(StreamHdrType hdrType);
+bool aml_gui_pq_is_final_stage();
+void aml_set_linux_osd_sdr8(StreamHdrType hdrType, unsigned int bitDepth = 0,
+                            std::optional<unsigned int> override_mode = std::nullopt);
+StreamHdrType aml_get_output_hdr_type(StreamHdrType sourceType);
 bool aml_has_frac_rate_policy();
 void aml_video_mute(bool mute);
 void aml_set_audio_passthrough(bool passthrough);
@@ -152,11 +228,20 @@ bool aml_set_reg_ignore_alpha();
 bool aml_unset_reg_ignore_alpha();
 std::string aml_video_fps_info();
 std::string aml_video_fps_drop();
+bool aml_get_vsync_edge(int64_t& lastVsyncTs);
+bool aml_get_time_until_vsync_phase_us(int afterVsyncUs, int& timeUntilPhaseUs);
+unsigned int aml_dv_video_processor_mode();
+void aml_dv_set_disc_session(bool active);
 
+bool aml_dv_vs10_converting();
+bool aml_dv_refresh_vs10_converting(StreamHdrType hdrType, unsigned int bitDepth);
+bool aml_dv_vsvdb_v1_enabled();
+void aml_dv_write_vsvdb_policy();
 void set_vsvdb_payload_ver(enum DV_TYPE dv_type, int max_lum_nits_value, int source_max_pq);
 void CalculateVSVDBPayload();
-void CalculateVSVDBPayload_2();
+void CalculateVSVDBPayload_2(enum DV_TYPE dv_type);
 
+void aml_set_audio_ddr_urgent(bool enable);
 void aml_reset_audio_from_vs10_change();
 void aml_reset_audio_from_player_open();
 void aml_reset_audio_from_player_pause();
@@ -164,8 +249,6 @@ void aml_reset_audio_from_window_home();
 void aml_reset_audio_from_play_from_beginning();
 void aml_reset_audio_from_play_from_resume();
 void aml_reset_from_subtitle_change();
-
-void aml_kodi_reset_cd_cs();
 
 void aml_get_dv_cap();
 struct xbmc_dv_cap

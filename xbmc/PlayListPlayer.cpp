@@ -338,10 +338,28 @@ bool CPlayListPlayer::Play(int iSong,
 
   m_bPlaybackStarted = false;
 
+  const unsigned int playlistModCountBeforePlay = playlist.GetModCount();
+
   const auto playAttempt = std::chrono::steady_clock::now();
   bool ret = g_application.PlayFile(*item, player, bAutoPlay);
   if (!ret)
   {
+    const unsigned int playlistModCountAfterPlay = playlist.GetModCount();
+    if (playlistModCountAfterPlay != playlistModCountBeforePlay)
+    {
+      const int playlistSizeAfterPlay = playlist.size();
+      const int currentPlayList = m_iCurrentPlayList;
+      const int currentSong = m_iCurrentSong;
+      const int failedSongs = m_iFailedSongs;
+      logM(LOGDEBUG,
+           "playlistModCountBeforePlay={} playlistModCountAfterPlay={} playlistSizeAfterPlay={} "
+           "m_iCurrentPlayList={} m_iCurrentSong={} m_iFailedSongs={} - skipping SetUnPlayable "
+           "and Reset",
+           playlistModCountBeforePlay, playlistModCountAfterPlay, playlistSizeAfterPlay,
+           currentPlayList, currentSong, failedSongs);
+      return false;
+    }
+
     CLog::Log(LOGERROR, "Playlist Player: skipping unplayable item: {}, path [{}]", m_iCurrentSong,
               CURL::GetRedacted(item->GetDynPath()));
     playlist.SetUnPlayable(m_iCurrentSong);
@@ -363,16 +381,20 @@ bool CPlayListPlayer::Play(int iSong,
     {
       CLog::Log(LOGDEBUG,"Playlist Player: one or more items failed to play... aborting playback");
 
-      // open error dialog
-      HELPERS::ShowOKDialogText(CVariant{16026}, CVariant{16027});
+      const int abortedPlayList = m_iCurrentPlayList;
+      const int abortedSong = m_iCurrentSong;
 
-      CGUIMessage msg(GUI_MSG_PLAYLISTPLAYER_STOPPED, 0, 0, m_iCurrentPlayList, m_iCurrentSong);
-      CServiceBroker::GetGUI()->GetWindowManager().SendThreadMessage(msg);
-      Reset();
-      GetPlaylist(m_iCurrentPlayList).Clear();
-      m_iCurrentPlayList = TYPE_NONE;
       m_iFailedSongs = 0;
       m_failedSongsStart = std::chrono::steady_clock::now();
+
+      CGUIMessage msg(GUI_MSG_PLAYLISTPLAYER_STOPPED, 0, 0, abortedPlayList, abortedSong);
+      CServiceBroker::GetGUI()->GetWindowManager().SendThreadMessage(msg);
+      Reset();
+      GetPlaylist(abortedPlayList).Clear();
+      m_iCurrentPlayList = TYPE_NONE;
+
+      // open error dialog
+      HELPERS::ShowOKDialogText(CVariant{16026}, CVariant{16027});
       return false;
     }
 

@@ -472,7 +472,7 @@ std::string CGUIDialogNumeric::GetOutputString() const
   return std::string();
 }
 
-bool CGUIDialogNumeric::ShowAndGetSeconds(std::string &timeString, const std::string &heading)
+bool CGUIDialogNumeric::ShowAndGetSeconds(std::string &timeString, const std::string &heading, TIME_FORMAT format)
 {
   CGUIDialogNumeric *pDialog = CServiceBroker::GetGUI()->GetWindowManager().GetWindow<CGUIDialogNumeric>(WINDOW_DIALOG_NUMERIC);
   if (!pDialog) return false;
@@ -488,7 +488,7 @@ bool CGUIDialogNumeric::ShowAndGetSeconds(std::string &timeString, const std::st
     return false;
   time = pDialog->GetOutput();
   seconds = time.hour * 3600 + time.minute * 60 + time.second;
-  timeString = StringUtils::SecondsToTimeString(seconds);
+  timeString = StringUtils::SecondsToTimeString(seconds, format);
   return true;
 }
 

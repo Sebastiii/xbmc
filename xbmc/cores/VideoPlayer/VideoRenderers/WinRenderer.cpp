@@ -12,6 +12,7 @@
 #include "RenderCaptureDX.h"
 #include "RenderFactory.h"
 #include "RenderFlags.h"
+#include "guilib/GUITextureD3D.h"
 #include "rendering/dx/RenderContext.h"
 #include "settings/Settings.h"
 #include "settings/SettingsComponent.h"

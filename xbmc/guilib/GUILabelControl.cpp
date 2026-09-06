@@ -10,6 +10,9 @@
 
 #include "GUIFont.h"
 #include "GUIMessage.h"
+#include "ServiceBroker.h"
+#include "settings/AdvancedSettings.h"
+#include "settings/SettingsComponent.h"
 #include "utils/CharsetConverter.h"
 #include "utils/ColorUtils.h"
 #include "utils/StringUtils.h"
@@ -28,7 +31,8 @@ CGUILabelControl::CGUILabelControl(int parentID, int controlID, float posX, floa
   m_startHighlight = m_endHighlight = 0;
   m_startSelection = m_endSelection = 0;
   m_minWidth = 0;
-  m_label.SetScrollLoopCount(2);
+  if (CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_guiSmartRedraw)
+    m_label.SetScrollLoopCount(2);
 }
 
 CGUILabelControl::~CGUILabelControl(void) = default;
@@ -139,6 +143,9 @@ CRect CGUILabelControl::CalcRenderRegion() const
 
 void CGUILabelControl::Render()
 {
+  if (CServiceBroker::GetWinSystem()->GetGfxContext().GetRenderOrder() ==
+      RENDER_ORDER_FRONT_TO_BACK)
+    return;
   m_label.Render();
   CGUIControl::Render();
 }

@@ -16,6 +16,8 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 }
 
+#include <cmath>
+
 void CDVDDemuxUtils::FreeDemuxPacket(DemuxPacket* pPacket)
 {
   if (pPacket)
@@ -88,6 +90,9 @@ DemuxPacket* CDVDDemuxUtils::AllocateDemuxPacket(unsigned int iDataSize, unsigne
 
 void CDVDDemuxUtils::StoreSideData(DemuxPacket *pkt, AVPacket *src)
 {
+  if (!src->side_data_elems)
+    return;
+
   AVPacket* avPkt = av_packet_alloc();
   if (!avPkt)
   {
@@ -108,4 +113,52 @@ void CDVDDemuxUtils::StoreSideData(DemuxPacket *pkt, AVPacket *src)
   // and storing our own AVPacket. This will require some extensive changes.
   av_buffer_unref(&avPkt->buf);
   av_free(avPkt);
+}
+
+bool CDVDDemuxUtils::SnapMsQuantisedFrameRate(int& fpsRate, int& fpsScale, double hintFps)
+{
+  if (fpsRate <= 0 || fpsScale <= 0)
+    return false;
+
+  const int64_t num = 1000LL * fpsScale;
+  if (num % fpsRate != 0)
+    return false;
+  const int64_t durationMs = num / fpsRate;
+
+  static constexpr AVRational standardRates[] = {{24000, 1001}, {24, 1}, {25, 1},
+                                                 {30000, 1001}, {30, 1}, {50, 1},
+                                                 {60000, 1001}, {60, 1}};
+
+  const AVRational* fallback = nullptr;
+  const AVRational* bestHinted = nullptr;
+  double bestHintDiff = 0.005;
+
+  for (const AVRational& rate : standardRates)
+  {
+    if (std::lround(1000.0 * rate.den / rate.num) != durationMs)
+      continue;
+    if (static_cast<int64_t>(rate.num) * fpsScale == static_cast<int64_t>(rate.den) * fpsRate)
+      return false;
+
+    if (!fallback)
+      fallback = &rate;
+
+    if (hintFps > 0.0)
+    {
+      const double diff = std::fabs(hintFps - av_q2d(rate)) / av_q2d(rate);
+      if (diff <= bestHintDiff)
+      {
+        bestHintDiff = diff;
+        bestHinted = &rate;
+      }
+    }
+  }
+
+  const AVRational* chosen = hintFps > 0.0 ? bestHinted : fallback;
+  if (!chosen)
+    return false;
+
+  fpsRate = chosen->num;
+  fpsScale = chosen->den;
+  return true;
 }

@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2005-2018 Team Kodi
+ *  Copyright (C) 2005-2024 Team Kodi
  *  This file is part of Kodi - https://kodi.tv
  *
  *  SPDX-License-Identifier: GPL-2.0-or-later
@@ -14,11 +14,15 @@
 #include "Texture.h"
 #include "TextureManager.h"
 #include "gui3d.h"
+#include "rendering/GLExtensions.h"
 #include "rendering/MatrixGL.h"
 #include "rendering/gl/RenderSystemGL.h"
+#include "settings/AdvancedSettings.h"
+#include "settings/SettingsComponent.h"
 #include "utils/GLUtils.h"
 #include "utils/log.h"
 #include "windowing/GraphicContext.h"
+#include "windowing/WinSystem.h"
 
 #include <cassert>
 #include <memory>
@@ -63,7 +67,17 @@ bool CGUIFontTTFGL::FirstBegin()
     internalFormat = GL_R8;
   else
     internalFormat = GL_LUMINANCE;
+
   renderSystem->EnableShader(ShaderMethodGL::SM_FONTS);
+  if (renderSystem->ScissorsCanEffectClipping())
+  {
+    m_scissorClip = true;
+  }
+  else
+  {
+    m_scissorClip = false;
+    renderSystem->EnableShader(ShaderMethodGL::SM_FONTS_SHADER_CLIP);
+  }
 
   if (m_textureStatus == TEXTURE_REALLOCATED)
   {
@@ -87,6 +101,16 @@ bool CGUIFontTTFGL::FirstBegin()
     // Set the texture image -- THIS WORKS, so the pixels must be wrong.
     glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, m_texture->GetWidth(), m_texture->GetHeight(), 0,
                  pixformat, GL_UNSIGNED_BYTE, 0);
+
+#ifdef GL_TEXTURE_MAX_ANISOTROPY_EXT
+    if (CServiceBroker::GetRenderSystem()->IsExtSupported("GL_EXT_texture_filter_anisotropic"))
+    {
+      int32_t aniso =
+          CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_guiAnisotropicFiltering;
+      if (aniso > 1)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, aniso);
+    }
+#endif
 
     VerifyGLState();
     m_textureStatus = TEXTURE_UPDATED;
@@ -117,6 +141,9 @@ bool CGUIFontTTFGL::FirstBegin()
 
 void CGUIFontTTFGL::LastEnd()
 {
+  // static vertex arrays are not supported anymore
+  assert(m_vertex.empty());
+
   CWinSystemBase* const winSystem = CServiceBroker::GetWinSystem();
   if (!winSystem)
     return;
@@ -126,7 +153,10 @@ void CGUIFontTTFGL::LastEnd()
   GLint posLoc = renderSystem->ShaderGetPos();
   GLint colLoc = renderSystem->ShaderGetCol();
   GLint tex0Loc = renderSystem->ShaderGetCoord0();
-  GLint modelLoc = renderSystem->ShaderGetModel();
+  GLint clipUniformLoc = renderSystem->ShaderGetClip();
+  GLint coordStepUniformLoc = renderSystem->ShaderGetCoordStep();
+  GLint matrixUniformLoc = renderSystem->ShaderGetMatrix();
+  GLint depthLoc = renderSystem->ShaderGetDepth();
 
   CreateStaticVertexBuffers();
 
@@ -134,44 +164,6 @@ void CGUIFontTTFGL::LastEnd()
   glEnableVertexAttribArray(posLoc);
   glEnableVertexAttribArray(colLoc);
   glEnableVertexAttribArray(tex0Loc);
-
-  if (!m_vertex.empty())
-  {
-
-    // Deal with vertices that had to use software clipping
-    std::vector<SVertex> vecVertices(6 * (m_vertex.size() / 4));
-    SVertex* vertices = &vecVertices[0];
-    for (size_t i = 0; i < m_vertex.size(); i += 4)
-    {
-      *vertices++ = m_vertex[i];
-      *vertices++ = m_vertex[i + 1];
-      *vertices++ = m_vertex[i + 2];
-
-      *vertices++ = m_vertex[i + 1];
-      *vertices++ = m_vertex[i + 3];
-      *vertices++ = m_vertex[i + 2];
-    }
-    vertices = &vecVertices[0];
-
-    GLuint VertexVBO;
-
-    glGenBuffers(1, &VertexVBO);
-    glBindBuffer(GL_ARRAY_BUFFER, VertexVBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(SVertex) * vecVertices.size(), &vecVertices[0],
-                 GL_STATIC_DRAW);
-
-    glVertexAttribPointer(posLoc, 3, GL_FLOAT, GL_FALSE, sizeof(SVertex),
-                          reinterpret_cast<const GLvoid*>(offsetof(SVertex, x)));
-    glVertexAttribPointer(colLoc, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(SVertex),
-                          reinterpret_cast<const GLvoid*>(offsetof(SVertex, r)));
-    glVertexAttribPointer(tex0Loc, 2, GL_FLOAT, GL_FALSE, sizeof(SVertex),
-                          reinterpret_cast<const GLvoid*>(offsetof(SVertex, u)));
-
-    glDrawArrays(GL_TRIANGLES, 0, vecVertices.size());
-
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glDeleteBuffers(1, &VertexVBO);
-  }
 
   if (!m_vertexTrans.empty())
   {
@@ -199,14 +191,64 @@ void CGUIFontTTFGL::LastEnd()
         // skip empty clip
         if (clip.IsEmpty())
           continue;
-        renderSystem->SetScissors(clip);
       }
 
-      // Apply the translation to the currently active (top-of-stack) model view matrix
-      glMatrixModview.Push();
-      glMatrixModview.Get().Translatef(m_vertexTrans[i].m_translateX, m_vertexTrans[i].m_translateY,
-                                       m_vertexTrans[i].m_translateZ);
-      glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glMatrixModview.Get());
+      if (m_scissorClip)
+      {
+        // clip using scissors
+        renderSystem->SetScissors(clip);
+      }
+      else
+      {
+        // clip using vertex shader
+        renderSystem->SetScissors(scissor);
+
+        const float clipBoundaries[4] = {
+            (m_vertexTrans[i].m_clip.x1 - m_vertexTrans[i].m_translateX -
+             m_vertexTrans[i].m_offsetX) /
+                context.GetGUIScaleX(),
+            (m_vertexTrans[i].m_clip.y1 - m_vertexTrans[i].m_translateY -
+             m_vertexTrans[i].m_offsetY) /
+                context.GetGUIScaleY(),
+            (m_vertexTrans[i].m_clip.x2 - m_vertexTrans[i].m_translateX -
+             m_vertexTrans[i].m_offsetX) /
+                context.GetGUIScaleX(),
+            (m_vertexTrans[i].m_clip.y2 - m_vertexTrans[i].m_translateY -
+             m_vertexTrans[i].m_offsetY) /
+                context.GetGUIScaleY()};
+
+        glUniform4fv(clipUniformLoc, 1, clipBoundaries);
+
+        const float textureSteps[4] = {1.f / static_cast<float>(m_textureWidth),
+                                       1.f / static_cast<float>(m_textureHeight), 1.f, 1.f};
+
+        glUniform4fv(coordStepUniformLoc, 1, textureSteps);
+      }
+
+      // calculate the fractional offset to the ideal position
+      float fractX =
+          context.ScaleFinalXCoord(m_vertexTrans[i].m_translateX, m_vertexTrans[i].m_translateY);
+      float fractY =
+          context.ScaleFinalYCoord(m_vertexTrans[i].m_translateX, m_vertexTrans[i].m_translateY);
+      fractX = -fractX + std::round(fractX);
+      fractY = -fractY + std::round(fractY);
+
+      // proj * model * gui * scroll * translation * scaling * correction factor
+      CMatrixGL matrix = glMatrixProject.Get();
+      matrix.MultMatrixf(glMatrixModview.Get());
+      matrix.MultMatrixf(CMatrixGL(context.GetGUIMatrix()));
+      matrix.Translatef(m_vertexTrans[i].m_offsetX, m_vertexTrans[i].m_offsetY, 0.0f);
+      matrix.Translatef(m_vertexTrans[i].m_translateX, m_vertexTrans[i].m_translateY, 0.0f);
+      // the gui matrix messes with the scale. correct it here for now.
+      matrix.Scalef(context.GetGUIScaleX(), context.GetGUIScaleY(), 1.0f);
+      // the gui matrix doesn't align to exact pixel coords atm. correct it here for now.
+      matrix.Translatef(fractX, fractY, 0.0f);
+
+      glUniformMatrix4fv(matrixUniformLoc, 1, GL_FALSE, matrix);
+
+      // Apply the depth value of the layer
+      float depth = CServiceBroker::GetWinSystem()->GetGfxContext().GetTransformDepth();
+      glUniform1f(depthLoc, depth);
 
       // Bind the buffer to the OpenGL context's GL_ARRAY_BUFFER binding point
       glBindBuffer(GL_ARRAY_BUFFER, m_vertexTrans[i].m_vertexBuffer->bufferHandle);
@@ -233,13 +275,11 @@ void CGUIFontTTFGL::LastEnd()
 
         glDrawElements(GL_TRIANGLES, 6 * count, GL_UNSIGNED_SHORT, 0);
       }
-
-      glMatrixModview.Pop();
     }
+
     // Restore the original scissor rectangle
     renderSystem->SetScissors(scissor);
-    // Restore the original model view matrix
-    glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glMatrixModview.Get());
+
     // Unbind GL_ARRAY_BUFFER and GL_ELEMENT_ARRAY_BUFFER
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);

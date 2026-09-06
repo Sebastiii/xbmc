@@ -31,6 +31,10 @@ public:
   }
   void Add(double error)
   {
+    if (!m_count || error < m_min)
+      m_min = error;
+    if (!m_count || error > m_max)
+      m_max = error;
     m_buffer += error;
     m_count++;
   }
@@ -40,6 +44,8 @@ public:
     m_buffer = 0.0;
     m_lastError = 0.0;
     m_count  = 0;
+    m_min = 0.0;
+    m_max = 0.0;
     m_timer.Set(interval);
   }
 
@@ -47,6 +53,8 @@ public:
   {
     m_buffer = 0.0;
     m_count = 0;
+    m_min = 0.0;
+    m_max = 0.0;
     m_timer.Set(interval);
   }
 
@@ -55,6 +63,9 @@ public:
     if(m_timer.IsTimePast())
     {
       error = Get();
+      m_lastMin = m_min;
+      m_lastMax = m_max;
+      m_lastCount = m_count;
       Flush(interval);
       m_lastError = error;
       return true;
@@ -76,6 +87,10 @@ public:
     m_lastError += correction;
   }
 
+  double GetLastMin() const { return m_lastMin; }
+  double GetLastMax() const { return m_lastMax; }
+  int GetLastCount() const { return m_lastCount; }
+
 protected:
   double Get() const
   {
@@ -87,6 +102,11 @@ protected:
   double m_buffer;
   double m_lastError;
   int m_count;
+  double m_min{0.0};
+  double m_max{0.0};
+  double m_lastMin{0.0};
+  double m_lastMax{0.0};
+  int m_lastCount{0};
   XbmcThreads::EndTime<> m_timer;
 };
 
@@ -180,6 +200,7 @@ public:
   double GetResampleRatio() override;
   void SetResampleRatio(double ratio) override;
   void SetResampleMode(int mode) override;
+  void SetHybridFirstCycleInterval(std::chrono::milliseconds interval) override;
   void RegisterAudioCallback(IAudioCallback* pCallback) override;
   void UnRegisterAudioCallback() override;
   void FadeVolume(float from, float to, unsigned int time) override;
@@ -210,9 +231,12 @@ protected:
   CSampleBuffer *m_currentBuffer;
   std::unique_ptr<CSoundPacket> m_remapBuffer;
   std::unique_ptr<IAEResample> m_remapper;
-  double m_lastPts;
-  double m_lastPtsJump;
-  std::chrono::milliseconds m_errorInterval{1000};
+  std::atomic<double> m_lastPts{0.0};
+  std::atomic<double> m_lastPtsJump{0.0};
+  std::atomic<std::chrono::milliseconds::rep> m_errorIntervalMs{1000};
+  std::atomic<std::chrono::milliseconds::rep> m_hybridFirstCycleIntervalMs{0};
+  std::atomic<bool> m_insyncFirstCycle{false};
+  std::atomic<bool> m_lastSyncFromFirstCycle{false};
 
   // only accessed by engine
   std::unique_ptr<CActiveAEBufferPool> m_inputBuffers;
@@ -243,6 +267,12 @@ protected:
   CSyncError m_syncError;
   double m_lastSyncError;
   CAESyncInfo::AESyncState m_syncState;
+  double m_resumeSyncTarget{0.0};
+  bool m_resumeSyncTargetValid{false};
+  bool m_useResumeSyncTarget{false};
+  int m_resumeSyncChecks{0};
+  unsigned int m_syncErrorBurst{0};
+  double m_syncErrorDampFactor{1.0};
 };
 }
 

@@ -39,5 +39,12 @@ class CAELimiter
       m_samplerate = (float)samplerate;
     }
 
+    void Reset()
+    {
+      m_attenuation = 1.0f;
+      m_holdcounter = 0;
+      m_increase = 0.0f;
+    }
+
     float Run(float* frame[AE_CH_MAX], int channels, int offset = 0, bool planar = false);
 };

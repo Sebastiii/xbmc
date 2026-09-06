@@ -137,7 +137,10 @@ BD_FILE_H * CBlurayCallback::file_open(void *handle, const char *rel_path)
     return file;
   }
 
-  CLog::Log(LOGDEBUG, "CBlurayCallback - Error opening file! ({})", CURL::GetRedacted(strFilename));
+  logComponentM(LOGDEBUG, LOGVIDEO,
+                "CBlurayCallback::file_open FAILED - basePath:[{}] relPath:[{}] full:[{}] exists:{}",
+                CURL::GetRedacted(*strBasePath), strRelPath, CURL::GetRedacted(strFilename),
+                CFile::Exists(strFilename));
 
   delete fp;
   delete file;

@@ -259,6 +259,8 @@ bool CVideoInfoTag::Save(TiXmlNode *node, const std::string &tag, bool savePathI
       XMLUtils::SetInt(&stream, "durationinseconds", m_streamDetails.GetVideoDuration(iStream));
       XMLUtils::SetString(&stream, "stereomode", m_streamDetails.GetStereoMode(iStream));
       XMLUtils::SetString(&stream, "hdrtype", m_streamDetails.GetVideoHdrType(iStream));
+      XMLUtils::SetString(&stream, "hdrtypealt", m_streamDetails.GetVideoHdrTypeAlt(iStream));
+      XMLUtils::SetString(&stream, "dvprofile", m_streamDetails.GetVideoDvProfile(iStream));
       streamdetails.InsertEndChild(stream);
     }
     for (int iStream=1; iStream<=m_streamDetails.GetAudioStreamCount(); iStream++)
@@ -267,6 +269,15 @@ bool CVideoInfoTag::Save(TiXmlNode *node, const std::string &tag, bool savePathI
       XMLUtils::SetString(&stream, "codec", m_streamDetails.GetAudioCodec(iStream));
       XMLUtils::SetString(&stream, "language", m_streamDetails.GetAudioLanguage(iStream));
       XMLUtils::SetInt(&stream, "channels", m_streamDetails.GetAudioChannels(iStream));
+      XMLUtils::SetString(&stream, "profile", m_streamDetails.GetAudioProfile(iStream));
+      if (m_streamDetails.GetAudioObjects(iStream) >= 0)
+        XMLUtils::SetInt(&stream, "objects", m_streamDetails.GetAudioObjects(iStream));
+      if (m_streamDetails.GetAudioBedChannels(iStream) >= 0)
+        XMLUtils::SetInt(&stream, "bedchannels",
+                         m_streamDetails.GetAudioBedChannels(iStream));
+      if (m_streamDetails.GetAudioObjectChannels(iStream) >= 0)
+        XMLUtils::SetInt(&stream, "objectchannels",
+                         m_streamDetails.GetAudioObjectChannels(iStream));
       streamdetails.InsertEndChild(stream);
     }
     for (int iStream=1; iStream<=m_streamDetails.GetSubtitleStreamCount(); iStream++)
@@ -844,21 +855,12 @@ void CVideoInfoTag::ToSortable(SortItem& sortable, Field field) const
   }
   case FieldSortTitle:
   {
-    // seasons with a custom name/title need special handling as they should be sorted by season number
-    if (m_type == MediaTypeSeason && !m_strSortTitle.empty())
-      sortable[FieldSortTitle] = StringUtils::Format(g_localizeStrings.Get(20358), m_iSeason);
-    else
-      sortable[FieldSortTitle] = m_strSortTitle;
+    sortable[FieldSortTitle] = m_strSortTitle;
     break;
   }
   case FieldOriginalTitle:
   {
-    // seasons with a custom name/title need special handling as they should be sorted by season number
-    if (m_type == MediaTypeSeason && !m_strOriginalTitle.empty())
-      sortable[FieldOriginalTitle] =
-          StringUtils::Format(g_localizeStrings.Get(20358).c_str(), m_iSeason);
-    else
-      sortable[FieldOriginalTitle] = m_strOriginalTitle;
+    sortable[FieldOriginalTitle] = m_strOriginalTitle;
     break;
   }
   case FieldTvShowStatus:             sortable[FieldTvShowStatus] = m_strStatus; break;
@@ -1000,6 +1002,9 @@ void CVideoInfoTag::ParseNative(const TiXmlElement* movie, bool prioritise)
 {
   std::string value;
   float fValue;
+
+  if (StringUtils::ToLower(XMLUtils::GetAttribute(movie, "override")) == "true")
+    SetOverride(true);
 
   if (XMLUtils::GetString(movie, "title", value))
     SetTitle(value);
@@ -1330,12 +1335,21 @@ void CVideoInfoTag::ParseNative(const TiXmlElement* movie, bool prioritise)
       {
         auto p = new CStreamDetailAudio();
         if (XMLUtils::GetString(nodeDetail, "codec", value))
-          p->m_strCodec = StringUtils::Trim(value);
+        {
+          std::string codec = StringUtils::Trim(value);
+          StringUtils::ToLower(codec);
+          p->SetCodecFromStream(codec);
+        }
 
         if (XMLUtils::GetString(nodeDetail, "language", value))
           p->m_strLanguage = StringUtils::Trim(value);
 
         XMLUtils::GetInt(nodeDetail, "channels", p->m_iChannels);
+        if (XMLUtils::GetString(nodeDetail, "profile", value) && !StringUtils::Trim(value).empty())
+          p->m_strProfile = StringUtils::Trim(value);
+        XMLUtils::GetInt(nodeDetail, "objects", p->m_iAudioObjects);
+        XMLUtils::GetInt(nodeDetail, "objectchannels", p->m_iAudioObjectChannels);
+        XMLUtils::GetInt(nodeDetail, "bedchannels", p->m_iAudioBedChannels);
         StringUtils::ToLower(p->m_strCodec);
         StringUtils::ToLower(p->m_strLanguage);
         m_streamDetails.AddStream(p);
@@ -1355,8 +1369,22 @@ void CVideoInfoTag::ParseNative(const TiXmlElement* movie, bool prioritise)
           p->m_strStereoMode = StringUtils::Trim(value);
         if (XMLUtils::GetString(nodeDetail, "language", value))
           p->m_strLanguage = StringUtils::Trim(value);
+        std::string hdrType;
+        std::string hdrTypeAlt;
         if (XMLUtils::GetString(nodeDetail, "hdrtype", value))
-          p->m_strHdrType = StringUtils::Trim(value);
+        {
+          hdrType = StringUtils::Trim(value);
+          StringUtils::ToLower(hdrType);
+        }
+        if (XMLUtils::GetString(nodeDetail, "hdrtypealt", value))
+        {
+          hdrTypeAlt = StringUtils::Trim(value);
+          StringUtils::ToLower(hdrTypeAlt);
+        }
+        p->SetHdrTypes(CStreamDetails::StringToHdrType(hdrType),
+                       CStreamDetails::StringToHdrType(hdrTypeAlt));
+        if (XMLUtils::GetString(nodeDetail, "dvprofile", value))
+          p->m_strDvProfile = StringUtils::Trim(value);
 
         StringUtils::ToLower(p->m_strCodec);
         StringUtils::ToLower(p->m_strStereoMode);
@@ -1632,10 +1660,12 @@ void CVideoInfoTag::SetArtist(std::vector<std::string> artist)
 
 void CVideoInfoTag::SetUniqueIDs(std::map<std::string, std::string> uniqueIDs)
 {
-  for (const auto& uniqueid : uniqueIDs)
+  for (auto it = uniqueIDs.begin(); it != uniqueIDs.end();)
   {
-    if (uniqueid.first.empty())
-      uniqueIDs.erase(uniqueid.first);
+    if (it->first.empty() || it->second.empty())
+      it = uniqueIDs.erase(it);
+    else
+      ++it;
   }
   if (uniqueIDs.find(m_strDefaultUniqueID) == uniqueIDs.end())
   {

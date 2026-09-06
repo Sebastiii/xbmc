@@ -19,6 +19,7 @@
 #include <map>
 #include <stdint.h>
 #include <string>
+#include <unordered_map>
 
 /*!
  \ingroup strings
@@ -30,6 +31,8 @@ struct LocStr
   std::string strTranslated; // string to be used in xbmc GUI
   std::string strOriginal;   // the original English string the translation is based on
 };
+
+using LocStrMap = std::unordered_map<uint32_t, LocStr>;
 
 // The default fallback language is fixed to be English
 const std::string LANGUAGE_DEFAULT = "resource.language.en_gb";
@@ -54,10 +57,10 @@ public:
 protected:
   void Clear(uint32_t start, uint32_t end);
 
-  std::map<uint32_t, LocStr> m_strings;
-  std::map<std::string, std::map<uint32_t, LocStr>> m_addonStrings;
-  typedef std::map<uint32_t, LocStr>::const_iterator ciStrings;
-  typedef std::map<uint32_t, LocStr>::iterator       iStrings;
+  LocStrMap m_strings;
+  std::map<std::string, LocStrMap> m_addonStrings;
+  typedef LocStrMap::const_iterator ciStrings;
+  typedef LocStrMap::iterator       iStrings;
 
   mutable CSharedSection m_stringsMutex;
   CSharedSection m_addonStringsMutex;

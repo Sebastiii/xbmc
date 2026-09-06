@@ -40,6 +40,7 @@ public:
 
 protected:
   int GetData(uint8_t** dst);
+  void ApplyDrcScale();
   enum AEDataFormat GetDataFormat() const;
   int GetSampleRate() const;
   int GetChannels() const;
@@ -60,5 +61,8 @@ protected:
   uint64_t m_layout;
   std::string m_codecName;
   uint64_t m_hint_layout;
+
+  int m_audioDelayFrameCounter = 0;
+  bool m_audioDelayFirstAfterReset = true;
 };
 

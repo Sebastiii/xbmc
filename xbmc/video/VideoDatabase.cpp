@@ -24,6 +24,7 @@
 #include "dialogs/GUIDialogProgress.h"
 #include "dialogs/GUIDialogYesNo.h"
 #include "filesystem/Directory.h"
+#include "filesystem/DirectoryCache.h"
 #include "filesystem/File.h"
 #include "filesystem/MultiPathDirectory.h"
 #include "filesystem/PluginDirectory.h"
@@ -43,9 +44,11 @@
 #include "settings/Settings.h"
 #include "settings/SettingsComponent.h"
 #include "storage/MediaManager.h"
+#include "threads/CriticalSection.h"
 #include "utils/FileUtils.h"
 #include "utils/GroupUtils.h"
 #include "utils/LabelFormatter.h"
+#include "utils/StreamUtils.h"
 #include "utils/StringUtils.h"
 #include "utils/URIUtils.h"
 #include "utils/Variant.h"
@@ -60,6 +63,7 @@
 #include <algorithm>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -80,7 +84,119 @@ CVideoDatabase::~CVideoDatabase(void) = default;
 //********************************************************************************************************************************
 bool CVideoDatabase::Open()
 {
-  return CDatabase::Open(CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_databaseVideo);
+  if (!CDatabase::Open(
+          CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_databaseVideo))
+    return false;
+
+  AddMissingColumns();
+  return true;
+}
+
+void CVideoDatabase::AddMissingColumns()
+{
+  static std::string s_checkedDatabase;
+  static CCriticalSection s_checkedSection;
+
+  const std::string databaseFolder = m_profileManager.GetDatabaseFolder();
+
+  std::unique_lock<CCriticalSection> lock(s_checkedSection);
+  if (s_checkedDatabase == databaseFolder)
+    return;
+
+  if (nullptr == m_pDB || nullptr == m_pDS)
+    return;
+
+  AddMissingColumn("streamdetails", "strHdrTypeAlt", "text");
+  AddMissingColumn("streamdetails", "strDvProfile", "text");
+  AddMissingColumn("streamdetails", "strAudioProfile", "text");
+  AddMissingColumn("streamdetails", "iAudioObjects", "integer");
+  AddMissingColumn("streamdetails", "iAudioObjectChannels", "integer");
+  AddMissingColumn("streamdetails", "iAudioBedChannels", "integer");
+
+  try
+  {
+    m_pDS->exec("UPDATE streamdetails SET strHdrType=LOWER(strHdrType) WHERE strHdrType IS NOT NULL");
+    m_pDS->exec(
+        "UPDATE streamdetails SET strHdrTypeAlt=LOWER(strHdrTypeAlt) WHERE strHdrTypeAlt IS NOT NULL");
+    m_pDS->exec("UPDATE streamdetails SET strHdrType='hdr10plus' WHERE strHdrType='hdr10+'");
+  }
+  catch (...)
+  {
+    CLog::Log(LOGERROR, "{} unable to migrate hdr10+ stream details", __FUNCTION__);
+  }
+
+  try
+  {
+    static const std::pair<const char*, const char*> codecMigration[] = {
+        {"truehd_atmos", "truehd"},      {"eac3_ddp_atmos", "eac3"},
+        {"dtshd_ma_x", "dtshd_ma"},      {"dtshd_ma_x_imax", "dtshd_ma"},
+        {"dts_es", "dca"},               {"dts_96_24", "dca"},
+        {"dts_express", "dca"},          {"aac_lc", "aac"},
+        {"he_aac", "aac"},               {"he_aac_v2", "aac"},
+        {"aac_ssr", "aac"},              {"aac_ltp", "aac"}};
+
+    for (const auto& [extended, canonical] : codecMigration)
+    {
+      const std::string detail = StreamUtils::GetCodecDetail(extended);
+      m_pDS->exec(PrepareSQL("UPDATE streamdetails SET strAudioProfile="
+                             "CASE WHEN strAudioProfile IS NULL OR strAudioProfile='' THEN '%s' "
+                             "ELSE strAudioProfile END, strAudioCodec='%s' WHERE strAudioCodec='%s'",
+                             detail.c_str(), canonical, extended));
+    }
+
+  }
+  catch (...)
+  {
+    CLog::Log(LOGERROR, "{} unable to migrate extended audio codec stream details", __FUNCTION__);
+  }
+
+  try
+  {
+    m_pDS->exec("UPDATE streamdetails SET strHdrTypeAlt='hdr10plus' WHERE strHdrTypeAlt='hdr10+'");
+    m_pDS->exec("UPDATE streamdetails SET strHdrType='dolbyvision', strHdrTypeAlt='hdr10plus' "
+                "WHERE strHdrType='hdr10plus' AND strHdrTypeAlt='dolbyvision'");
+    m_pDS->exec("UPDATE streamdetails SET strHdrType='hdr10', strHdrTypeAlt='hdr10plus' "
+                "WHERE strHdrType='hdr10plus'");
+    m_pDS->exec("UPDATE streamdetails SET strHdrType='', strHdrTypeAlt='hdrvivid' "
+                "WHERE strHdrType='hdrvivid'");
+    m_pDS->exec("UPDATE streamdetails SET strHdrTypeAlt='' "
+                "WHERE COALESCE(strHdrTypeAlt,'')=COALESCE(strHdrType,'')");
+  }
+  catch (...)
+  {
+    CLog::Log(LOGERROR, "{} unable to migrate extended hdr stream details", __FUNCTION__);
+  }
+
+  s_checkedDatabase = databaseFolder;
+}
+
+void CVideoDatabase::AddMissingColumn(const std::string& table,
+                                      const std::string& column,
+                                      const std::string& type)
+{
+  try
+  {
+    if (nullptr == m_pDB || nullptr == m_pDS)
+      return;
+
+    m_pDS->query(PrepareSQL("SELECT %s FROM %s LIMIT 1", column.c_str(), table.c_str()));
+    m_pDS->close();
+    return;
+  }
+  catch (...)
+  {
+  }
+
+  try
+  {
+    CLog::Log(LOGINFO, "{} adding column {} to the {} table", __FUNCTION__, column, table);
+    m_pDS->exec(PrepareSQL("ALTER TABLE %s ADD %s %s", table.c_str(), column.c_str(),
+                           type.c_str()));
+  }
+  catch (...)
+  {
+    CLog::Log(LOGERROR, "{} unable to add column {} to the {} table", __FUNCTION__, column, table);
+  }
 }
 
 void CVideoDatabase::CreateTables()
@@ -179,7 +295,8 @@ void CVideoDatabase::CreateTables()
     "strVideoCodec text, fVideoAspect float, iVideoWidth integer, iVideoHeight integer, "
     "strAudioCodec text, iAudioChannels integer, strAudioLanguage text, "
     "strSubtitleLanguage text, iVideoDuration integer, strStereoMode text, strVideoLanguage text, "
-    "strHdrType text)");
+    "strHdrType text, strHdrTypeAlt text, strDvProfile text, strAudioProfile text, "
+    "iAudioObjects integer, iAudioObjectChannels integer, iAudioBedChannels integer)");
 
   CLog::Log(LOGINFO, "create sets table");
   m_pDS->exec("CREATE TABLE sets ( idSet integer primary key, strSet text, strOverview text)");
@@ -2482,6 +2599,7 @@ bool CVideoDatabase::GetFileInfo(const std::string& strFilenameAndPath, CVideoIn
     details.m_strPath = m_pDS->fv("path.strPath").get_asString();
     std::string strFileName = m_pDS->fv("files.strFilename").get_asString();
     ConstructPath(details.m_strFileNameAndPath, details.m_strPath, strFileName);
+    details.m_basePath = URIUtils::GetBasePath(details.m_strPath);
     details.SetPlayCount(std::max(details.GetPlayCount(), m_pDS->fv("files.playCount").get_asInt()));
     if (!details.m_lastPlayed.IsValid())
       details.m_lastPlayed.SetFromDBDateTime(m_pDS->fv("files.lastPlayed").get_asString());
@@ -2846,10 +2964,20 @@ int CVideoDatabase::GetMatchingTvShow(const CVideoInfoTag &details)
 {
   // first try matching on uniqueid, then on title + year
   int id = -1;
-  if (!details.HasUniqueID())
-    id = GetDbId(PrepareSQL("SELECT idShow FROM tvshow JOIN uniqueid ON uniqueid.media_id=tvshow.idShow AND uniqueid.media_type='tvshow' WHERE uniqueid.value='%s'", details.GetUniqueID().c_str()));
+  if (details.HasUniqueID())
+  {
+    id = GetDbId(PrepareSQL("SELECT uniqueid.media_id FROM uniqueid "
+                            "JOIN tvshow ON uniqueid.media_id=tvshow.idShow "
+                            "WHERE uniqueid.media_type='%s' "
+                            "AND uniqueid.value='%s' "
+                            "AND uniqueid.type='%s' ",
+                            MediaTypeTvShow, details.GetUniqueID().c_str(),
+                            details.GetDefaultUniqueID().c_str()));
+  }
   if (id < 0)
-    id = GetDbId(PrepareSQL("SELECT idShow FROM tvshow WHERE c%02d='%s' AND c%02d='%s'", VIDEODB_ID_TV_TITLE, details.m_strTitle.c_str(), VIDEODB_ID_TV_PREMIERED, details.GetPremiered().GetAsDBDate().c_str()));
+    id = GetDbId(PrepareSQL("SELECT idShow FROM tvshow WHERE c%02d='%s' AND c%02d='%s'",
+                            VIDEODB_ID_TV_TITLE, details.m_strTitle.c_str(),
+                            VIDEODB_ID_TV_PREMIERED, details.GetPremiered().GetAsDBDate().c_str()));
   return id;
 }
 
@@ -3212,23 +3340,28 @@ void CVideoDatabase::SetStreamDetailsForFileId(const CStreamDetails& details, in
       m_pDS->exec(PrepareSQL("INSERT INTO streamdetails "
                              "(idFile, iStreamType, strVideoCodec, fVideoAspect, iVideoWidth, "
                              "iVideoHeight, iVideoDuration, strStereoMode, strVideoLanguage,  "
-                             "strHdrType)"
-                             "VALUES (%i,%i,'%s',%f,%i,%i,%i,'%s','%s','%s')",
+                             "strHdrType, strHdrTypeAlt, strDvProfile)"
+                             "VALUES (%i,%i,'%s',%f,%i,%i,%i,'%s','%s','%s','%s','%s')",
                              idFile, (int)CStreamDetail::VIDEO, details.GetVideoCodec(i).c_str(),
                              static_cast<double>(details.GetVideoAspect(i)),
                              details.GetVideoWidth(i), details.GetVideoHeight(i),
                              details.GetVideoDuration(i), details.GetStereoMode(i).c_str(),
                              details.GetVideoLanguage(i).c_str(),
-                             details.GetVideoHdrType(i).c_str()));
+                             details.GetVideoHdrType(i).c_str(),
+                             details.GetVideoHdrTypeAlt(i).c_str(),
+                             details.GetVideoDvProfile(i).c_str()));
     }
     for (int i=1; i<=details.GetAudioStreamCount(); i++)
     {
       m_pDS->exec(PrepareSQL("INSERT INTO streamdetails "
-        "(idFile, iStreamType, strAudioCodec, iAudioChannels, strAudioLanguage) "
-        "VALUES (%i,%i,'%s',%i,'%s')",
+        "(idFile, iStreamType, strAudioCodec, iAudioChannels, strAudioLanguage, strAudioProfile, "
+        "iAudioObjects, iAudioObjectChannels, iAudioBedChannels) "
+        "VALUES (%i,%i,'%s',%i,'%s','%s',%i,%i,%i)",
         idFile, (int)CStreamDetail::AUDIO,
         details.GetAudioCodec(i).c_str(), details.GetAudioChannels(i),
-        details.GetAudioLanguage(i).c_str()));
+        details.GetAudioLanguage(i).c_str(), details.GetAudioProfile(i).c_str(),
+        details.GetAudioObjects(i), details.GetAudioObjectChannels(i),
+        details.GetAudioBedChannels(i)));
     }
     for (int i=1; i<=details.GetSubtitleStreamCount(); i++)
     {
@@ -3444,17 +3577,17 @@ void CVideoDatabase::GetEpisodesByFile(const std::string& strFilenameAndPath, st
 }
 
 //********************************************************************************************************************************
-void CVideoDatabase::AddBookMarkToFile(const std::string& strFilenameAndPath, const CBookmark &bookmark, CBookmark::EType type /*= CBookmark::STANDARD*/)
+bool CVideoDatabase::AddBookMarkToFile(const std::string& strFilenameAndPath, const CBookmark &bookmark, CBookmark::EType type /*= CBookmark::STANDARD*/)
 {
   try
   {
     int idFile = AddFile(strFilenameAndPath);
     if (idFile < 0)
-      return;
+      return false;
     if (nullptr == m_pDB)
-      return;
+      return false;
     if (nullptr == m_pDS)
-      return;
+      return false;
 
     std::string strSQL;
     int idBookmark=-1;
@@ -3489,7 +3622,9 @@ void CVideoDatabase::AddBookMarkToFile(const std::string& strFilenameAndPath, co
   catch (...)
   {
     CLog::Log(LOGERROR, "{} ({}) failed", __FUNCTION__, strFilenameAndPath);
+    return false;
   }
+  return true;
 }
 
 void CVideoDatabase::ClearBookMarkOfFile(const std::string& strFilenameAndPath,
@@ -3533,23 +3668,25 @@ void CVideoDatabase::ClearBookMarkOfFile(const std::string& strFilenameAndPath,
 }
 
 //********************************************************************************************************************************
-void CVideoDatabase::ClearBookMarksOfFile(const std::string& strFilenameAndPath, CBookmark::EType type /*= CBookmark::STANDARD*/)
+bool CVideoDatabase::ClearBookMarksOfFile(const std::string& strFilenameAndPath, CBookmark::EType type /*= CBookmark::STANDARD*/)
 {
   int idFile = GetFileId(strFilenameAndPath);
-  if (idFile >= 0)
-    return ClearBookMarksOfFile(idFile, type);
+  if (idFile < 0)
+    return false;
+
+  return ClearBookMarksOfFile(idFile, type);
 }
 
-void CVideoDatabase::ClearBookMarksOfFile(int idFile, CBookmark::EType type /*= CBookmark::STANDARD*/) const {
+bool CVideoDatabase::ClearBookMarksOfFile(int idFile, CBookmark::EType type /*= CBookmark::STANDARD*/) const {
   if (idFile < 0)
-    return;
+    return false;
 
   try
   {
     if (nullptr == m_pDB)
-      return;
+      return false;
     if (nullptr == m_pDS)
-      return;
+      return false;
 
     std::string strSQL=PrepareSQL("delete from bookmark where idFile=%i and type=%i", idFile, (int)type);
     m_pDS->exec(strSQL);
@@ -3562,7 +3699,9 @@ void CVideoDatabase::ClearBookMarksOfFile(int idFile, CBookmark::EType type /*= 
   catch (...)
   {
     CLog::Log(LOGERROR, "{} ({}) failed", __FUNCTION__, idFile);
+    return false;
   }
+  return true;
 }
 
 
@@ -4195,6 +4334,13 @@ bool CVideoDatabase::GetStreamDetails(CVideoInfoTag& tag) const
     std::string strSQL = PrepareSQL("SELECT * FROM streamdetails WHERE idFile = %i", tag.m_iFileId);
     pDS->query(strSQL);
 
+    const int idxHdrTypeAlt = pDS->fieldIndex("strHdrTypeAlt");
+    const int idxDvProfile = pDS->fieldIndex("strDvProfile");
+    const int idxAudioProfile = pDS->fieldIndex("strAudioProfile");
+    const int idxAudioObjects = pDS->fieldIndex("iAudioObjects");
+    const int idxAudioObjectChannels = pDS->fieldIndex("iAudioObjectChannels");
+    const int idxAudioBedChannels = pDS->fieldIndex("iAudioBedChannels");
+
     while (!pDS->eof())
     {
       auto e = (CStreamDetail::StreamType)pDS->fv(1).get_asInt();
@@ -4211,6 +4357,10 @@ bool CVideoDatabase::GetStreamDetails(CVideoInfoTag& tag) const
           p->m_strStereoMode = pDS->fv(11).get_asString();
           p->m_strLanguage = pDS->fv(12).get_asString();
           p->m_strHdrType = pDS->fv(13).get_asString();
+          if (idxHdrTypeAlt >= 0)
+            p->m_strHdrTypeAlt = pDS->fv(idxHdrTypeAlt).get_asString();
+          if (idxDvProfile >= 0)
+            p->m_strDvProfile = pDS->fv(idxDvProfile).get_asString();
           details.AddStream(p);
           retVal = true;
           break;
@@ -4224,6 +4374,14 @@ bool CVideoDatabase::GetStreamDetails(CVideoInfoTag& tag) const
           else
             p->m_iChannels = pDS->fv(7).get_asInt();
           p->m_strLanguage = pDS->fv(8).get_asString();
+          if (idxAudioProfile >= 0)
+            p->m_strProfile = pDS->fv(idxAudioProfile).get_asString();
+          if (idxAudioObjects >= 0 && !pDS->fv(idxAudioObjects).get_isNull())
+            p->m_iAudioObjects = pDS->fv(idxAudioObjects).get_asInt();
+          if (idxAudioObjectChannels >= 0 && !pDS->fv(idxAudioObjectChannels).get_isNull())
+            p->m_iAudioObjectChannels = pDS->fv(idxAudioObjectChannels).get_asInt();
+          if (idxAudioBedChannels >= 0 && !pDS->fv(idxAudioBedChannels).get_isNull())
+            p->m_iAudioBedChannels = pDS->fv(idxAudioBedChannels).get_asInt();
           details.AddStream(p);
           retVal = true;
           break;
@@ -8703,6 +8861,8 @@ ScraperPtr CVideoDatabase::GetScraperForPath(const std::string& strPath, SScanSe
 
     if (URIUtils::IsMultiPath(strPath))
       strPath2 = CMultiPathDirectory::GetFirstPath(strPath);
+    else if (URIUtils::IsStack(strPath))
+      strPath2 = CStackDirectory::GetFirstStackedFile(strPath);
     else
       strPath2 = strPath;
 
@@ -10470,6 +10630,8 @@ void CVideoDatabase::ExportToXML(const std::string &path, bool singleFile /* = t
     pDS2.reset(m_pDB->CreateDataset());
     if (nullptr == pDS2)
       return;
+
+    g_directoryCache.Clear();
 
     // if we're exporting to a single folder, we export thumbs as well
     std::string exportRoot = URIUtils::AddFileToFolder(path, "kodi_videodb_" + CDateTime::GetCurrentDateTime().GetAsDBDate());

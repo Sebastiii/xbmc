@@ -20,6 +20,8 @@ public:
   ~CGUIControlLookup(void) override = default;
 
   CGUIControl *GetControl(int id, std::vector<CGUIControl*> *idCollector = nullptr) override;
+
+  CRect GetVisibleControlBounds() const;
 protected:
   typedef std::multimap<int, CGUIControl *> LookupMap;
 

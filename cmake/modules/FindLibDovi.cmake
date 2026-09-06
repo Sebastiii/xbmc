@@ -13,7 +13,7 @@ if(PKG_CONFIG_FOUND)
   pkg_check_modules(PC_LIBDOVI libdovi QUIET)
 endif()
 
-find_library(LIBDOVI_LIBRARY NAMES dovi libdovi
+find_library(LIBDOVI_LIBRARY NAMES libdovi.a dovi libdovi
                              PATHS ${PC_LIBDOVI_LIBDIR}
 )
 find_path(LIBDOVI_INCLUDE_DIR NAMES libdovi/rpu_parser.h

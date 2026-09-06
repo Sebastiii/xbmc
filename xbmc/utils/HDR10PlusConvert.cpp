@@ -6,6 +6,7 @@
  *  See LICENSES/README.md for more information.
  */
 
+#include "utils/LogThrottle.h"
 #include "utils/log.h"
 
 #include <algorithm> 
@@ -30,7 +31,6 @@ constexpr double ST2084_C3 = (2392.0 / 4096.0) * 32.0;
 
 // Clamp Values
 constexpr std::uint16_t L1_MAX_PQ_MIN_VALUE = 2081;
-constexpr std::uint16_t L1_MAX_PQ_MAX_VALUE = 4095;
 constexpr std::uint16_t L1_AVG_PQ_MIN_VALUE = 819;
 
 int max_pq_to_nits(int pq) {
@@ -59,6 +59,15 @@ double nits_to_pq(double nits) {
 
 static uint16_t cast_pq(double nits) {
   return static_cast<uint16_t>(std::round(nits_to_pq(nits) * 4095.0));
+}
+
+int nits_to_max_pq(int nits) {
+  if (nits <= 0) return 0;
+  if (nits >= static_cast<int>(ST2084_Y_MAX)) return 4095;
+  int pq = static_cast<int>(std::round(nits_to_pq(static_cast<double>(nits)) * 4095.0));
+  if (pq < 0) return 0;
+  if (pq > 4095) return 4095;
+  return pq;
 }
 
 static uint16_t maximum_pq(const Hdr10PlusMetadata& meta, const PeakBrightnessSource& source) {
@@ -205,7 +214,7 @@ std::vector<uint8_t> create_dovi_rpu_nalu_from_hdr10plus(
   vdr_dm_data.source_min_pq = source_min_pq;
   vdr_dm_data.source_max_pq = source_max_pq;
   vdr_dm_data.min_pq = min_pq;
-  vdr_dm_data.max_pq = clamp16(max_pq, L1_MAX_PQ_MIN_VALUE, L1_MAX_PQ_MAX_VALUE);
+  vdr_dm_data.max_pq = clamp16(max_pq, L1_MAX_PQ_MIN_VALUE, source_max_pq);
   vdr_dm_data.avg_pq = clamp16(avg_pq, L1_AVG_PQ_MIN_VALUE, (vdr_dm_data.max_pq - 1));
 
   vdr_dm_data.max_display_mastering_luminance = hdrStaticMetadataInfo.max_lum;
@@ -226,7 +235,7 @@ std::vector<uint8_t> create_dovi_rpu_nalu_from_hdr10plus(
     last_rpu = create_dovi_rpu_nalu(vdr_dm_data);
     last_vdr_dm_data = vdr_dm_data;
 
-    logM(LOGDEBUG, "HDR10PlusConvert", "min_pq [{}] max_pq [{}] avg_pq [{}] mdml max [{}] mdml min [{}] cll [{}] fall [{}]",
+    LOG_THROTTLE_PERIODIC(LOGDEBUG, LOGVIDEO, 1000, "min_pq [{}] max_pq [{}] avg_pq [{}] mdml max [{}] mdml min [{}] cll [{}] fall [{}]",
       vdr_dm_data.min_pq,
       vdr_dm_data.max_pq,
       vdr_dm_data.avg_pq,

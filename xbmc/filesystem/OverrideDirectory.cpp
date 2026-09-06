@@ -39,3 +39,10 @@ bool COverrideDirectory::Exists(const CURL& url)
 
   return CDirectory::Exists(translatedPath.c_str());
 }
+
+bool COverrideDirectory::RemoveRecursive(const CURL& url)
+{
+  std::string translatedPath = TranslatePath(url);
+
+  return CDirectory::RemoveRecursive(translatedPath.c_str());
+}

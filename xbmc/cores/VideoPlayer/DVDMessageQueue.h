@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <list>
 #include <string>
 
@@ -73,18 +74,33 @@ public:
     return Get(pMsg, timeout, priority);
   }
 
-  int GetDataSize() const { return m_iDataSize; }
+  int GetDataSize() const;
   double GetTimeSize() const;
   unsigned GetPacketCount(CDVDMsg::Message type) const;
+  bool HasMessages() const
+  {
+    std::lock_guard lock(m_section);
+    return !m_messages.empty() || !m_prioMessages.empty();
+  }
   bool ReceivedAbortRequest() { return m_bAbortRequest; }
   void WaitUntilEmpty();
 
   // non messagequeue related functions
-  bool IsFull() const { return GetLevel(true) == 100; }
+  bool IsFull() const
+  {
+    int level = 0;
+    int dataLevel = 0;
+    GetLevels(level, dataLevel);
+    return level == 100 || dataLevel == 100;
+  }
   int GetLevel(bool data_level = false) const;
 
   void SetMaxDataSize(int iMaxDataSize) { m_iMaxDataSize = iMaxDataSize; }
-  void SetMaxTimeSize(double sec) { m_TimeSize = 1.0 / sec; }
+  void SetMaxTimeSize(double sec)
+  {
+    std::lock_guard lock(m_section);
+    m_TimeSize = 1.0 / sec;
+  }
   int GetMaxDataSize() const { return m_iMaxDataSize; }
   double GetMaxTimeSize() const { return m_TimeSize; }
   bool IsInited() const { return m_bInitialized; }
@@ -101,7 +117,7 @@ private:
   mutable CCriticalSection m_section;
 
   std::atomic<bool> m_bAbortRequest = false;
-  bool m_bInitialized;
+  std::atomic<bool> m_bInitialized{false};
   bool m_drain = false;
 
   uint64_t m_iDataSize;
@@ -109,7 +125,14 @@ private:
   double m_TimeBack;
   double m_TimeSize;
 
-  uint64_t m_iMaxDataSize;
+  bool m_msgqLogging = false;
+  std::chrono::steady_clock::time_point m_msgqLogTime{};
+  unsigned int m_msgqPuts = 0;
+  unsigned int m_msgqGets = 0;
+  unsigned int m_msgqGetsPrio = 0;
+  unsigned int m_msgqBackNotPacket = 0;
+
+  std::atomic<uint64_t> m_iMaxDataSize{0};
   std::string m_owner;
 
   std::list<DVDMessageListItem> m_messages;

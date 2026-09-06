@@ -318,6 +318,19 @@ bool Protocol::ReceiveOutMessage(Message **msg)
   return true;
 }
 
+bool Protocol::ReceiveOutMessageIf(Message **msg, int signal)
+{
+  std::lock_guard lock(criticalSection);
+
+  if (outMessages.empty() || outDefered || outMessages.front()->signal != signal)
+    return false;
+
+  *msg = outMessages.front();
+  outMessages.pop();
+
+  return true;
+}
+
 bool Protocol::ReceiveInMessage(Message **msg)
 {
   std::lock_guard lock(criticalSection);

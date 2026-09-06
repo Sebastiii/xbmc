@@ -266,10 +266,21 @@ static int PlayerControl(const std::vector<std::string>& params)
         g_application.SeekPercentage(offsetpercent);
     }
   }
-  else if (paramlow == "showvideomenu")
+  else if (StringUtils::StartsWith(paramlow, "showvideomenu"))
   {
     if (appPlayer->IsPlaying())
-      appPlayer->OnAction(CAction(ACTION_SHOW_VIDEOMENU));
+    {
+      std::string menuArg;
+      const size_t open = paramlow.find('(');
+      if (open != std::string::npos)
+      {
+        const size_t close = paramlow.find(')', open);
+        menuArg = paramlow.substr(
+            open + 1, close == std::string::npos ? std::string::npos : close - open - 1);
+        StringUtils::Trim(menuArg);
+      }
+      appPlayer->OnAction(CAction(ACTION_SHOW_VIDEOMENU, menuArg));
+    }
   }
   else if (StringUtils::StartsWithNoCase(params[0], "partymode"))
   {
@@ -430,7 +441,8 @@ namespace
 void GetItemsForPlayList(const std::shared_ptr<CFileItem>& item, CFileItemList& queuedItems)
 {
   if (VIDEO_UTILS::IsItemPlayable(*item))
-    VIDEO_UTILS::GetItemsForPlayList(item, queuedItems);
+    VIDEO_UTILS::GetItemsForPlayList(item, queuedItems,
+                                     ContentUtils::PlayMode::CHECK_AUTO_PLAY_NEXT_ITEM);
   else if (MUSIC_UTILS::IsItemPlayable(*item))
     MUSIC_UTILS::GetItemsForPlayList(item, queuedItems);
 }

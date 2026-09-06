@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "cores/VideoPlayer/Buffers/VideoBufferStarfish.h"
 #include "cores/VideoPlayer/VideoRenderers/LinuxRendererGLES.h"
 
 class CRendererStarfish : public CBaseRenderer

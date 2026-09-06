@@ -323,9 +323,20 @@ void CGUIBaseContainer::Render()
         m_renderItems.emplace_back(RENDERITEM{focusedPos, origin.y, focusedItem, true});
     }
 
-    for (const auto& renderitem : m_renderItems)
+    if (CServiceBroker::GetWinSystem()->GetGfxContext().GetRenderOrder() ==
+        RENDER_ORDER_FRONT_TO_BACK)
     {
+      for (auto it = std::crbegin(m_renderItems); it != std::crend(m_renderItems); it++)
+      {
+        RenderItem(it->posX, it->posY, it->item.get(), it->focused);
+      }
+    }
+    else
+    {
+      for (const auto& renderitem : m_renderItems)
+      {
         RenderItem(renderitem.posX, renderitem.posY, renderitem.item.get(), renderitem.focused);
+      }
     }
 
     CServiceBroker::GetWinSystem()->GetGfxContext().RestoreClipRegion();
@@ -621,9 +632,8 @@ void CGUIBaseContainer::OnNextLetter()
   const int offset = CorrectOffset(GetOffset(), GetCursor());
   // Binary search for first letter offset greater than current position
   auto it = std::upper_bound(m_letterOffsets.begin(), m_letterOffsets.end(), offset,
-                             [](int value, const std::pair<int, std::string>& elem) {
-                               return value < elem.first;
-                             });
+                             [](int value, const std::pair<int, std::string>& elem)
+                             { return value < elem.first; });
   if (it != m_letterOffsets.end())
     SelectItem(it->first);
 }
@@ -635,9 +645,8 @@ void CGUIBaseContainer::OnPrevLetter()
     return;
   // Binary search for last letter offset less than current position
   auto it = std::lower_bound(m_letterOffsets.begin(), m_letterOffsets.end(), offset,
-                             [](const std::pair<int, std::string>& elem, int value) {
-                               return elem.first < value;
-                             });
+                             [](const std::pair<int, std::string>& elem, int value)
+                             { return elem.first < value; });
   if (it != m_letterOffsets.begin())
     SelectItem((--it)->first);
 }
@@ -694,9 +703,8 @@ void CGUIBaseContainer::OnJumpSMS(int letter)
   // find where we currently are using binary search
   const int offset = CorrectOffset(GetOffset(), GetCursor());
   auto it = std::upper_bound(m_letterOffsets.begin(), m_letterOffsets.end(), offset,
-                             [](int value, const std::pair<int, std::string>& elem) {
-                               return value < elem.first;
-                             });
+                             [](int value, const std::pair<int, std::string>& elem)
+                             { return value < elem.first; });
   // upper_bound gives us the first element > offset, we want the last element <= offset
   if (it != m_letterOffsets.begin())
     --it;
@@ -1052,6 +1060,37 @@ void CGUIBaseContainer::UpdateVisibility(const CGUIListItem *item)
   }
 
   UpdateListProvider();
+}
+
+void CGUIBaseContainer::AssignDepth()
+{
+  std::shared_ptr<CGUIListItem> focusedItem = nullptr;
+  int32_t current = 0;
+
+  for (const auto& item : m_items)
+  {
+    bool focused = (current == GetOffset() + GetCursor());
+    if (focused)
+    {
+      focusedItem = item;
+    }
+    else
+    {
+      if (item->GetFocusedLayout())
+        item->GetFocusedLayout()->AssignDepth();
+      if (item->GetLayout())
+        item->GetLayout()->AssignDepth();
+    }
+    current++;
+  }
+
+  if (focusedItem)
+  {
+    if (focusedItem->GetFocusedLayout())
+      focusedItem->GetFocusedLayout()->AssignDepth();
+    if (focusedItem->GetLayout())
+      focusedItem->GetLayout()->AssignDepth();
+  }
 }
 
 void CGUIBaseContainer::UpdateListProvider(bool forceRefresh /* = false */)

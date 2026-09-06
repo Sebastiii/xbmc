@@ -142,7 +142,8 @@ bool CPVRGUIActionsPlayback::PlayRecording(const CFileItem& item, bool bCheckRes
         parentItem->SetStartOffset(STARTOFFSET_RESUME);
 
       auto queuedItems = std::make_unique<CFileItemList>();
-      VIDEO_UTILS::GetItemsForPlayList(parentItem, *queuedItems);
+      VIDEO_UTILS::GetItemsForPlayList(parentItem, *queuedItems,
+                                      ContentUtils::PlayMode::CHECK_AUTO_PLAY_NEXT_ITEM);
 
       // figure out where to start playback
       int pos = 0;
@@ -178,7 +179,8 @@ bool CPVRGUIActionsPlayback::PlayRecordingFolder(const CFileItem& item, bool bCh
     // recursively add items to list
     const auto itemToQueue = std::make_shared<CFileItem>(item);
     auto queuedItems = std::make_unique<CFileItemList>();
-    VIDEO_UTILS::GetItemsForPlayList(itemToQueue, *queuedItems);
+    VIDEO_UTILS::GetItemsForPlayList(itemToQueue, *queuedItems,
+                                     ContentUtils::PlayMode::CHECK_AUTO_PLAY_NEXT_ITEM);
 
     CServiceBroker::GetAppMessenger()->PostMsg(TMSG_MEDIA_PLAY, 0, -1,
                                                static_cast<void*>(queuedItems.release()));

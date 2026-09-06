@@ -126,7 +126,15 @@ bool UTILS::COLOR::comparePairColorInfo(const std::pair<std::string, ColorInfo>&
   if (a.second.hue == b.second.hue)
   {
     if (a.second.saturation == b.second.saturation)
-      return (a.second.lightness < b.second.lightness);
+    {
+      if (a.second.lightness == b.second.lightness)
+      {
+        constexpr unsigned alphaMask = 0xFF000000u;
+        return (a.second.colorARGB & alphaMask) > (b.second.colorARGB & alphaMask);
+      }
+      else
+        return (a.second.lightness < b.second.lightness);
+    }
     else
       return (a.second.saturation < b.second.saturation);
   }
