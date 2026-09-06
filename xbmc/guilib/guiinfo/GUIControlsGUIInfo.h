@@ -10,6 +10,7 @@
 
 #include "guilib/WindowIDs.h"
 #include "guilib/guiinfo/GUIInfoProvider.h"
+#include "threads/CriticalSection.h"
 
 #include <map>
 
@@ -49,6 +50,7 @@ private:
   int m_prevWindowID = WINDOW_INVALID;
 
   std::map<int, int> m_containerMoves;  // direction of list moving
+  mutable CCriticalSection m_containerMovesSection;
 };
 
 } // namespace GUIINFO

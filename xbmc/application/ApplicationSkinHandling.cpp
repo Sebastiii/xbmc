@@ -33,8 +33,10 @@
 #include "guilib/GUIWindowManager.h"
 #include "guilib/LocalizeStrings.h"
 #include "guilib/StereoscopicsManager.h"
+#include "interfaces/AnnouncementManager.h"
 #include "messaging/ApplicationMessenger.h"
 #include "messaging/helpers/DialogHelper.h"
+#include "settings/AdvancedSettings.h"
 #include "settings/Settings.h"
 #include "settings/SettingsComponent.h"
 #include "settings/SkinSettings.h"
@@ -64,6 +66,9 @@ bool CApplicationSkinHandling::LoadSkin(const std::string& skinID)
       return false;
     skin = std::static_pointer_cast<ADDON::CSkinInfo>(addon);
   }
+
+  CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->ApplyDirtyRegionAlgorithmForSkin(
+      skinID);
 
   // store player and rendering state
   bool bPreviousPlayingState = false;
@@ -376,14 +381,19 @@ bool CApplicationSkinHandling::LoadCustomWindows()
 
 void CApplicationSkinHandling::ReloadSkin(bool confirm)
 {
+  auto gui = CServiceBroker::GetGUI();
+  if (gui == nullptr)
+    return;
+
   if (!g_SkinInfo || m_bInitializing)
     return; // Don't allow reload before skin is loaded by system
 
   std::string oldSkin = g_SkinInfo->ID();
 
-  CGUIMessage msg(GUI_MSG_LOAD_SKIN, -1,
-                  CServiceBroker::GetGUI()->GetWindowManager().GetActiveWindow());
-  CServiceBroker::GetGUI()->GetWindowManager().SendMessage(msg);
+  CGUIMessage msg(GUI_MSG_LOAD_SKIN, -1, gui->GetWindowManager().GetActiveWindow());
+  gui->GetWindowManager().SendMessage(msg);
+
+  CServiceBroker::GetAnnouncementManager()->Announce(ANNOUNCEMENT::GUI, "OnSkinUnloading");
 
   const std::shared_ptr<CSettings> settings = CServiceBroker::GetSettingsComponent()->GetSettings();
   std::string newSkin = settings->GetString(CSettings::SETTING_LOOKANDFEEL_SKIN);
@@ -391,6 +401,8 @@ void CApplicationSkinHandling::ReloadSkin(bool confirm)
   {
     // We ask the running OnAction loops to stop after this call
     RequestStopActionPropagation();
+
+    CServiceBroker::GetAnnouncementManager()->Announce(ANNOUNCEMENT::GUI, "OnSkinLoaded");
 
     /* The Reset() or SetString() below will cause recursion, so the m_confirmSkinChange boolean is set so as to not prompt the
        user as to whether they want to keep the current skin. */
@@ -403,7 +415,7 @@ void CApplicationSkinHandling::ReloadSkin(bool confirm)
         settings->SetString(CSettings::SETTING_LOOKANDFEEL_SKIN, oldSkin);
       }
       else
-        CServiceBroker::GetGUI()->GetWindowManager().ActivateWindow(WINDOW_STARTUP_ANIM);
+        gui->GetWindowManager().ActivateWindow(WINDOW_STARTUP_ANIM);
     }
   }
   else
@@ -413,6 +425,7 @@ void CApplicationSkinHandling::ReloadSkin(bool confirm)
     if (!setting)
     {
       CLog::Log(LOGFATAL, "Failed to load setting for: {}", CSettings::SETTING_LOOKANDFEEL_SKIN);
+      CServiceBroker::GetAnnouncementManager()->Announce(ANNOUNCEMENT::GUI, "OnSkinLoadFailed");
       return;
     }
 
@@ -423,6 +436,10 @@ void CApplicationSkinHandling::ReloadSkin(bool confirm)
       setting->Reset();
       CGUIDialogKaiToast::QueueNotification(CGUIDialogKaiToast::Error, g_localizeStrings.Get(24102),
                                             g_localizeStrings.Get(24103));
+    }
+    else
+    {
+      CServiceBroker::GetAnnouncementManager()->Announce(ANNOUNCEMENT::GUI, "OnSkinLoadFailed");
     }
   }
   m_confirmSkinChange = true;

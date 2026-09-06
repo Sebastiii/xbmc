@@ -16,10 +16,12 @@
 #include "IVideoPlayer.h"
 #include "cores/VideoPlayer/Interface/TimingConstants.h"
 #include "cores/VideoPlayer/VideoRenderers/RenderManager.h"
+#include "settings/lib/ISettingCallback.h"
 #include "threads/SystemClock.h"
 #include "threads/Thread.h"
 #include "utils/BitstreamStats.h"
 
+#include <atomic>
 #include <chrono>
 #include <list>
 #include <mutex>
@@ -29,7 +31,7 @@ class CVideoPlayer;
 class CDVDAudioCodec;
 class CDVDAudioCodec;
 
-class CVideoPlayerAudio : public CThread, public IDVDStreamPlayerAudio
+class CVideoPlayerAudio : public CThread, public IDVDStreamPlayerAudio, public ISettingCallback
 {
 public:
   CVideoPlayerAudio(
@@ -50,9 +52,18 @@ public:
   bool AcceptsData() const override;
   bool HasData() const override { return m_messageQueue.GetDataSize() > 0; }
   int  GetLevel() const override { return m_messageQueue.GetLevel(); }
+  void SetMaxTimeSize(double sec) override { m_messageQueue.SetMaxTimeSize(sec); }
+  double GetMaxTimeSizeSeconds() const override
+  {
+    const double inverseSeconds = m_messageQueue.GetMaxTimeSize();
+    return inverseSeconds > 0.0 ? 1.0 / inverseSeconds : 0.0;
+  }
+  double GetQueueTimeSize() const override { return m_messageQueue.GetTimeSize(); }
   bool IsInited() const override { return m_messageQueue.IsInited(); }
   void SendMessage(std::shared_ptr<CDVDMsg> pMsg, int priority = 0) override
   {
+    if (!m_messageQueue.IsInited())
+      return;
     m_messageQueue.Put(pMsg, priority);
   }
   void FlushMessages() override { m_messageQueue.Flush(); }
@@ -69,8 +80,28 @@ public:
     return m_info.pts;
   }
 
+  bool GetAudioPosition(double& pts,
+                        double& absClock,
+                        double& cacheTime,
+                        double& delay,
+                        bool& passthrough) override
+  {
+    std::unique_lock<CCriticalSection> lock(m_info_section);
+    pts = m_info.pts;
+    absClock = m_info.absClock;
+    cacheTime = m_info.cache;
+    delay = m_info.delay;
+    passthrough = m_info.passthrough;
+    return m_info.pts != DVD_NOPTS_VALUE && m_info.absClock != DVD_NOPTS_VALUE;
+  }
+
+  double GetCurrentSinkDelay() override { return m_audioSink.GetDelay(); }
+  double GetAudioClock() override { return m_audioClock; }
+
   bool IsStalled() const override { return m_stalled;  }
   bool IsPassthrough() const override;
+
+  void OnSettingChanged(const std::shared_ptr<const CSetting>& setting) override;
 
 protected:
 
@@ -94,6 +125,7 @@ protected:
 
   // holds stream information for current playing stream
   CDVDStreamInfo m_streaminfo;
+  CDVDStreamInfo m_streaminfoOrig;
 
   double m_audioClock;
 
@@ -103,10 +135,19 @@ protected:
   BitstreamStats m_audioStats;
 
   int m_speed;
-  bool m_stalled;
+  std::atomic_bool m_stalled{true};
   bool m_paused;
   IDVDStreamPlayer::ESyncState m_syncState;
   XbmcThreads::EndTime<> m_syncTimer;
+  XbmcThreads::EndTime<> m_playerInfoTimer;
+  XbmcThreads::EndTime<> m_videoSettingsTimer;
+  XbmcThreads::EndTime<> m_createRetryTimer;
+  unsigned int m_createFailures{0};
+  float m_volumeAmplification{0.0f};
+  int m_centerMixLevel{0};
+  int m_seamlessBranchAlgo{0};
+  bool m_drcValid{false};
+  long m_lastDrc{0};
 
   int m_synctype;
   int m_prevsynctype;
@@ -118,15 +159,29 @@ protected:
   {
     std::string      info;
     double           pts = DVD_NOPTS_VALUE;
+    double           absClock = DVD_NOPTS_VALUE;
+    double           cache = 0.0;
+    double           delay = 0.0;
     bool             passthrough = false;
   };
 
   mutable CCriticalSection m_info_section;
   SInfo            m_info;
 
+  std::string m_lastAudioObjectDescription;
+  std::string m_lastAudioDialNorm;
+  int m_lastAudioObjects{-1};
+  int m_lastAudioObjectChannels{-1};
+  int m_lastAudioBedChannels{-1};
+
   bool m_displayReset = false;
-  unsigned int m_disconAdjustTimeMs = 20; // maximum sync-off before adjusting
+  std::atomic<bool> m_audioSettingsChanged{false};
+  bool m_forcePcmEac3 = false;
+  int m_eac3SmallSpfLimit = 0;
+  unsigned int m_disconAdjustTimeMs = 30; // maximum sync-off before adjusting
+  unsigned int m_disconAdjustTimeMsFirstCycle = 10;
   int m_disconAdjustCounter = 0;
+  bool m_lavFullSyncEnabled{false};
 
   //============================================================================
   // LAV Jitter Tracking for PCM/Decoded Audio

@@ -2085,6 +2085,18 @@
             },
             "channels": {
               "type": "integer"
+            },
+            "profile": {
+              "type": "string"
+            },
+            "objects": {
+              "type": "integer"
+            },
+            "objectchannels": {
+              "type": "integer"
+            },
+            "bedchannels": {
+              "type": "integer"
             }
           },
           "additionalProperties": false
@@ -2112,6 +2124,12 @@
               "type": "integer"
             },
             "hdrtype": {
+              "type": "string"
+            },
+            "hdrtypealt": {
+              "type": "string"
+            },
+            "dvprofile": {
               "type": "string"
             }
           },

@@ -17,6 +17,7 @@
 #include "cores/RetroPlayer/process/amlogic/RPProcessInfoAmlogic.h"
 #include "cores/RetroPlayer/rendering/VideoRenderers/RPRendererOpenGLES.h"
 #include "cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.h"
+#include "cores/VideoPlayer/Process/amlogic/ProcessInfoAmlogic.h"
 #include "cores/VideoPlayer/VideoRenderers/LinuxRendererGLES.h"
 #include "cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.h"
 #include "windowing/GraphicContext.h"
@@ -46,6 +47,9 @@ CWinSystemAmlogic::CWinSystemAmlogic()
 :  m_nativeWindow(nullptr)
 ,  m_libinput(new CLibInputHandler)
 ,  m_force_mode_switch(false)
+,  m_modeSwitchBlanked(false)
+,  m_modeSwitchFb0Blank(0)
+,  m_modeSwitchFb1Blank(0)
 {
   const char *env_framebuffer = getenv("FRAMEBUFFER");
 
@@ -74,27 +78,8 @@ bool CWinSystemAmlogic::InitWindowSystem()
 
   const std::shared_ptr<CSettings> settings = CServiceBroker::GetSettingsComponent()->GetSettings();
 
-  if (settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_NOISEREDUCTION))
-  {
-     CLog::Log(LOGDEBUG, "CWinSystemAmlogic::InitWindowSystem -- disabling noise reduction");
-     CSysfsPath("/sys/module/di/parameters/nr2_en", 0);
-  }
-
-  int sdr2hdr = settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_SDR2HDR);
-  if (sdr2hdr)
-  {
-    CLog::Log(LOGDEBUG, "CWinSystemAmlogic::InitWindowSystem -- setting sdr2hdr mode to {:d}", sdr2hdr);
-    CSysfsPath("/sys/module/am_vecm/parameters/sdr_mode", 1);
-    CSysfsPath("/sys/module/amdolby_vision/parameters/dolby_vision_policy", 0);
-    CSysfsPath("/sys/module/am_vecm/parameters/hdr_policy", 0);
-  }
-
-  int hdr2sdr = settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_HDR2SDR);
-  if (hdr2sdr)
-  {
-    CLog::Log(LOGDEBUG, "CWinSystemAmlogic::InitWindowSystem -- setting hdr2sdr mode to {:d}", hdr2sdr);
-    CSysfsPath("/sys/module/am_vecm/parameters/hdr_mode", 1);
-  }
+  logM(LOGDEBUG, "disabling noise reduction");
+  CSysfsPath("/sys/module/di/parameters/nr2_en", 0);
 
   if (((LINUX_VERSION_CODE >> 16) & 0xFF) < 5)
   {
@@ -110,6 +95,7 @@ bool CWinSystemAmlogic::InitWindowSystem()
 
   CDVDVideoCodecAmlogic::Register();
   CLinuxRendererGLES::Register();
+  VIDEOPLAYER::CProcessInfoAmlogic::Register();
   RETRO::CRPProcessInfoAmlogic::Register();
   RETRO::CRPProcessInfoAmlogic::RegisterRendererFactory(new RETRO::CRendererFactoryOpenGLES);
   CRendererAML::Register();
@@ -161,6 +147,8 @@ bool CWinSystemAmlogic::CreateNewWindow(const std::string& name,
     m_dispResetTimer.Set(std::chrono::milliseconds(static_cast<unsigned int>(delay * 100)));
   }
 
+  BeginModeSwitchBlank();
+
   {
     std::lock_guard lock(m_resourceSection);
 
@@ -192,6 +180,43 @@ bool CWinSystemAmlogic::CreateNewWindow(const std::string& name,
   return true;
 }
 
+void CWinSystemAmlogic::BeginModeSwitchBlank()
+{
+  if (m_modeSwitchBlanked)
+    return;
+
+  m_osdReassertFrames = 0;
+  m_modeSwitchFb0Blank = aml_osd_blank(0, 1);
+  m_modeSwitchFb1Blank = aml_osd_blank(1, 1);
+  m_modeSwitchBlanked = true;
+}
+
+void CWinSystemAmlogic::EndModeSwitchBlank()
+{
+  if (!m_modeSwitchBlanked)
+    return;
+
+  aml_osd_blank(0, m_modeSwitchFb0Blank);
+  aml_osd_blank(1, m_modeSwitchFb1Blank);
+  m_modeSwitchBlanked = false;
+  m_modeSwitchFb0Blank = 0;
+  m_modeSwitchFb1Blank = 0;
+  m_osdReassertFrames = 6;
+}
+
+void CWinSystemAmlogic::OsdReassertTick()
+{
+  if (m_osdReassertFrames <= 0)
+    return;
+
+  if (--m_osdReassertFrames == 0)
+  {
+    aml_osd_blank(0, 0);
+    aml_osd_blank(1, 0);
+    logM(LOGDEBUG, "CWinSystemAmlogic::OsdReassertTick - re-asserted OSD unblank after mode switch");
+  }
+}
+
 bool CWinSystemAmlogic::DestroyWindow()
 {
   if (m_nativeWindow != nullptr)
@@ -219,9 +244,110 @@ void CWinSystemAmlogic::UpdateResolutions()
   /* ProbeResolutions includes already all resolutions.
    * Only get desktop resolution so we can replace xbmc's desktop res
    */
-  if (aml_get_native_resolution(curDisplay))
+  bool resDesktop_set = false;
+
+  const auto settingsComp = CServiceBroker::GetSettingsComponent();
+  if (settingsComp && settingsComp->GetSettings())
+  {
+    const std::string screenmode =
+        settingsComp->GetSettings()->GetString(CSettings::SETTING_VIDEOSCREEN_SCREENMODE);
+    if (screenmode.size() >= 20 && screenmode != "DESKTOP" && screenmode != "WINDOW")
+    {
+      const int width = std::strtol(screenmode.substr(0, 5).c_str(), nullptr, 10);
+      const int height = std::strtol(screenmode.substr(5, 5).c_str(), nullptr, 10);
+      const float refresh = static_cast<float>(
+          std::strtod(screenmode.substr(10, 9).c_str(), nullptr));
+      uint32_t modeFlags = 0;
+      if (screenmode.substr(19, 1) == "i")
+        modeFlags |= D3DPRESENTFLAG_INTERLACED;
+      if (screenmode.find("sbs") != std::string::npos)
+        modeFlags |= D3DPRESENTFLAG_MODE3DSBS;
+      if (screenmode.find("tab") != std::string::npos)
+        modeFlags |= D3DPRESENTFLAG_MODE3DTB;
+      if (screenmode.find("frp") != std::string::npos)
+        modeFlags |= D3DPRESENTFLAG_MODE3DFP;
+
+      if (width > 0 && height > 0 && refresh > 0.0f)
+      {
+        for (const auto& r : resolutions)
+        {
+          if (r.iScreenWidth == width && r.iScreenHeight == height &&
+              (r.dwFlags & D3DPRESENTFLAG_MODEMASK) == (modeFlags & D3DPRESENTFLAG_MODEMASK) &&
+              ResolutionRefreshRateEquals(r.fRefreshRate, refresh))
+          {
+            resDesktop = r;
+            resDesktop_set = true;
+            logM(LOGINFO,
+                 "RES_DESKTOP from videoscreen.screenmode={}: iScreenWidth={} iScreenHeight={} "
+                 "iWidth={} fRefreshRate={:f} dwFlags={} strId={}",
+                 screenmode, r.iScreenWidth, r.iScreenHeight, r.iWidth, r.fRefreshRate,
+                 r.dwFlags, r.strId);
+            break;
+          }
+        }
+        if (!resDesktop_set)
+          logM(LOGWARNING,
+               "videoscreen.screenmode={} parsed width={} height={} refresh={:f} modeFlags={} "
+               "matches no probed mode; falling back to snapshot then kernel mode",
+               screenmode, width, height, refresh, modeFlags);
+      }
+    }
+  }
+
+  if (!resDesktop_set)
+  {
+    RESOLUTION_INFO snapshot;
+    if (CGraphicContext::LoadPersistedDesktopResolution(snapshot))
+    {
+      for (const auto& r : resolutions)
+      {
+        if (r.iScreenWidth == snapshot.iScreenWidth &&
+            r.iScreenHeight == snapshot.iScreenHeight &&
+            std::fabs(r.fRefreshRate - snapshot.fRefreshRate) < FLT_EPSILON &&
+            (r.dwFlags & D3DPRESENTFLAG_MODEMASK) ==
+                (snapshot.dwFlags & D3DPRESENTFLAG_MODEMASK))
+        {
+          resDesktop = snapshot;
+          resDesktop_set = true;
+          CLog::Log(LOGINFO,
+                    "RES_DESKTOP overridden by persisted snapshot: {}x{}@{:f}Hz",
+                    snapshot.iScreenWidth, snapshot.iScreenHeight,
+                    snapshot.fRefreshRate);
+          break;
+        }
+      }
+      if (!resDesktop_set)
+        CLog::Log(LOGWARNING,
+                  "persisted desktop snapshot {}x{}@{:f}Hz not in current EDID; "
+                  "falling back to kernel mode",
+                  snapshot.iScreenWidth, snapshot.iScreenHeight,
+                  snapshot.fRefreshRate);
+    }
+  }
+
+  if (!resDesktop_set && aml_get_native_resolution(curDisplay))
   {
     resDesktop = curDisplay;
+
+    if (resDesktop.iScreenHeight >= 2160 && resDesktop.fRefreshRate > 40.0f)
+    {
+      const RESOLUTION_INFO* cand = nullptr;
+      for (const auto& r : resolutions)
+      {
+        if (r.iScreenWidth != 1920 || r.iScreenHeight != 1080)
+          continue;
+        if ((r.dwFlags & D3DPRESENTFLAG_MODEMASK) != (resDesktop.dwFlags & D3DPRESENTFLAG_MODEMASK))
+          continue;
+        if (!cand || std::fabs(r.fRefreshRate - resDesktop.fRefreshRate) < std::fabs(cand->fRefreshRate - resDesktop.fRefreshRate))
+          cand = &r;
+      }
+      if (cand && std::fabs(cand->fRefreshRate - resDesktop.fRefreshRate) < 1.0f)
+      {
+        logM(LOGINFO, "defaulting desktop to {}x{}@{:f} instead of native 2160p@{:f} to stay within the HDMI link budget (2160p50/60 stays selectable)",
+             cand->iScreenWidth, cand->iScreenHeight, cand->fRefreshRate, resDesktop.fRefreshRate);
+        resDesktop = *cand;
+      }
+    }
   }
 
   RESOLUTION ResDesktop = RES_INVALID;
@@ -248,12 +374,10 @@ void CWinSystemAmlogic::UpdateResolutions()
       resolutions[i].dwFlags & D3DPRESENTFLAG_INTERLACED ? "i" : "",
       resolutions[i].fRefreshRate);
 
-    if(resDesktop.iWidth == resolutions[i].iWidth &&
-       resDesktop.iHeight == resolutions[i].iHeight &&
-       resDesktop.iScreenWidth == resolutions[i].iScreenWidth &&
+    if(resDesktop.iScreenWidth == resolutions[i].iScreenWidth &&
        resDesktop.iScreenHeight == resolutions[i].iScreenHeight &&
        (resDesktop.dwFlags & D3DPRESENTFLAG_MODEMASK) == (resolutions[i].dwFlags & D3DPRESENTFLAG_MODEMASK) &&
-       fabs(resDesktop.fRefreshRate - resolutions[i].fRefreshRate) < FLT_EPSILON)
+       ResolutionRefreshRateEquals(resDesktop.fRefreshRate, resolutions[i].fRefreshRate))
     {
       ResDesktop = res_index;
     }
@@ -271,6 +395,15 @@ void CWinSystemAmlogic::UpdateResolutions()
       (int)ResDesktop, (int)RES_DESKTOP);
 
     CDisplaySettings::GetInstance().GetResolutionInfo(RES_DESKTOP) = CDisplaySettings::GetInstance().GetResolutionInfo(ResDesktop);
+  }
+  else if (!resolutions.empty())
+  {
+    logM(LOGWARNING,
+         "RES_DESKTOP unresolved: resDesktop={}x{}@{:f}Hz dwFlags={} resDesktop_set={:d} matched "
+         "none of {} probed modes; RES_DESKTOP keeps probed mode 0 {}x{}@{:f}Hz strId={}",
+         resDesktop.iScreenWidth, resDesktop.iScreenHeight, resDesktop.fRefreshRate,
+         resDesktop.dwFlags, resDesktop_set, resolutions.size(), resolutions[0].iScreenWidth,
+         resolutions[0].iScreenHeight, resolutions[0].fRefreshRate, resolutions[0].strId);
   }
 }
 
@@ -291,6 +424,9 @@ bool CWinSystemAmlogic::IsHDRDisplay()
 
     if (valstr.find("Hybrid Log-Gamma: 1") != std::string::npos)
       m_hdr_caps.SetHLG();
+
+    if (valstr.find("CUVA supported: 1") != std::string::npos)
+      m_hdr_caps.SetHDRVivid();
   }
 
   if (dv_cap.Exists())
@@ -316,7 +452,31 @@ float CWinSystemAmlogic::GetDisplayLatency()
 float CWinSystemAmlogic::GetGuiSdrPeakLuminance() const
 {
   const auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
-  const int guiSdrPeak = settings->GetInt(CSettings::SETTING_VIDEOSCREEN_GUISDRPEAKLUMINANCE);
+
+  const StreamHdrType hdrType =
+      aml_get_output_hdr_type(CServiceBroker::GetWinSystem()->GetGfxContext().GetHDRType());
+
+  if (hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION &&
+      (!aml_dv_playback_active() || aml_dv_bdj_overlay_visible()))
+  {
+    const float osdMaxNits = static_cast<float>(std::clamp(aml_dv_osd_max_nits(), 50, 2000));
+    return osdMaxNits / 100.0f;
+  }
+
+  std::string settingId;
+  if (hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION)
+    settingId = CSettings::SETTING_VIDEOSCREEN_GUIPEAKLUMINANCE_DOLBYVISION;
+  else if (hdrType == StreamHdrType::HDR_TYPE_HLG)
+    settingId = CSettings::SETTING_VIDEOSCREEN_GUIPEAKLUMINANCE_HLG;
+  else
+    settingId = CSettings::SETTING_VIDEOSCREEN_GUIPEAKLUMINANCE_HDR10;
+  const int guiSdrPeak = std::clamp(settings->GetInt(settingId), 0, 100);
+
+  if (hdrType == StreamHdrType::HDR_TYPE_HLG)
+  {
+    const float t = static_cast<float>(guiSdrPeak) / 100.0f;
+    return std::clamp(0.02f + t * t * t * 1.18f, 0.02f, 1.20f);
+  }
 
   // Map the 0-100 setting to a usable SDR white level in HDR mode.
   // The shader expects this value as "nits / 100".
@@ -338,12 +498,44 @@ float CWinSystemAmlogic::GetGuiSdrSaturation() const
 {
   const auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
 
+  const StreamHdrType hdrType =
+      aml_get_output_hdr_type(CServiceBroker::GetWinSystem()->GetGfxContext().GetHDRType());
+  std::string settingId;
+  if (hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION)
+    settingId = CSettings::SETTING_VIDEOSCREEN_GUISATURATION_DOLBYVISION;
+  else if (hdrType == StreamHdrType::HDR_TYPE_HLG)
+    settingId = CSettings::SETTING_VIDEOSCREEN_GUISATURATION_HLG;
+  else
+    settingId = CSettings::SETTING_VIDEOSCREEN_GUISATURATION_HDR10;
+
   // UI is 0..100, where 50 is neutral. Map to shader saturation factor 0..2.
-  const int satClamped = std::clamp(settings->GetInt(CSettings::SETTING_VIDEOSCREEN_GUISDRSATURATION), 0, 100);
+  const int satClamped = std::clamp(settings->GetInt(settingId), 0, 100);
 
   float saturation = static_cast<float>(satClamped) / 50.0f;
 
   return std::clamp(saturation, 0.0f, 2.0f);
+}
+
+bool CWinSystemAmlogic::GuiPqIsFinalStage() const
+{
+  return aml_gui_pq_is_final_stage();
+}
+
+float CWinSystemAmlogic::GetGuiSrgbDecode() const
+{
+  if (!GuiPqIsFinalStage())
+    return 0.0f;
+
+  const auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
+
+  return settings->GetBool(CSettings::SETTING_VIDEOSCREEN_GUISRGBTRANSFER) ? 1.0f : 0.0f;
+}
+
+float CWinSystemAmlogic::GetGuiDither8Bit() const
+{
+  const auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
+
+  return settings->GetBool(CSettings::SETTING_VIDEOSCREEN_GUIDITHER8BIT) ? 1.0f : 0.0f;
 }
 
 bool CWinSystemAmlogic::Hide()

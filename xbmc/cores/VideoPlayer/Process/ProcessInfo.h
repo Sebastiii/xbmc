@@ -33,6 +33,7 @@ public:
   static void RegisterProcessControl(const std::string& id, CreateProcessControl createFunc);
   virtual ~CProcessInfo() = default;
   void SetDataCache(CDataCacheCore *cache);
+  bool HasDataCache() const { return m_dataCache != nullptr; }
 
   // player video
   void ResetVideoCodecInfo();
@@ -53,6 +54,8 @@ public:
   float GetVideoDAR() const;
   void SetVideoInterlaced(bool interlaced);
   bool GetVideoInterlaced() const;
+  void SetInMenu(bool inMenu);
+  bool GetInMenu() const;
   virtual EINTERLACEMETHOD GetFallbackDeintMethod();
   virtual void SetSwDeinterlacingMethods();
   void UpdateDeinterlacingMethods(std::list<EINTERLACEMETHOD> &methods);
@@ -69,6 +72,12 @@ public:
   std::string GetAudioDecoderName();
   void SetAudioChannels(const CAEChannelInfo& channels);
   void SetAudioChannels(const std::string &channels);
+  void SetAudioObjectCount(int objectCount);
+  int GetAudioObjectCount();
+  void SetAudioObjectChannels(int objectChannels);
+  int GetAudioObjectChannels();
+  void SetAudioBedChannels(int bedChannels);
+  int GetAudioBedChannels();
   std::string GetAudioChannels();
   std::string GetAudioChannelsSink();
   void SetAudioSampleRate(int sampleRate);
@@ -147,6 +156,9 @@ protected:
   // player audio info
   std::string m_audioDecoderName;
   std::string m_audioChannels;
+  int m_audioObjectCount = -1;
+  int m_audioObjectChannels = -1;
+  int m_audioBedChannels = -1;
   int m_audioSampleRate;
   int m_audioBitsPerSample;
   CCriticalSection m_audioCodecSection;
@@ -164,6 +176,7 @@ protected:
   bool m_stateSeeking;
   std::atomic_bool m_renderGuiLayer;
   std::atomic_bool m_renderVideoLayer;
+  std::atomic<bool> m_isInMenu{false};
   float m_tempo;
   float m_newTempo;
   float m_speed;

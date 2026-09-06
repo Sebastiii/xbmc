@@ -10,6 +10,7 @@
 
 #include "cores/AudioEngine/Utils/AEAudioFormat.h"
 #include "cores/AudioEngine/Interfaces/AE.h"
+#include <chrono>
 #include <cmath>
 #include <deque>
 #include <memory>
@@ -55,6 +56,7 @@ public:
   int pkt_start_offset = 0;
   int refCount = 0;
   double centerMixLevel;
+  double surroundMixLevel;
 };
 
 class CActiveAEBufferPool
@@ -68,6 +70,7 @@ public:
   AEAudioFormat m_format;
   std::deque<CSampleBuffer*> m_allSamples;
   std::deque<CSampleBuffer*> m_freeSamples;
+  std::chrono::steady_clock::time_point m_discardTime;
 };
 
 class IAEResample;
@@ -109,9 +112,12 @@ protected:
   std::unique_ptr<IAEResample> m_resampler;
   double m_resampleRatio = 1.0;
   double m_centerMixLevel = M_SQRT1_2;
+  double m_surroundMixLevel = M_SQRT1_2;
   bool m_fillPackets = false;
   bool m_normalize = true;
   float m_mixSubLevel = 0.0f;
+  double m_boostCenter = 0.0;
+  int m_lfeMixTo = 0;
   bool m_changeResampler = false;
   bool m_forceResampler = false;
   AEQuality m_resampleQuality;

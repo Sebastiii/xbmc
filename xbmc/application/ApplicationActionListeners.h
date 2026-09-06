@@ -53,6 +53,8 @@ protected:
    */
   bool NotifyActionListeners(const CAction& action) const;
 
+  void NotifyActionListenersPre(const CAction& action) const;
+
   std::vector<KODI::ACTION::IActionListener*> m_actionListeners;
 
   CCriticalSection& m_critSection;

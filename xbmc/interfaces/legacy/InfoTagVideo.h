@@ -581,7 +581,7 @@ namespace XBMCAddon
     /// @{
     /// @brief **Audio stream details class used in combination with InfoTagVideo.**
     ///
-    /// \python_class{ xbmc.AudioStreamDetail([channels, codec, language]) }
+    /// \python_class{ xbmc.AudioStreamDetail([channels, codec, language, profile, objects, objectChannels, bedChannels]) }
     ///
     /// Represents a single selectable audio stream for a video item wrapped by InfoTagVideo.
     ///
@@ -603,12 +603,16 @@ namespace XBMCAddon
 #ifdef DOXYGEN_SHOULD_USE_THIS
       ///
       /// \ingroup python_xbmc_audiostreamdetail AudioStreamDetail
-      /// @brief \python_func{ xbmc.AudioStreamDetail([channels, codec, language]) }
+      /// @brief \python_func{ xbmc.AudioStreamDetail([channels, codec, language, profile, objects, objectChannels, bedChannels]) }
       /// Creates a single audio stream details class for a video item wrapped by InfoTagVideo.
       ///
       /// @param channels           [opt] integer - Number of channels in the audio stream.
       /// @param codec              [opt] string - Codec of the audio stream.
       /// @param language           [opt] string - Language of the audio stream.
+      /// @param profile            [opt] string - Format profile of the audio stream (e.g. DTS:X, Auro-3D).
+      /// @param objects            [opt] integer - Number of audio objects in the stream (Dolby Atmos).
+      /// @param objectChannels     [opt] integer - Elements in the Atmos presentation, bed channels and objects together.
+      /// @param bedChannels        [opt] integer - Static bed channels in the presentation.
       ///
       ///
       ///-----------------------------------------------------------------------
@@ -625,7 +629,11 @@ namespace XBMCAddon
 #else
       explicit AudioStreamDetail(int channels = -1,
                                  const String& codec = emptyString,
-                                 const String& language = emptyString);
+                                 const String& language = emptyString,
+                                 const String& profile = emptyString,
+                                 int objects = -1,
+                                 int objectChannels = -1,
+                                 int bedChannels = -1);
 #endif
 
 #ifdef DOXYGEN_SHOULD_USE_THIS
@@ -738,6 +746,10 @@ namespace XBMCAddon
       int m_channels;
       String m_codec;
       String m_language;
+      String m_profile;
+      int m_objects;
+      int m_objectChannels;
+      int m_bedChannels;
     };
     /// @}
 

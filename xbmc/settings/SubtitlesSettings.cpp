@@ -35,10 +35,16 @@ CSubtitlesSettings::CSubtitlesSettings(const std::shared_ptr<CSettings>& setting
        CSettings::SETTING_SUBTITLES_SHADOWOPACITY,  CSettings::SETTING_SUBTITLES_SHADOWSIZE,
        CSettings::SETTING_SUBTITLES_MARGINVERTICAL, CSettings::SETTING_SUBTITLES_CHARSET,
        CSettings::SETTING_SUBTITLES_OVERRIDEFONTS,  CSettings::SETTING_SUBTITLES_OVERRIDESTYLES,
+       CSettings::SETTING_SUBTITLES_OVERRIDEASS,
        CSettings::SETTING_SUBTITLES_LANGUAGES,      CSettings::SETTING_SUBTITLES_STORAGEMODE,
        CSettings::SETTING_SUBTITLES_CUSTOMPATH,     CSettings::SETTING_SUBTITLES_PAUSEONSEARCH,
        CSettings::SETTING_SUBTITLES_DOWNLOADFIRST,  CSettings::SETTING_SUBTITLES_TV,
-       CSettings::SETTING_SUBTITLES_MOVIE});
+       CSettings::SETTING_SUBTITLES_MOVIE,
+       CSettings::SETTING_SUBTITLES_PGSVERTICALMODE,
+       CSettings::SETTING_SUBTITLES_PGSVERTICALOFFSET,
+       CSettings::SETTING_SUBTITLES_PGSMANUALACTIVEASPECT,
+       CSettings::SETTING_SUBTITLES_BITMAPZOOM,
+       CSettings::SETTING_SUBTITLES_RESTRICT_TO_ACTIVE_AREA});
 }
 
 CSubtitlesSettings::~CSubtitlesSettings()
@@ -51,9 +57,22 @@ void CSubtitlesSettings::OnSettingChanged(const std::shared_ptr<const CSetting>&
   if (setting == nullptr)
     return;
 
+  const std::string& id = setting->GetId();
+
+  if (id == CSettings::SETTING_SUBTITLES_ALIGN)
+  {
+    if (GetAlignment() != Align::ORIGINAL)
+      SetPgsVerticalMode(0);
+  }
+  else if (id == CSettings::SETTING_SUBTITLES_PGSVERTICALMODE)
+  {
+    if (GetPgsVerticalMode() != 0)
+      SetAlignment(Align::ORIGINAL);
+  }
+
   SetChanged();
   NotifyObservers(ObservableMessageSettingsChanged);
-  if (setting->GetId() == CSettings::SETTING_SUBTITLES_ALIGN)
+  if (id == CSettings::SETTING_SUBTITLES_ALIGN)
   {
     SetChanged();
     NotifyObservers(ObservableMessagePositionChanged);
@@ -142,10 +161,46 @@ OverrideStyles CSubtitlesSettings::GetOverrideStyles() const {
       m_settings->GetInt(CSettings::SETTING_SUBTITLES_OVERRIDESTYLES));
 }
 
-float CSubtitlesSettings::GetVerticalMarginPerc() const {
+bool CSubtitlesSettings::IsOverrideAss()
+{
+  return m_settings->GetBool(CSettings::SETTING_SUBTITLES_OVERRIDEASS);
+}
+
+float CSubtitlesSettings::GetVerticalMarginPerc() const
+{
   // We return the vertical margin as percentage
   // to fit the current screen resolution
   return static_cast<float>(m_settings->GetNumber(CSettings::SETTING_SUBTITLES_MARGINVERTICAL));
+}
+
+int CSubtitlesSettings::GetPgsVerticalMode() const
+{
+  return m_settings->GetInt(CSettings::SETTING_SUBTITLES_PGSVERTICALMODE);
+}
+
+void CSubtitlesSettings::SetPgsVerticalMode(int mode) const
+{
+  m_settings->SetInt(CSettings::SETTING_SUBTITLES_PGSVERTICALMODE, mode);
+}
+
+int CSubtitlesSettings::GetPgsVerticalOffsetSteps() const
+{
+  return m_settings->GetInt(CSettings::SETTING_SUBTITLES_PGSVERTICALOFFSET);
+}
+
+int CSubtitlesSettings::GetPgsBitmapZoom() const
+{
+  return m_settings->GetInt(CSettings::SETTING_SUBTITLES_BITMAPZOOM);
+}
+
+std::string CSubtitlesSettings::GetPgsManualActiveAspect() const
+{
+  return m_settings->GetString(CSettings::SETTING_SUBTITLES_PGSMANUALACTIVEASPECT);
+}
+
+bool CSubtitlesSettings::GetRestrictToActiveArea() const
+{
+  return m_settings->GetBool(CSettings::SETTING_SUBTITLES_RESTRICT_TO_ACTIVE_AREA);
 }
 
 void CSubtitlesSettings::SettingOptionsSubtitleFontsFiller(const SettingConstPtr& setting,

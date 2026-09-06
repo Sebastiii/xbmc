@@ -10,10 +10,14 @@
 
 #include "cores/VideoPlayer/Interface/DemuxPacket.h"
 #include "cores/VideoPlayer/Interface/TimingConstants.h"
+#include "threads/SystemClock.h"
+#include "utils/LogThrottle.h"
 #include "utils/log.h"
 
+#include <limits>
 #include <math.h>
 #include <mutex>
+#include <thread>
 
 using namespace std::chrono_literals;
 
@@ -99,11 +103,11 @@ MsgQueueReturnCode CDVDMessageQueue::Put(const std::shared_ptr<CDVDMsg>& pMsg,
                                          int priority,
                                          bool front)
 {
-  std::lock_guard lock(m_section);
+  std::unique_lock lock(m_section);
 
   if (!m_bInitialized)
   {
-    CLog::Log(LOGWARNING, "CDVDMessageQueue({})::Put MSGQ_NOT_INITIALIZED", m_owner);
+    LOG_THROTTLE_PERIODIC_GENERAL(LOGDEBUG, 1000, "({}) MSGQ_NOT_INITIALIZED", m_owner);
     return MSGQ_NOT_INITIALIZED;
   }
   if (!pMsg)
@@ -139,12 +143,17 @@ MsgQueueReturnCode CDVDMessageQueue::Put(const std::shared_ptr<CDVDMsg>& pMsg,
       m_messages.emplace_back(pMsg, priority);
   }
 
+  m_msgqLogging = CServiceBroker::GetLogging().IsLogLevelLogged(LOGDEBUG) &&
+                  CServiceBroker::GetLogging().CanLogComponent(LOGAVTIMING);
+
   if (pMsg->IsType(CDVDMsg::DEMUXER_PACKET) && priority == 0)
   {
     DemuxPacket* packet = static_cast<CDVDMsgDemuxerPacket*>(pMsg.get())->GetPacket();
     if (packet)
     {
       m_iDataSize += packet->iSize;
+      if (m_msgqLogging)
+        m_msgqPuts++;
       if (front)
         UpdateTimeFront();
       else
@@ -152,7 +161,78 @@ MsgQueueReturnCode CDVDMessageQueue::Put(const std::shared_ptr<CDVDMsg>& pMsg,
     }
   }
 
+  bool msgqEmit = false;
+  double msgqFront = 0.0;
+  double msgqBack = 0.0;
+  double msgqBackLive = 0.0;
+  double msgqDataMB = 0.0;
+  double msgqElapsedMs = 0.0;
+  size_t msgqMsgs = 0;
+  size_t msgqPrio = 0;
+  unsigned int msgqP = 0;
+  unsigned int msgqG = 0;
+  unsigned int msgqGP = 0;
+  unsigned int msgqBNP = 0;
+  const char* msgqBackState = "pkt";
+
+  if (m_msgqLogging)
+  {
+    const auto msgqNow = std::chrono::steady_clock::now();
+    if (m_msgqLogTime.time_since_epoch().count() == 0 || msgqNow - m_msgqLogTime >= 1000ms)
+    {
+      msgqElapsedMs =
+          m_msgqLogTime.time_since_epoch().count() == 0
+              ? 0.0
+              : std::chrono::duration<double, std::milli>(msgqNow - m_msgqLogTime).count();
+      m_msgqLogTime = msgqNow;
+
+      msgqBackLive = DVD_NOPTS_VALUE;
+      if (m_messages.empty())
+        msgqBackState = "empty";
+      else if (!m_messages.back().message->IsType(CDVDMsg::DEMUXER_PACKET))
+        msgqBackState = "notpkt";
+      else
+      {
+        DemuxPacket* backPacket =
+            std::static_pointer_cast<CDVDMsgDemuxerPacket>(m_messages.back().message)->GetPacket();
+        if (!backPacket)
+          msgqBackState = "null";
+        else if (backPacket->dts != DVD_NOPTS_VALUE)
+          msgqBackLive = backPacket->dts;
+        else if (backPacket->pts != DVD_NOPTS_VALUE)
+          msgqBackLive = backPacket->pts;
+        else
+          msgqBackState = "nopts";
+      }
+
+      msgqEmit = true;
+      msgqFront = m_TimeFront / DVD_TIME_BASE;
+      msgqBack = m_TimeBack / DVD_TIME_BASE;
+      msgqBackLive /= DVD_TIME_BASE;
+      msgqDataMB = static_cast<double>(m_iDataSize) / 1048576.0;
+      msgqMsgs = m_messages.size();
+      msgqPrio = m_prioMessages.size();
+      msgqP = m_msgqPuts;
+      msgqG = m_msgqGets;
+      msgqGP = m_msgqGetsPrio;
+      msgqBNP = m_msgqBackNotPacket;
+      m_msgqPuts = 0;
+      m_msgqGets = 0;
+      m_msgqGetsPrio = 0;
+      m_msgqBackNotPacket = 0;
+    }
+  }
+
   // inform waiter for new packet
+  lock.unlock();
+
+  if (msgqEmit)
+    logComponentM(LOGDEBUG, LOGAVTIMING,
+                  "msgq({}) front={:.3f} back={:.3f} backLive={:.3f} backState={} span={:.2f} "
+                  "msgs={} prio={} dataMB={:.1f} elapsedMs={:.0f} puts={} gets={} getsPrio={} "
+                  "backNotPkt={}",
+                  m_owner, msgqFront, msgqBack, msgqBackLive, msgqBackState, msgqFront - msgqBack,
+                  msgqMsgs, msgqPrio, msgqDataMB, msgqElapsedMs, msgqP, msgqG, msgqGP, msgqBNP);
   m_hEvent.Set();
 
   return MSGQ_OK;
@@ -194,6 +274,12 @@ MsgQueueReturnCode CDVDMessageQueue::Get(std::shared_ptr<CDVDMsg>& pMsg,
       pMsg = std::move(item.message);
       msgs.pop_back();
       UpdateTimeBack();
+      if (m_msgqLogging)
+      {
+        m_msgqGets++;
+        if (&msgs == &m_prioMessages)
+          m_msgqGetsPrio++;
+      }
       ret = MSGQ_OK;
       break;
     }
@@ -264,6 +350,10 @@ void CDVDMessageQueue::UpdateTimeBack()
           m_TimeFront = m_TimeBack;
       }
     }
+    else if (m_msgqLogging)
+    {
+      m_msgqBackNotPacket++;
+    }
   }
 }
 
@@ -290,22 +380,75 @@ unsigned CDVDMessageQueue::GetPacketCount(CDVDMsg::Message type) const {
 
 void CDVDMessageQueue::WaitUntilEmpty()
 {
+  size_t remaining;
   {
     std::lock_guard lock(m_section);
 
     m_drain = true;
+    remaining = m_messages.size() + m_prioMessages.size();
   }
 
-  CLog::Log(LOGINFO, "CDVDMessageQueue({})::WaitUntilEmpty", m_owner);
-  auto msg = std::make_shared<CDVDMsgGeneralSynchronize>(40s, SYNCSOURCE_ANY);
-  Put(msg);
-  msg->Wait(m_bAbortRequest, 0);
+  const double queuedSec = GetTimeSize();
+  logComponentM(LOGDEBUG, LOGAVTIMING, "queue({}) drain start: {} msgs, {:.2f}s queued", m_owner,
+                remaining, queuedSec);
+
+  const auto ceiling = std::chrono::milliseconds(
+      std::clamp(static_cast<int>(queuedSec * 1000.0) + 3000, 8000, 30000));
+  XbmcThreads::EndTime<> totalTimer(ceiling);
+  XbmcThreads::EndTime<> stallTimer(1500ms);
+  size_t lastRemaining = std::numeric_limits<size_t>::max();
+  bool drained = false;
+  constexpr size_t MIN_WINDOW_PROGRESS = 10;
+  while (!m_bAbortRequest && !totalTimer.IsTimePast())
+  {
+    {
+      std::lock_guard lock(m_section);
+      remaining = m_messages.size() + m_prioMessages.size();
+    }
+
+    if (remaining == 0)
+    {
+      drained = true;
+      break;
+    }
+
+    if (remaining + MIN_WINDOW_PROGRESS <= lastRemaining)
+    {
+      lastRemaining = remaining;
+      stallTimer.Set(1500ms);
+    }
+    else if (stallTimer.IsTimePast())
+    {
+      logComponentM(LOGDEBUG, LOGAVTIMING, "queue({}) drain stalled/trickling, {} msgs left",
+                    m_owner, remaining);
+      break;
+    }
+
+    std::this_thread::sleep_for(25ms);
+  }
+
+  if (drained && !m_bAbortRequest)
+  {
+    auto msg = std::make_shared<CDVDMsgGeneralSynchronize>(2s, SYNCSOURCE_ANY);
+    Put(msg);
+    msg->Wait(m_bAbortRequest, 0);
+  }
+
+  if (totalTimer.IsTimePast())
+    logComponentM(LOGDEBUG, LOGAVTIMING, "queue({}) drain ceiling hit after {}ms", m_owner,
+                  ceiling.count());
 
   {
     std::lock_guard lock(m_section);
 
     m_drain = false;
   }
+}
+
+int CDVDMessageQueue::GetDataSize() const
+{
+  std::lock_guard lock(m_section);
+  return m_iDataSize;
 }
 
 int CDVDMessageQueue::GetLevel(bool data_level) const

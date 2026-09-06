@@ -32,8 +32,38 @@ CStreamDetailVideo::CStreamDetailVideo(const VideoStreamInfo &info, int duration
   m_strCodec(info.codecName),
   m_strStereoMode(info.stereoMode),
   m_strLanguage(info.language),
-  m_strHdrType(CStreamDetails::HdrTypeToString(info.hdrType))
+  m_strDvProfile(info.dvProfile)
 {
+  SetHdrTypes(info.hdrType, info.hdrTypeAlt);
+}
+
+void CStreamDetailVideo::SetHdrTypes(StreamHdrType primary, StreamHdrType alternate)
+{
+  if (primary == StreamHdrType::HDR_TYPE_HDR10PLUS)
+  {
+    if (alternate == StreamHdrType::HDR_TYPE_DOLBYVISION)
+    {
+      primary = StreamHdrType::HDR_TYPE_DOLBYVISION;
+      alternate = StreamHdrType::HDR_TYPE_HDR10PLUS;
+    }
+    else
+    {
+      alternate = StreamHdrType::HDR_TYPE_HDR10PLUS;
+      primary = StreamHdrType::HDR_TYPE_HDR10;
+    }
+  }
+  else if (primary == StreamHdrType::HDR_TYPE_HDR_VIVID)
+  {
+    alternate = StreamHdrType::HDR_TYPE_HDR_VIVID;
+    primary = StreamHdrType::HDR_TYPE_NONE;
+  }
+  else if (alternate == primary)
+  {
+    alternate = StreamHdrType::HDR_TYPE_NONE;
+  }
+
+  m_strHdrType = CStreamDetails::HdrTypeToString(primary);
+  m_strHdrTypeAlt = CStreamDetails::HdrTypeToString(alternate);
 }
 
 void CStreamDetailVideo::Archive(CArchive& ar)
@@ -48,6 +78,8 @@ void CStreamDetailVideo::Archive(CArchive& ar)
     ar << m_strStereoMode;
     ar << m_strLanguage;
     ar << m_strHdrType;
+    ar << m_strHdrTypeAlt;
+    ar << m_strDvProfile;
   }
   else
   {
@@ -59,6 +91,8 @@ void CStreamDetailVideo::Archive(CArchive& ar)
     ar >> m_strStereoMode;
     ar >> m_strLanguage;
     ar >> m_strHdrType;
+    ar >> m_strHdrTypeAlt;
+    ar >> m_strDvProfile;
   }
 }
 void CStreamDetailVideo::Serialize(CVariant& value) const
@@ -71,6 +105,8 @@ void CStreamDetailVideo::Serialize(CVariant& value) const
   value["stereomode"] = m_strStereoMode;
   value["language"] = m_strLanguage;
   value["hdrtype"] = m_strHdrType;
+  value["hdrtypealt"] = m_strHdrTypeAlt;
+  value["dvprofile"] = m_strDvProfile;
 }
 
 bool CStreamDetailVideo::IsWorseThan(const CStreamDetail &that) const
@@ -91,9 +127,20 @@ CStreamDetailAudio::CStreamDetailAudio() :
 CStreamDetailAudio::CStreamDetailAudio(const AudioStreamInfo &info) :
   CStreamDetail(CStreamDetail::AUDIO),
   m_iChannels(info.channels),
-  m_strCodec(info.codecName),
-  m_strLanguage(info.language)
+  m_iAudioObjects(info.objects),
+  m_iAudioObjectChannels(info.objectChannels),
+  m_iAudioBedChannels(info.bedChannels),
+  m_strCodec(StreamUtils::GetCanonicalCodecName(info.codecName)),
+  m_strLanguage(info.language),
+  m_strProfile(info.profile.empty() ? StreamUtils::GetCodecDetail(info.codecName) : info.profile)
 {
+}
+
+void CStreamDetailAudio::SetCodecFromStream(const std::string& codec)
+{
+  m_strCodec = StreamUtils::GetCanonicalCodecName(codec);
+  if (m_strProfile.empty())
+    m_strProfile = StreamUtils::GetCodecDetail(codec);
 }
 
 void CStreamDetailAudio::Archive(CArchive& ar)
@@ -103,12 +150,20 @@ void CStreamDetailAudio::Archive(CArchive& ar)
     ar << m_strCodec;
     ar << m_strLanguage;
     ar << m_iChannels;
+    ar << m_strProfile;
+    ar << m_iAudioObjects;
+    ar << m_iAudioObjectChannels;
+    ar << m_iAudioBedChannels;
   }
   else
   {
     ar >> m_strCodec;
     ar >> m_strLanguage;
     ar >> m_iChannels;
+    ar >> m_strProfile;
+    ar >> m_iAudioObjects;
+    ar >> m_iAudioObjectChannels;
+    ar >> m_iAudioBedChannels;
   }
 }
 void CStreamDetailAudio::Serialize(CVariant& value) const
@@ -116,6 +171,10 @@ void CStreamDetailAudio::Serialize(CVariant& value) const
   value["codec"] = m_strCodec;
   value["language"] = m_strLanguage;
   value["channels"] = m_iChannels;
+  value["profile"] = m_strProfile;
+  value["objects"] = m_iAudioObjects;
+  value["objectchannels"] = m_iAudioObjectChannels;
+  value["bedchannels"] = m_iAudioBedChannels;
 }
 
 bool CStreamDetailAudio::IsWorseThan(const CStreamDetail &that) const
@@ -131,7 +190,9 @@ bool CStreamDetailAudio::IsWorseThan(const CStreamDetail &that) const
     return false;
 
   // In case of a tie, revert to codec priority
-  return StreamUtils::GetCodecPriority(sda.m_strCodec) > StreamUtils::GetCodecPriority(m_strCodec);
+  return StreamUtils::GetCodecPriority(
+             StreamUtils::GetExtendedCodecName(sda.m_strCodec, sda.m_strProfile)) >
+         StreamUtils::GetCodecPriority(StreamUtils::GetExtendedCodecName(m_strCodec, m_strProfile));
 }
 
 CStreamDetailSubtitle::CStreamDetailSubtitle() :
@@ -171,8 +232,9 @@ bool CStreamDetailSubtitle::IsWorseThan(const CStreamDetail &that) const
 
   // the best subtitle should be the one in the user's preferred language
   // If preferred language is set to "original" this is "eng"
-  return m_strLanguage.empty() ||
-    g_LangCodeExpander.CompareISO639Codes(static_cast<const CStreamDetailSubtitle &>(that).m_strLanguage, g_langInfo.GetSubtitleLanguage());
+  return m_strLanguage.empty() || g_LangCodeExpander.CompareISO639Codes(
+                                      static_cast<const CStreamDetailSubtitle&>(that).m_strLanguage,
+                                      g_langInfo.GetSubtitleLanguage(true));
 }
 
 CStreamDetailSubtitle& CStreamDetailSubtitle::operator=(const CStreamDetailSubtitle &that)
@@ -227,6 +289,11 @@ bool CStreamDetails::operator ==(const CStreamDetails &right) const
         GetVideoWidth(iStream)    != right.GetVideoWidth(iStream)    ||
         GetVideoHeight(iStream)   != right.GetVideoHeight(iStream)   ||
         GetVideoDuration(iStream) != right.GetVideoDuration(iStream) ||
+        GetVideoHdrType(iStream)  != right.GetVideoHdrType(iStream)  ||
+        GetVideoHdrTypeAlt(iStream) != right.GetVideoHdrTypeAlt(iStream) ||
+        GetVideoDvProfile(iStream)  != right.GetVideoDvProfile(iStream) ||
+        GetStereoMode(iStream)      != right.GetStereoMode(iStream) ||
+        GetVideoLanguage(iStream)   != right.GetVideoLanguage(iStream) ||
         fabs(GetVideoAspect(iStream) - right.GetVideoAspect(iStream)) > VIDEOASPECT_EPSILON)
       return false;
   }
@@ -235,6 +302,10 @@ bool CStreamDetails::operator ==(const CStreamDetails &right) const
   {
     if (GetAudioCodec(iStream)    != right.GetAudioCodec(iStream)    ||
         GetAudioLanguage(iStream) != right.GetAudioLanguage(iStream) ||
+        GetAudioProfile(iStream)  != right.GetAudioProfile(iStream)  ||
+        GetAudioObjects(iStream)  != right.GetAudioObjects(iStream)  ||
+        GetAudioObjectChannels(iStream) != right.GetAudioObjectChannels(iStream) ||
+        GetAudioBedChannels(iStream) != right.GetAudioBedChannels(iStream) ||
         GetAudioChannels(iStream) != right.GetAudioChannels(iStream) )
       return false;
   }
@@ -416,6 +487,26 @@ std::string CStreamDetails::GetVideoHdrType( int idx) const
     return "";
 }
 
+std::string CStreamDetails::GetVideoHdrTypeAlt(int idx) const
+{
+  auto item =
+      dynamic_cast<const CStreamDetailVideo*>(GetNthStream(CStreamDetail::VIDEO, idx));
+  if (item)
+    return item->m_strHdrTypeAlt;
+  else
+    return "";
+}
+
+std::string CStreamDetails::GetVideoDvProfile(int idx) const
+{
+  auto item =
+      dynamic_cast<const CStreamDetailVideo*>(GetNthStream(CStreamDetail::VIDEO, idx));
+  if (item)
+    return item->m_strDvProfile;
+  else
+    return "";
+}
+
 int CStreamDetails::GetVideoDuration(int idx) const
 {
   auto item =
@@ -471,6 +562,43 @@ int CStreamDetails::GetAudioChannels(int idx) const
     return item->m_iChannels;
   else
     return -1;
+}
+
+std::string CStreamDetails::GetAudioProfile(int idx) const
+{
+  auto item =
+      dynamic_cast<const CStreamDetailAudio*>(GetNthStream(CStreamDetail::AUDIO, idx));
+  if (item)
+    return item->m_strProfile;
+  else
+    return "";
+}
+
+int CStreamDetails::GetAudioObjects(int idx) const
+{
+  const CStreamDetailAudio* item =
+      dynamic_cast<const CStreamDetailAudio*>(GetNthStream(CStreamDetail::AUDIO, idx));
+  if (item)
+    return item->m_iAudioObjects;
+  return -1;
+}
+
+int CStreamDetails::GetAudioBedChannels(int idx) const
+{
+  const CStreamDetailAudio* item =
+      dynamic_cast<const CStreamDetailAudio*>(GetNthStream(CStreamDetail::AUDIO, idx));
+  if (item)
+    return item->m_iAudioBedChannels;
+  return -1;
+}
+
+int CStreamDetails::GetAudioObjectChannels(int idx) const
+{
+  const CStreamDetailAudio* item =
+      dynamic_cast<const CStreamDetailAudio*>(GetNthStream(CStreamDetail::AUDIO, idx));
+  if (item)
+    return item->m_iAudioObjectChannels;
+  return -1;
 }
 
 std::string CStreamDetails::GetSubtitleLanguage(int idx) const
@@ -657,6 +785,22 @@ bool CStreamDetails::SetStreams(const VideoStreamInfo& videoInfo, int videoDurat
   return true;
 }
 
+StreamHdrType CStreamDetails::StringToHdrType(const std::string& hdrType)
+{
+  if (hdrType == "dolbyvision")
+    return StreamHdrType::HDR_TYPE_DOLBYVISION;
+  if (hdrType == "hdr10")
+    return StreamHdrType::HDR_TYPE_HDR10;
+  if (hdrType == "hdr10plus")
+    return StreamHdrType::HDR_TYPE_HDR10PLUS;
+  if (hdrType == "hlg")
+    return StreamHdrType::HDR_TYPE_HLG;
+  if (hdrType == "hdrvivid")
+    return StreamHdrType::HDR_TYPE_HDR_VIVID;
+
+  return StreamHdrType::HDR_TYPE_NONE;
+}
+
 std::string CStreamDetails::HdrTypeToString(StreamHdrType hdrType)
 {
   switch (hdrType)
@@ -666,9 +810,11 @@ std::string CStreamDetails::HdrTypeToString(StreamHdrType hdrType)
     case StreamHdrType::HDR_TYPE_HDR10:
       return "hdr10";
     case StreamHdrType::HDR_TYPE_HDR10PLUS:
-      return "hdr10+";
+      return "hdr10plus";
     case StreamHdrType::HDR_TYPE_HLG:
       return "hlg";
+    case StreamHdrType::HDR_TYPE_HDR_VIVID:
+      return "hdrvivid";
     case StreamHdrType::HDR_TYPE_NONE:
     default:
       return "";

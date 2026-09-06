@@ -74,15 +74,29 @@ namespace XBMCAddon
       streamDetail->m_strCodec = m_codec;
       streamDetail->m_strStereoMode = m_stereoMode;
       streamDetail->m_strLanguage = m_language;
-      streamDetail->m_strHdrType = m_hdrType;
+      std::string hdrType = m_hdrType;
+      StringUtils::Trim(hdrType);
+      StringUtils::ToLower(hdrType);
+      streamDetail->SetHdrTypes(CStreamDetails::StringToHdrType(hdrType),
+                                StreamHdrType::HDR_TYPE_NONE);
 
       return streamDetail;
     }
 
     AudioStreamDetail::AudioStreamDetail(int channels /* = -1 */,
                                          const String& codec /* = emptyString */,
-                                         const String& language /* = emptyString */)
-      : m_channels(channels), m_codec(codec), m_language(language)
+                                         const String& language /* = emptyString */,
+                                         const String& profile /* = emptyString */,
+                                         int objects,
+                                         int objectChannels,
+                                         int bedChannels)
+      : m_channels(channels),
+        m_codec(codec),
+        m_language(language),
+        m_profile(profile),
+        m_objects(objects),
+        m_objectChannels(objectChannels),
+        m_bedChannels(bedChannels)
     {
     }
 
@@ -90,8 +104,15 @@ namespace XBMCAddon
     {
       auto streamDetail = new CStreamDetailAudio();
       streamDetail->m_iChannels = m_channels;
-      streamDetail->m_strCodec = m_codec;
       streamDetail->m_strLanguage = m_language;
+      streamDetail->m_strProfile = m_profile;
+      streamDetail->m_iAudioObjects = m_objects;
+      streamDetail->m_iAudioObjectChannels = m_objectChannels;
+      streamDetail->m_iAudioBedChannels = m_bedChannels;
+      std::string codec = m_codec;
+      StringUtils::Trim(codec);
+      StringUtils::ToLower(codec);
+      streamDetail->SetCodecFromStream(codec);
 
       return streamDetail;
     }
@@ -610,6 +631,7 @@ namespace XBMCAddon
       {
         XBMCAddonUtils::GuiLock lock(languageHook, offscreen);
         addStreamRaw(infoTag, streamDetail);
+        finalizeStreamsRaw(infoTag);
       }
     }
 
@@ -621,6 +643,7 @@ namespace XBMCAddon
       {
         XBMCAddonUtils::GuiLock lock(languageHook, offscreen);
         addStreamRaw(infoTag, streamDetail);
+        finalizeStreamsRaw(infoTag);
       }
     }
 
@@ -632,6 +655,7 @@ namespace XBMCAddon
       {
         XBMCAddonUtils::GuiLock lock(languageHook, offscreen);
         addStreamRaw(infoTag, streamDetail);
+        finalizeStreamsRaw(infoTag);
       }
     }
 

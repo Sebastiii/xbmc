@@ -8,8 +8,10 @@
 
 #include "DebugRenderer.h"
 
+#include "ServiceBroker.h"
 #include "cores/VideoPlayer/DVDCodecs/Overlay/DVDOverlayLibass.h"
 #include "cores/VideoPlayer/Interface/TimingConstants.h"
+#include "settings/SettingsComponent.h"
 #include "settings/SubtitlesSettings.h"
 #include "utils/log.h"
 #include "windowing/GraphicContext.h"
@@ -114,7 +116,7 @@ CDebugRenderer::CRenderer::CRenderer() : OVERLAY::CRenderer()
 {
 }
 
-void CDebugRenderer::CRenderer::Render(int idx)
+void CDebugRenderer::CRenderer::Render(int idx, float depth)
 {
   std::vector<SElement>& list = m_buffers[idx];
   for (auto it = list.begin(); it != list.end(); ++it)
@@ -145,4 +147,13 @@ void CDebugRenderer::CRenderer::CreateSubtitlesStyle()
   m_debugOverlayStyle->fontName = KODI::SUBTITLES::FONT_DEFAULT_FAMILYNAME;
   m_debugOverlayStyle->fontSize = 20.0;
   m_debugOverlayStyle->marginVertical = 12;
+}
+
+void CDebugRenderer::CRenderer::ResetSubtitlePosition()
+{
+  m_saveSubtitlePosition = false;
+  m_subtitleVerticalMargin = static_cast<int>(
+      static_cast<float>(m_rv.Height()) / 100 *
+      CServiceBroker::GetSettingsComponent()->GetSubtitlesSettings()->GetVerticalMarginPerc());
+  m_subtitlePosResInfo = static_cast<int>(m_rv.Height());
 }

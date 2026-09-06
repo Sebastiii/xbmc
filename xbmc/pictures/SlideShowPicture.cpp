@@ -729,7 +729,10 @@ void CSlideShowPic::Move(float fDeltaX, float fDeltaY)
 
 void CSlideShowPic::Render()
 {
-  std::lock_guard lock(m_textureAccess);
+  if (CServiceBroker::GetWinSystem()->GetGfxContext().GetRenderOrder() ==
+      RENDER_ORDER_FRONT_TO_BACK)
+    return;
+  std::unique_lock<CCriticalSection> lock(m_textureAccess);
 
   Render(m_ax, m_ay, m_pImage.get(), (m_alpha << 24) | 0xFFFFFF);
 

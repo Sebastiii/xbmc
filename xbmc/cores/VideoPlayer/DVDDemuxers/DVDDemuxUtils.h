@@ -20,5 +20,6 @@ public:
   static DemuxPacket* AllocateDemuxPacket(int iDataSize = 0);
   static DemuxPacket* AllocateDemuxPacket(unsigned int iDataSize, unsigned int encryptedSubsampleCount);
   static void StoreSideData(DemuxPacket *pkt, AVPacket *src);
+  static bool SnapMsQuantisedFrameRate(int& fpsRate, int& fpsScale, double hintFps);
 };
 

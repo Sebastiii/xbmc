@@ -40,7 +40,7 @@ bool CGUIRenderingControl::InitCallback(IRenderingCallback *callback)
 
   std::lock_guard lock(m_rendering);
 
-  CServiceBroker::GetWinSystem()->GetGfxContext().CaptureStateBlock();
+  CGraphicContextStateBlock stateBlock(CServiceBroker::GetWinSystem()->GetGfxContext());
   float x = CServiceBroker::GetWinSystem()->GetGfxContext().ScaleFinalXCoord(GetXPosition(), GetYPosition());
   float y = CServiceBroker::GetWinSystem()->GetGfxContext().ScaleFinalYCoord(GetXPosition(), GetYPosition());
   float w = CServiceBroker::GetWinSystem()->GetGfxContext().ScaleFinalXCoord(GetXPosition() + GetWidth(), GetYPosition() + GetHeight()) - x;
@@ -59,7 +59,6 @@ bool CGUIRenderingControl::InitCallback(IRenderingCallback *callback)
   else
     return false;
 
-  CServiceBroker::GetWinSystem()->GetGfxContext().ApplyStateBlock();
   return true;
 }
 
@@ -92,11 +91,15 @@ void CGUIRenderingControl::Render()
     // set the viewport - note: We currently don't have any control over how
     // the addon renders, so the best we can do is attempt to define
     // a viewport??
-    CServiceBroker::GetWinSystem()->GetGfxContext().SetViewPort(m_posX, m_posY, m_width, m_height);
-    CServiceBroker::GetWinSystem()->GetGfxContext().CaptureStateBlock();
-    m_callback->Render();
-    CServiceBroker::GetWinSystem()->GetGfxContext().ApplyStateBlock();
-    CServiceBroker::GetWinSystem()->GetGfxContext().RestoreViewPort();
+    if (CServiceBroker::GetWinSystem()->GetGfxContext().SetViewPort(m_posX, m_posY, m_width,
+                                                                    m_height))
+    {
+      {
+        CGraphicContextStateBlock stateBlock(CServiceBroker::GetWinSystem()->GetGfxContext());
+        m_callback->Render();
+      }
+      CServiceBroker::GetWinSystem()->GetGfxContext().RestoreViewPort();
+    }
   }
 
   CGUIControl::Render();
@@ -108,9 +111,10 @@ void CGUIRenderingControl::FreeResources(bool immediately)
 
   if (!m_callback) return;
 
-  CServiceBroker::GetWinSystem()->GetGfxContext().CaptureStateBlock(); //! @todo locking
-  m_callback->Stop();
-  CServiceBroker::GetWinSystem()->GetGfxContext().ApplyStateBlock();
+  {
+    CGraphicContextStateBlock stateBlock(CServiceBroker::GetWinSystem()->GetGfxContext()); //! @todo locking
+    m_callback->Stop();
+  }
   m_callback = nullptr;
 }
 

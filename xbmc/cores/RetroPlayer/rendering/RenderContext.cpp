@@ -108,7 +108,7 @@ static ShaderMethodGLES TranslateShaderMethodGLES(GL_SHADER_METHOD method)
 } // namespace
 #endif
 
-void CRenderContext::EnableGUIShader(GL_SHADER_METHOD method) const {
+void CRenderContext::EnableGUIShader(GL_SHADER_METHOD method) {
 #if defined(HAS_GL)
   CRenderSystemGL* rendering = dynamic_cast<CRenderSystemGL*>(m_rendering);
   if (rendering != nullptr)
@@ -120,7 +120,7 @@ void CRenderContext::EnableGUIShader(GL_SHADER_METHOD method) const {
 #endif
 }
 
-void CRenderContext::DisableGUIShader() const {
+void CRenderContext::DisableGUIShader() {
 #if defined(HAS_GL)
   CRenderSystemGL* renderingGL = dynamic_cast<CRenderSystemGL*>(m_rendering);
   if (renderingGL != nullptr)
@@ -132,7 +132,7 @@ void CRenderContext::DisableGUIShader() const {
 #endif
 }
 
-int CRenderContext::GUIShaderGetPos() const {
+int CRenderContext::GUIShaderGetPos() {
 #if defined(HAS_GL)
   CRenderSystemGL* renderingGL = dynamic_cast<CRenderSystemGL*>(m_rendering);
   if (renderingGL != nullptr)
@@ -146,7 +146,7 @@ int CRenderContext::GUIShaderGetPos() const {
   return -1;
 }
 
-int CRenderContext::GUIShaderGetCoord0() const {
+int CRenderContext::GUIShaderGetCoord0() {
 #if defined(HAS_GL)
   CRenderSystemGL* renderingGL = dynamic_cast<CRenderSystemGL*>(m_rendering);
   if (renderingGL != nullptr)
@@ -160,7 +160,7 @@ int CRenderContext::GUIShaderGetCoord0() const {
   return -1;
 }
 
-int CRenderContext::GUIShaderGetUniCol() const {
+int CRenderContext::GUIShaderGetUniCol() {
 #if defined(HAS_GL)
   CRenderSystemGL* renderingGL = dynamic_cast<CRenderSystemGL*>(m_rendering);
   if (renderingGL != nullptr)
@@ -169,6 +169,21 @@ int CRenderContext::GUIShaderGetUniCol() const {
   auto renderingGLES = dynamic_cast<CRenderSystemGLES*>(m_rendering);
   if (renderingGLES != nullptr)
     return static_cast<int>(renderingGLES->GUIShaderGetUniCol());
+#endif
+
+  return -1;
+}
+
+int CRenderContext::GUIShaderGetDepth()
+{
+#if defined(HAS_GL)
+  CRenderSystemGL* renderingGL = dynamic_cast<CRenderSystemGL*>(m_rendering);
+  if (renderingGL != nullptr)
+    return static_cast<int>(renderingGL->ShaderGetDepth());
+#elif HAS_GLES >= 2
+  CRenderSystemGLES* renderingGLES = dynamic_cast<CRenderSystemGLES*>(m_rendering);
+  if (renderingGLES != nullptr)
+    return static_cast<int>(renderingGLES->GUIShaderGetDepth());
 #endif
 
   return -1;

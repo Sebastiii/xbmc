@@ -11,6 +11,7 @@
 #include "guilib/GUIWindow.h"
 
 #include <chrono>
+#include <cstdint>
 
 class CGUIDialog;
 
@@ -42,4 +43,6 @@ private:
   std::chrono::time_point<std::chrono::steady_clock> m_dwShowViewModeTimeout;
 
   bool m_bShowCurrentTime;
+  uint64_t m_lastSeenOverlaySig{0};
+  bool m_lastGuiLayer{false};
 };

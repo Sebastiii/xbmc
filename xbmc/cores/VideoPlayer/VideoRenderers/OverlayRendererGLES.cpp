@@ -17,14 +17,18 @@
 #include "cores/VideoPlayer/DVDCodecs/Overlay/DVDOverlayImage.h"
 #include "cores/VideoPlayer/DVDCodecs/Overlay/DVDOverlaySSA.h"
 #include "cores/VideoPlayer/DVDCodecs/Overlay/DVDOverlaySpu.h"
+#include "rendering/GLExtensions.h"
 #include "rendering/MatrixGL.h"
 #include "rendering/gles/RenderSystemGLES.h"
 #include "utils/GLUtils.h"
 #include "utils/MathUtils.h"
 #include "utils/log.h"
+#include "utils/LogThrottle.h"
 #include "windowing/WinSystem.h"
 
+#include <chrono>
 #include <cmath>
+#include <utility>
 
 // GLES2.0 cant do CLAMP, but can do CLAMP_TO_EDGE.
 #define GL_CLAMP GL_CLAMP_TO_EDGE
@@ -32,6 +36,37 @@
 #define USE_PREMULTIPLIED_ALPHA 1
 
 using namespace OVERLAY;
+
+namespace
+{
+ShaderMethodGLES GetOverlayTextureShaderMethod(bool isHdrPqAuthored, bool pma)
+{
+  const bool pqOutput = CServiceBroker::GetWinSystem()->GetGfxContext().IsTransferPQ();
+
+  ShaderMethodGLES method;
+  if (!isHdrPqAuthored)
+  {
+    if (pma && pqOutput)
+      method = ShaderMethodGLES::SM_TEXTURE_NOBLEND_PMA_SDR_IMAGE_SUBS;
+    else
+      method = pma ? ShaderMethodGLES::SM_TEXTURE_NOBLEND_PMA
+                   : ShaderMethodGLES::SM_TEXTURE_NOBLEND;
+  }
+  else
+  {
+    method = pqOutput ? ShaderMethodGLES::SM_TEXTURE_NOBLEND_HDR_PGS_PQ_OUTPUT
+                      : ShaderMethodGLES::SM_TEXTURE_NOBLEND_HDR_PGS_SDR_OUTPUT;
+  }
+
+  LOG_THROTTLE_ONCHANGE(LOGDEBUG, LOGVIDEO,
+                        (static_cast<int>(method) << 3) | (isHdrPqAuthored ? 4 : 0) |
+                            (pma ? 2 : 0) | (pqOutput ? 1 : 0),
+                        1000,
+                        "overlay shader -> {} (isHdrPqAuthored={} pma={} pqOutput={})",
+                        method, isHdrPqAuthored, pma, pqOutput);
+  return method;
+}
+} // namespace
 
 static void LoadTexture(GLenum target,
                         GLsizei width,
@@ -152,18 +187,52 @@ COverlayTextureGLES::COverlayTextureGLES(const CDVDOverlayImage& o, CRect& rSour
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 
+  std::vector<uint32_t> rgbaCopy;
+  const uint32_t* rgbaPtr = nullptr;
   if (o.palette.empty())
   {
-    m_pma = false;
-    auto rgba = reinterpret_cast<const uint32_t*>(o.pixels.data());
-    LoadTexture(GL_TEXTURE_2D, o.width, o.height, o.linesize, &m_u, &m_v, false, rgba);
+    rgbaCopy.resize(o.width * o.height);
+    m_pma = !!USE_PREMULTIPLIED_ALPHA;
+    const uint32_t* src = reinterpret_cast<const uint32_t*>(o.pixels.data());
+    const int srcStride = o.linesize / 4;
+    if (m_pma)
+    {
+      for (int y = 0; y < o.height; ++y)
+      {
+        for (int x = 0; x < o.width; ++x)
+        {
+          const uint32_t px = src[y * srcStride + x];
+          const uint32_t a = (px >> 24) & 0xff;
+          if (a == 255)
+            rgbaCopy[y * o.width + x] = px;
+          else if (a == 0)
+            rgbaCopy[y * o.width + x] = 0;
+          else
+          {
+            const uint32_t r = ((px >> 16) & 0xff) * a / 255;
+            const uint32_t g = ((px >> 8) & 0xff) * a / 255;
+            const uint32_t b = ((px >> 0) & 0xff) * a / 255;
+            rgbaCopy[y * o.width + x] =
+                (a << 24) | (r << 16) | (g << 8) | (b << 0);
+          }
+        }
+      }
+    }
+    else
+    {
+      for (int y = 0; y < o.height; ++y)
+        std::memcpy(rgbaCopy.data() + y * o.width, src + y * srcStride, o.width * 4);
+    }
+    rgbaPtr = rgbaCopy.data();
+    LoadTexture(GL_TEXTURE_2D, o.width, o.height, o.width * 4, &m_u, &m_v, false, rgbaPtr);
   }
   else
   {
-    std::vector<uint32_t> rgba(o.width * o.height);
+    rgbaCopy.resize(o.width * o.height);
     m_pma = !!USE_PREMULTIPLIED_ALPHA;
-    convert_rgba(o, m_pma, rgba);
-    LoadTexture(GL_TEXTURE_2D, o.width, o.height, o.width * 4, &m_u, &m_v, false, rgba.data());
+    convert_rgba(o, m_pma, rgbaCopy);
+    rgbaPtr = rgbaCopy.data();
+    LoadTexture(GL_TEXTURE_2D, o.width, o.height, o.width * 4, &m_u, &m_v, false, rgbaPtr);
   }
 
   // If the overlay is already authored as HDR PQ code values (e.g. UHD-BD PGS HDR subtitles),
@@ -171,7 +240,10 @@ COverlayTextureGLES::COverlayTextureGLES(const CDVDOverlayImage& o, CRect& rSour
   // The final bypass decision is made at render time based on current output state.
   m_isHdrPqAuthored = o.m_isHdrPq;
 
+  glGenerateMipmap(GL_TEXTURE_2D);
   glBindTexture(GL_TEXTURE_2D, 0);
+
+  m_isBitmapOverlay = true;
 
   if (o.source_width > 0 && o.source_height > 0)
   {
@@ -237,6 +309,7 @@ COverlayTextureGLES::COverlayTextureGLES(const CDVDOverlaySpu& o)
   LoadTexture(GL_TEXTURE_2D, max_x - min_x, max_y - min_y, o.width * 4, &m_u, &m_v, false,
               rgba.data() + min_x + min_y * o.width);
 
+  glGenerateMipmap(GL_TEXTURE_2D);
   glBindTexture(GL_TEXTURE_2D, 0);
 
   m_align = ALIGN_VIDEO;
@@ -246,6 +319,7 @@ COverlayTextureGLES::COverlayTextureGLES(const CDVDOverlaySpu& o)
   m_width = static_cast<float>(max_x - min_x);
   m_height = static_cast<float>(max_y - min_y);
   m_pma = !!USE_PREMULTIPLIED_ALPHA;
+  m_isBitmapOverlay = true;
 }
 
 std::shared_ptr<COverlay> COverlay::Create(ASS_Image* images, float width, float height)
@@ -262,89 +336,97 @@ COverlayGlyphGLES::COverlayGlyphGLES(ASS_Image* images, float width, float heigh
   m_x = 0.0f;
   m_y = 0.0f;
 
-  SQuads quads;
-  if (!convert_quad(images, quads, static_cast<int>(width)))
+  GLint maxTextureSize = 2048;
+  glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTextureSize);
+  if (maxTextureSize <= 0)
+    maxTextureSize = 2048;
+
+  std::vector<SQuads> pages;
+  if (!convert_quads(images, pages, maxTextureSize))
     return;
 
-  glGenTextures(1, &m_texture);
-  glBindTexture(GL_TEXTURE_2D, m_texture);
+  const float scale_x = 1.0f / width;
+  const float scale_y = 1.0f / height;
 
-  LoadTexture(GL_TEXTURE_2D, quads.size_x, quads.size_y, quads.size_x, &m_u, &m_v, true,
-              quads.texture.data());
+  m_pages.reserve(pages.size());
 
-  float scale_u = m_u / quads.size_x;
-  float scale_v = m_v / quads.size_y;
-
-  float scale_x = 1.0f / width;
-  float scale_y = 1.0f / height;
-
-  m_vertex.resize(quads.quad.size() * 4);
-
-  VERTEX* vt = m_vertex.data();
-  SQuad* vs = quads.quad.data();
-
-  for (size_t i = 0; i < quads.quad.size(); i++)
+  for (SQuads& quads : pages)
   {
-    for (int s = 0; s < 4; s++)
-    {
-      vt[s].a = vs->a;
-      vt[s].r = vs->r;
-      vt[s].g = vs->g;
-      vt[s].b = vs->b;
+    Page page;
+    glGenTextures(1, &page.texture);
+    glBindTexture(GL_TEXTURE_2D, page.texture);
 
-      vt[s].x = scale_x;
-      vt[s].y = scale_y;
-      vt[s].z = 0.0f;
-      vt[s].u = scale_u;
-      vt[s].v = scale_v;
+    float u = 0.0f;
+    float v = 0.0f;
+    LoadTexture(GL_TEXTURE_2D, quads.size_x, quads.size_y, quads.size_x, &u, &v, true,
+                quads.texture.data());
+
+    const float scale_u = u / quads.size_x;
+    const float scale_v = v / quads.size_y;
+
+    page.vertex.resize(quads.quad.size() * 4);
+
+    VERTEX* vt = page.vertex.data();
+    SQuad* vs = quads.quad.data();
+
+    for (size_t i = 0; i < quads.quad.size(); i++)
+    {
+      for (int s = 0; s < 4; s++)
+      {
+        vt[s].a = vs->a;
+        vt[s].r = vs->r;
+        vt[s].g = vs->g;
+        vt[s].b = vs->b;
+
+        vt[s].x = scale_x;
+        vt[s].y = scale_y;
+        vt[s].z = 0.0f;
+        vt[s].u = scale_u;
+        vt[s].v = scale_v;
+      }
+
+      vt[0].x *= vs->x;
+      vt[0].u *= vs->u;
+      vt[0].y *= vs->y;
+      vt[0].v *= vs->v;
+
+      vt[1].x *= vs->x;
+      vt[1].u *= vs->u;
+      vt[1].y *= vs->y + vs->h;
+      vt[1].v *= vs->v + vs->h;
+
+      vt[2].x *= vs->x + vs->w;
+      vt[2].u *= vs->u + vs->w;
+      vt[2].y *= vs->y;
+      vt[2].v *= vs->v;
+
+      vt[3].x *= vs->x + vs->w;
+      vt[3].u *= vs->u + vs->w;
+      vt[3].y *= vs->y + vs->h;
+      vt[3].v *= vs->v + vs->h;
+
+      vs += 1;
+      vt += 4;
     }
 
-    vt[0].x *= vs->x;
-    vt[0].u *= vs->u;
-    vt[0].y *= vs->y;
-    vt[0].v *= vs->v;
-
-    vt[1].x *= vs->x;
-    vt[1].u *= vs->u;
-    vt[1].y *= vs->y + vs->h;
-    vt[1].v *= vs->v + vs->h;
-
-    vt[2].x *= vs->x + vs->w;
-    vt[2].u *= vs->u + vs->w;
-    vt[2].y *= vs->y;
-    vt[2].v *= vs->v;
-
-    vt[3].x *= vs->x + vs->w;
-    vt[3].u *= vs->u + vs->w;
-    vt[3].y *= vs->y + vs->h;
-    vt[3].v *= vs->v + vs->h;
-
-    vs += 1;
-    vt += 4;
+    glBindTexture(GL_TEXTURE_2D, 0);
+    m_pages.push_back(std::move(page));
   }
-
-  glBindTexture(GL_TEXTURE_2D, 0);
 }
 
 COverlayGlyphGLES::~COverlayGlyphGLES()
 {
-  glDeleteTextures(1, &m_texture);
+  for (Page& page : m_pages)
+    glDeleteTextures(1, &page.texture);
 }
 
 void COverlayGlyphGLES::Render(SRenderState& state)
 {
-  if ((m_texture == 0) || (m_vertex.size() == 0))
+  if (m_pages.empty())
     return;
 
   glEnable(GL_BLEND);
-
-  glBindTexture(GL_TEXTURE_2D, m_texture);
   glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 
   glMatrixModview.Push();
   glMatrixModview->Translatef(state.x, state.y, 0.0f);
@@ -354,43 +436,63 @@ void COverlayGlyphGLES::Render(SRenderState& state)
   auto renderSystem =
       dynamic_cast<CRenderSystemGLES*>(CServiceBroker::GetRenderSystem());
   renderSystem->EnableGUIShader(ShaderMethodGLES::SM_FONTS);
+
   GLint posLoc = renderSystem->GUIShaderGetPos();
   GLint colLoc = renderSystem->GUIShaderGetCol();
   GLint tex0Loc = renderSystem->GUIShaderGetCoord0();
+  GLint depthLoc = renderSystem->GUIShaderGetDepth();
+  GLint matrixUniformLoc = renderSystem->GUIShaderGetMatrix();
 
-  // stack object until VBOs will be used
-  std::vector<VERTEX> vecVertices(6 * m_vertex.size() / 4);
-  VERTEX* vertices = vecVertices.data();
+  CMatrixGL matrix = glMatrixProject.Get();
+  matrix.MultMatrixf(glMatrixModview.Get());
+  glUniformMatrix4fv(matrixUniformLoc, 1, GL_FALSE, matrix);
 
-  for (size_t i = 0; i < m_vertex.size(); i += 4)
+  glUniform1f(depthLoc, -1.0f);
+
+  for (const Page& page : m_pages)
   {
-    *vertices++ = m_vertex[i];
-    *vertices++ = m_vertex[i + 1];
-    *vertices++ = m_vertex[i + 2];
+    if (page.texture == 0 || page.vertex.empty())
+      continue;
 
-    *vertices++ = m_vertex[i + 1];
-    *vertices++ = m_vertex[i + 3];
-    *vertices++ = m_vertex[i + 2];
+    glBindTexture(GL_TEXTURE_2D, page.texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+
+    std::vector<VERTEX> vecVertices(6 * page.vertex.size() / 4);
+    VERTEX* vertices = vecVertices.data();
+
+    for (size_t i = 0; i < page.vertex.size(); i += 4)
+    {
+      *vertices++ = page.vertex[i];
+      *vertices++ = page.vertex[i + 1];
+      *vertices++ = page.vertex[i + 2];
+
+      *vertices++ = page.vertex[i + 1];
+      *vertices++ = page.vertex[i + 3];
+      *vertices++ = page.vertex[i + 2];
+    }
+
+    vertices = vecVertices.data();
+
+    glVertexAttribPointer(posLoc, 3, GL_FLOAT, GL_FALSE, sizeof(VERTEX),
+                          (char*)vertices + offsetof(VERTEX, x));
+    glVertexAttribPointer(colLoc, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(VERTEX),
+                          (char*)vertices + offsetof(VERTEX, r));
+    glVertexAttribPointer(tex0Loc, 2, GL_FLOAT, GL_FALSE, sizeof(VERTEX),
+                          (char*)vertices + offsetof(VERTEX, u));
+
+    glEnableVertexAttribArray(posLoc);
+    glEnableVertexAttribArray(colLoc);
+    glEnableVertexAttribArray(tex0Loc);
+
+    glDrawArrays(GL_TRIANGLES, 0, vecVertices.size());
+
+    glDisableVertexAttribArray(posLoc);
+    glDisableVertexAttribArray(colLoc);
+    glDisableVertexAttribArray(tex0Loc);
   }
-
-  vertices = vecVertices.data();
-
-  glVertexAttribPointer(posLoc, 3, GL_FLOAT, GL_FALSE, sizeof(VERTEX),
-                        (char*)vertices + offsetof(VERTEX, x));
-  glVertexAttribPointer(colLoc, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(VERTEX),
-                        (char*)vertices + offsetof(VERTEX, r));
-  glVertexAttribPointer(tex0Loc, 2, GL_FLOAT, GL_FALSE, sizeof(VERTEX),
-                        (char*)vertices + offsetof(VERTEX, u));
-
-  glEnableVertexAttribArray(posLoc);
-  glEnableVertexAttribArray(colLoc);
-  glEnableVertexAttribArray(tex0Loc);
-
-  glDrawArrays(GL_TRIANGLES, 0, vecVertices.size());
-
-  glDisableVertexAttribArray(posLoc);
-  glDisableVertexAttribArray(colLoc);
-  glDisableVertexAttribArray(tex0Loc);
 
   renderSystem->DisableGUIShader();
 
@@ -419,7 +521,8 @@ void COverlayTextureGLES::Render(SRenderState& state)
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                  m_isBitmapOverlay ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
 
   CRect rd;
   if (m_pos == POSITION_RELATIVE)
@@ -443,29 +546,25 @@ void COverlayTextureGLES::Render(SRenderState& state)
 
   auto renderSystem =
       dynamic_cast<CRenderSystemGLES*>(CServiceBroker::GetRenderSystem());
-  const bool bypassTransferPQ = m_isHdrPqAuthored &&
-                                CServiceBroker::GetWinSystem()->GetGfxContext().IsTransferPQ();
-  renderSystem->EnableGUIShader(bypassTransferPQ ? ShaderMethodGLES::SM_TEXTURE_NOBLEND_NO_PQ
-                                                 : ShaderMethodGLES::SM_TEXTURE_NOBLEND);
-  GLint posLoc = renderSystem->GUIShaderGetPos();
-  GLint colLoc = renderSystem->GUIShaderGetCol();
-  GLint tex0Loc = renderSystem->GUIShaderGetCoord0();
-  GLint uniColLoc = renderSystem->GUIShaderGetUniCol();
 
-  GLfloat col[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+  ShaderMethodGLES texMethod = GetOverlayTextureShaderMethod(m_isHdrPqAuthored, m_pma);
+  renderSystem->EnableGUIShader(texMethod);
+
+  GLint posLoc = renderSystem->GUIShaderGetPos();
+  GLint tex0Loc = renderSystem->GUIShaderGetCoord0();
+  GLint depthLoc = renderSystem->GUIShaderGetDepth();
+
   GLfloat ver[4][2];
   GLfloat tex[4][2];
   GLubyte idx[4] = {0, 1, 3, 2}; //determines order of triangle strip
 
   glVertexAttribPointer(posLoc, 2, GL_FLOAT, 0, 0, ver);
-  glVertexAttribPointer(colLoc, 4, GL_FLOAT, 0, 0, col);
   glVertexAttribPointer(tex0Loc, 2, GL_FLOAT, 0, 0, tex);
 
   glEnableVertexAttribArray(posLoc);
-  glEnableVertexAttribArray(colLoc);
   glEnableVertexAttribArray(tex0Loc);
 
-  glUniform4f(uniColLoc, (col[0]), (col[1]), (col[2]), (col[3]));
+  glUniform1f(depthLoc, 1.0f);
   // Setup vertex position values
   ver[0][0] = ver[3][0] = rd.x1;
   ver[0][1] = ver[1][1] = rd.y1;
@@ -480,7 +579,6 @@ void COverlayTextureGLES::Render(SRenderState& state)
   glDrawElements(GL_TRIANGLE_STRIP, 4, GL_UNSIGNED_BYTE, idx);
 
   glDisableVertexAttribArray(posLoc);
-  glDisableVertexAttribArray(colLoc);
   glDisableVertexAttribArray(tex0Loc);
 
   renderSystem->DisableGUIShader();

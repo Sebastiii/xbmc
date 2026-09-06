@@ -76,13 +76,18 @@ void ff_avutil_log(void* ptr, int level, const char* format, va_list va)
 {
   AVClass* avc = ptr ? *(AVClass**)ptr : nullptr;
 
-  int maxLevel = AV_LOG_WARNING;
-  if (CFFmpegLog::GetLogLevel() > 0)
-    maxLevel = AV_LOG_INFO;
+  const bool ffmpegComponent = CServiceBroker::GetLogging().CanLogComponent(LOGFFMPEG);
+  const int verboseLevel = CFFmpegLog::GetLogLevel();
 
-  if (level > maxLevel && !CServiceBroker::GetLogging().CanLogComponent(LOGFFMPEG))
+  int maxLevel = AV_LOG_WARNING;
+  if (verboseLevel >= 1 || ffmpegComponent)
+    maxLevel = AV_LOG_INFO;
+  if (verboseLevel >= 2)
+    maxLevel = AV_LOG_TRACE;
+
+  if (level > maxLevel)
     return;
-  else if (CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_logLevel <= LOG_LEVEL_NORMAL)
+  if (CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_logLevel <= LOG_LEVEL_NORMAL)
     return;
 
   int type;
@@ -123,7 +128,20 @@ void ff_avutil_log(void* ptr, int level, const char* format, va_list va)
   while ((pos = buffer.find('\n', start)) != std::string::npos)
   {
     if (pos > start)
-      CLog::Log(type, "{}{}", prefix, buffer.substr(start, pos - start));
+    {
+      if ((type == LOGERROR || type == LOGDEBUG) &&
+          prefix.find("[hevc]") != std::string::npos &&
+          (buffer.substr(start, pos - start).find("PPS id out of range") != std::string::npos ||
+           buffer.substr(start, pos - start).find("Skipping invalid undecodable NALU") !=
+               std::string::npos))
+      {
+        logComponentM(LOGDEBUG, LOGFFMPEG, "{}{}", prefix, buffer.substr(start, pos - start));
+      }
+      else
+      {
+        CLog::Log(type, "{}{}", prefix, buffer.substr(start, pos - start));
+      }
+    }
     start = pos + 1;
   }
   buffer.erase(0, start);

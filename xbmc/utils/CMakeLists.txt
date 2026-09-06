@@ -2,6 +2,7 @@ set(SOURCES ActorProtocol.cpp
             AlarmClock.cpp
             AliasShortcutUtils.cpp
             Archive.cpp
+            AudioSyncReset.cpp
             Base64.cpp
             BitstreamConverter.cpp
             BitstreamConverterDoVi.cpp
@@ -68,6 +69,7 @@ set(SOURCES ActorProtocol.cpp
             Screenshot.cpp
             SortUtils.cpp
             Speed.cpp
+            StereoAspect.cpp
             StreamDetails.cpp
             StreamUtils.cpp
             StringUtils.cpp
@@ -91,6 +93,7 @@ set(HEADERS ActorProtocol.h
             AlarmClock.h
             AliasShortcutUtils.h
             Archive.h
+            AudioSyncReset.h
             Base64.h
             BitstreamConverter.h
             BitstreamIoReader.h
@@ -123,6 +126,7 @@ set(HEADERS ActorProtocol.h
             GlobalsHandling.h
             GpuInfo.h
             GroupUtils.h
+            GuiActivity.h
             HDR10.h
             HDR10Plus.h
             HDR10PlusConvert.h
@@ -177,6 +181,7 @@ set(HEADERS ActorProtocol.h
             Screenshot.h
             SortUtils.h
             Speed.h
+            StereoAspect.h
             Stopwatch.h
             StreamDetails.h
             StreamUtils.h

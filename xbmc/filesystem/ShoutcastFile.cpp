@@ -17,6 +17,7 @@
 #include "FileItem.h"
 #include "ServiceBroker.h"
 #include "URL.h"
+#include "Util.h"
 #include "filesystem/CurlFile.h"
 #include "messaging/ApplicationMessenger.h"
 #include "music/tags/MusicInfoTag.h"
@@ -214,8 +215,11 @@ bool CShoutcastFile::ExtractTagInfo(const char* buf)
         if (StringUtils::StartsWithNoCase(streamUrlData, "http://") ||
             StringUtils::StartsWithNoCase(streamUrlData, "https://"))
         {
-          // Bauer Media Radio listenapi null event to erase current data
-          if (!StringUtils::EndsWithNoCase(streamUrlData, "eventdata/-1"))
+          if (CUtil::IsPicture(streamUrlData))
+          {
+            coverURL = streamUrlData;
+          }
+          else if (!StringUtils::EndsWithNoCase(streamUrlData, "eventdata/-1"))
           {
             const CURL dataURL(streamUrlData);
             XFILE::CCurlFile http;

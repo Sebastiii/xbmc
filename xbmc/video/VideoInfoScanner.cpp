@@ -680,7 +680,7 @@ namespace VIDEO
 
         if (fetchEpisodes)
         {
-          INFO_RET ret = RetrieveInfoForEpisodes(pItem, lResult, info2, useLocal, pDlgProgress);
+          INFO_RET ret = RetrieveInfoForEpisodes(pItem, lResult, info2, useLocal, pDlgProgress, true);
           if (ret == INFO_ADDED)
           {
             m_database.SetPathHash(pItem->GetPath(), pItem->GetProperty("hash").asString());
@@ -711,7 +711,7 @@ namespace VIDEO
     }
     if (fetchEpisodes)
     {
-      INFO_RET ret = RetrieveInfoForEpisodes(pItem, lResult, info2, useLocal, pDlgProgress);
+      INFO_RET ret = RetrieveInfoForEpisodes(pItem, lResult, info2, useLocal, pDlgProgress, true);
       if (ret == INFO_ADDED)
         m_database.SetPathHash(pItem->GetPath(), pItem->GetProperty("hash").asString());
     }
@@ -766,9 +766,19 @@ namespace VIDEO
     int movieYear = -1; // hint that movie title was not found
     if (result == CInfoScanner::TITLE_NFO)
     {
-      CVideoInfoTag* tag = pItem->GetVideoInfoTag();
-      movieTitle = tag->GetTitle();
-      movieYear = tag->GetYear(); // movieYear is expected to be >= 0
+      if (pItem->HasVideoInfoTag())
+      {
+        const CVideoInfoTag* tag = pItem->GetVideoInfoTag();
+        movieTitle = tag->GetTitle();
+        movieYear = tag->GetYear();
+      }
+      else
+      {
+        CLog::Log(LOGWARNING,
+                  "VideoInfoScanner: RetrieveInfoForMovie/ReadInfoTag did not create a video info "
+                  "tag for {}",
+                  CURL::GetRedacted(pItem->GetDynPath()));
+      }
     }
 
     std::string identifierType;
@@ -910,7 +920,8 @@ namespace VIDEO
                                              long showID,
                                              const ADDON::ScraperPtr &scraper,
                                              bool useLocal,
-                                             CGUIDialogProgress *progress)
+                                             CGUIDialogProgress *progress,
+                                             bool alreadyHasArt)
   {
     // enumerate episodes
     EPISODELIST files;
@@ -931,22 +942,17 @@ namespace VIDEO
       std::map<int, std::map<std::string, std::string>> seasonArt;
       m_database.GetTvShowSeasonArt(showID, seasonArt);
 
-      bool updateSeasonArt = false;
-      for (std::map<int, std::map<std::string, std::string>>::const_iterator i = seasonArt.begin(); i != seasonArt.end(); ++i)
-      {
-        if (i->second.empty())
-        {
-          updateSeasonArt = true;
-          break;
-        }
-      }
-
+      const bool updateSeasonArt{
+          alreadyHasArt ||
+          std::any_of(seasonArt.cbegin(), seasonArt.cend(), [](const auto& i) { return i.second.empty(); })};
       if (updateSeasonArt)
       {
-        if (!item->IsPlugin() || scraper->ID() != "metadata.local")
+        if (!alreadyHasArt && !item->IsPlugin() && scraper->ID() != "metadata.local")
         {
           CVideoInfoDownloader loader(scraper);
-          loader.GetArtwork(showInfo);
+          CVideoInfoTag tag{showInfo};
+          loader.GetArtwork(tag);
+          showInfo.m_strPictureURL = tag.m_strPictureURL;
         }
         GetSeasonThumbs(showInfo, seasonArt, CVideoThumbLoader::GetArtTypes(MediaTypeSeason), useLocal && !item->IsPlugin());
         for (std::map<int, std::map<std::string, std::string> >::const_iterator i = seasonArt.begin(); i != seasonArt.end(); ++i)
@@ -1739,12 +1745,18 @@ namespace VIDEO
       baseFilename.append("-");
     }
 
+    const bool caseSensitive{CServiceBroker::GetSettingsComponent()
+                                 ->GetAdvancedSettings()
+                                 ->m_caseSensitiveLocalArtMatch};
+
     for (const auto& artFile : availableArtFiles)
     {
-      std::string candidate = URIUtils::GetFileName(artFile->GetPath());
+      std::string candidate{URIUtils::GetFileName(artFile->GetPath())};
+      const bool matchesFilename{!baseFilename.empty() &&
+                                 (caseSensitive
+                                      ? StringUtils::StartsWith(candidate, baseFilename)
+                                      : StringUtils::StartsWithNoCase(candidate, baseFilename))};
 
-      bool matchesFilename =
-        !baseFilename.empty() && StringUtils::StartsWith(candidate, baseFilename);
       if (!baseFilename.empty() && !matchesFilename)
         continue;
 
@@ -2343,11 +2355,6 @@ namespace VIDEO
       }
       for (int season = -1; season <= maxSeasons; season++)
       {
-        // skip if we already have some art
-        std::map<int, std::map<std::string, std::string>>::const_iterator it = seasonArt.find(season);
-        if (it != seasonArt.end() && !it->second.empty())
-          continue;
-
         std::map<std::string, std::string> art;
         std::string basePath;
         if (season == -1)

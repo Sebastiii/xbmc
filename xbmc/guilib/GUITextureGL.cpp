@@ -143,6 +143,7 @@ void CGUITextureGL::End()
     GLint tex0Loc = m_renderSystem->ShaderGetCoord0();
     GLint tex1Loc = m_renderSystem->ShaderGetCoord1();
     GLint uniColLoc = m_renderSystem->ShaderGetUniCol();
+    GLint depthLoc = m_renderSystem->ShaderGetDepth();
 
     EnsureBuffers(m_packedVertices.size(), m_idx.size());
 
@@ -288,7 +289,9 @@ void CGUITextureGL::Draw(float *x, float *y, float *z, const CRect &texture, con
 void CGUITextureGL::DrawQuad(const CRect& rect,
                              UTILS::COLOR::Color color,
                              CTexture* texture,
-                             const CRect* texCoords)
+                             const CRect* texCoords,
+                             const float depth,
+                             const bool blending)
 {
   CRenderSystemGL *renderSystem = dynamic_cast<CRenderSystemGL*>(CServiceBroker::GetRenderSystem());
   if (texture)
@@ -297,8 +300,15 @@ void CGUITextureGL::DrawQuad(const CRect& rect,
     texture->BindToUnit(0);
   }
 
-  glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
-  glEnable(GL_BLEND);          // Turn Blending On
+  if (blending)
+  {
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_BLEND);
+  }
+  else
+  {
+    glDisable(GL_BLEND);
+  }
 
   VerifyGLState();
 
@@ -321,6 +331,7 @@ void CGUITextureGL::DrawQuad(const CRect& rect,
   GLint posLoc = renderSystem->ShaderGetPos();
   GLint tex0Loc = renderSystem->ShaderGetCoord0();
   GLint uniColLoc = renderSystem->ShaderGetUniCol();
+  GLint depthLoc = renderSystem->ShaderGetDepth();
 
   // Setup Colors
   col[0] = KODI::UTILS::GL::GetChannelFromARGB(KODI::UTILS::GL::ColorChannel::R, color);
@@ -329,6 +340,7 @@ void CGUITextureGL::DrawQuad(const CRect& rect,
   col[3] = KODI::UTILS::GL::GetChannelFromARGB(KODI::UTILS::GL::ColorChannel::A, color);
 
   glUniform4f(uniColLoc, col[0] / 255.0f, col[1] / 255.0f, col[2] / 255.0f, col[3] / 255.0f);
+  glUniform1f(depthLoc, depth);
 
   // bottom left
   vertex[0].x = rect.x1;
@@ -390,5 +402,8 @@ void CGUITextureGL::DrawQuad(const CRect& rect,
   glDeleteBuffers(1, &indexVBO);
 
   renderSystem->DisableShader();
+
+  if (!blending)
+    glEnable(GL_BLEND);
 }
 

@@ -70,6 +70,8 @@ public:
   int pict_type;
 
   StreamHdrType hdrType;
+  std::string strDVELType;
+  bool hasHdr10Plus = false;
 
   bool hasDisplayMetadata = false;
   AVMasteringDisplayMetadata displayMetadata;
@@ -199,6 +201,8 @@ public:
    */
   virtual unsigned GetAllowedReferences() { return 0; }
 
+  virtual bool HonorsAccurateSeek() const { return true; }
+
   /**
    * For calculation of dropping requirements player asks for some information.
    * - pts : right after decoder, used to detect gaps (dropped frames in decoder)
@@ -242,6 +246,12 @@ public:
    *
    */
   virtual void SetCodecControl(int flags) {}
+
+  /**
+   * Abort a blocking AddData call (e.g. when a flush is pending).
+   * Called from a non-codec thread; implementation must be thread-safe.
+   */
+  virtual void Abort() {}
 
   /**
    * Re-open the decoder.

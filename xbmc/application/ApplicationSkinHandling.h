@@ -33,6 +33,7 @@ public:
 
   bool OnSettingChanged(const CSetting& setting);
   void ReloadSkin(bool confirm = false);
+  bool LoadSkin(const std::string& skinID);
 
   // called from GUIWindow::OnAction
   bool ShouldStopActionPropagation() const
@@ -50,7 +51,6 @@ public:
   void RequestStopActionPropagation() { m_stopActionPropagation = true; }
 
 protected:
-  bool LoadSkin(const std::string& skinID);
   bool LoadCustomWindows();
 
   /*!

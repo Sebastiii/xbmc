@@ -32,6 +32,8 @@ public:
    * \return True if the action was handled, false otherwise
    */
   virtual bool OnAction(const CAction& action) = 0;
+
+  virtual void OnActionPre(const CAction& action) {}
 };
 } // namespace ACTION
 } // namespace KODI

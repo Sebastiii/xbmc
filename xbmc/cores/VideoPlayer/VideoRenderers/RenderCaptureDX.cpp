@@ -13,6 +13,8 @@
 #include "rendering/dx/RenderContext.h"
 #include "utils/log.h"
 
+#include "platform/win32/WIN32Util.h"
+
 extern "C"
 {
 #include <libavutil/mem.h>

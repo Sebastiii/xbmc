@@ -9,10 +9,15 @@
 #include "TextureGL.h"
 
 #include "ServiceBroker.h"
+#include "guilib/TextureFormats.h"
 #include "guilib/TextureManager.h"
+#include "rendering/GLExtensions.h"
 #include "rendering/RenderSystem.h"
 #include "settings/AdvancedSettings.h"
+#include "settings/SettingsComponent.h"
+#include "settings/SkinSettings.h"
 #include "utils/GLUtils.h"
+#include "utils/Map.h"
 #include "utils/MemUtils.h"
 #include "utils/log.h"
 
@@ -69,15 +74,19 @@ void CGLTexture::LoadToGPU()
 
   GLenum filter = (m_scalingMethod == TEXTURE_SCALING::NEAREST ? GL_NEAREST : GL_LINEAR);
 
+  const auto& advSettings = CServiceBroker::GetSettingsComponent()->GetAdvancedSettings();
+  const bool useMipmaps = IsMipmapped() || advSettings->m_guiMipMapping ||
+                          CSkinSettings::GetInstance().GetBool("force_mipmapping");
+
   // Set the texture's stretching properties
-  if (IsMipmapped())
+  if (useMipmaps)
   {
     GLenum mipmapFilter = (m_scalingMethod == TEXTURE_SCALING::NEAREST ? GL_LINEAR_MIPMAP_NEAREST : GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, mipmapFilter);
 
 #ifndef HAS_GLES
     // Lower LOD bias equals more sharpness, but less smooth animation
-    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, -0.5f);
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, -advSettings->m_guiMipMappingSharpen);
     if (!m_isOglVersion3orNewer)
       glTexParameteri(GL_TEXTURE_2D, GL_GENERATE_MIPMAP, GL_TRUE);
 #endif
@@ -90,6 +99,16 @@ void CGLTexture::LoadToGPU()
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+#ifdef GL_TEXTURE_MAX_ANISOTROPY_EXT
+  if (CServiceBroker::GetRenderSystem()->IsExtSupported("GL_EXT_texture_filter_anisotropic"))
+  {
+    int32_t aniso =
+        CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_guiAnisotropicFiltering;
+    if (aniso > 1)
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, aniso);
+  }
+#endif
 
   unsigned int maxSize = CServiceBroker::GetRenderSystem()->GetMaxTextureSize();
   if (m_textureHeight > maxSize)
@@ -148,7 +167,7 @@ void CGLTexture::LoadToGPU()
                            GetPitch() * GetRows(), m_pixels);
   }
 
-  if (IsMipmapped() && m_isOglVersion3orNewer)
+  if (useMipmaps && m_isOglVersion3orNewer)
   {
     glGenerateMipmap(GL_TEXTURE_2D);
   }
@@ -201,9 +220,18 @@ void CGLTexture::LoadToGPU()
   glTexImage2D(GL_TEXTURE_2D, 0, internalformat, m_textureWidth, m_textureHeight, 0,
     pixelformat, GL_UNSIGNED_BYTE, m_pixels);
 
-  if (IsMipmapped())
+  if (useMipmaps)
   {
+    while (glGetError() != GL_NO_ERROR)
+      ;
     glGenerateMipmap(GL_TEXTURE_2D);
+    const GLenum mipmapError = glGetError();
+    if (mipmapError != GL_NO_ERROR)
+    {
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+      logM(LOGWARNING, "mipmap generation failed (0x{:x}) for {}x{}, reverted to unmipmapped filter",
+           mipmapError, m_textureWidth, m_textureHeight);
+    }
   }
 
 #endif
@@ -215,12 +243,45 @@ void CGLTexture::LoadToGPU()
     m_pixels = nullptr;
   }
 
+  m_mipmapsApplied = useMipmaps;
   m_loadedToGPU = true;
+}
+
+void CGLTexture::SyncGPU()
+{
+  glFinish();
 }
 
 void CGLTexture::BindToUnit(unsigned int unit)
 {
   glActiveTexture(GL_TEXTURE0 + unit);
   glBindTexture(GL_TEXTURE_2D, m_texture);
+
+  if (m_loadedToGPU && IsMipmapped() && !m_mipmapsApplied)
+  {
+#ifndef HAS_GLES
+    if (m_isOglVersion3orNewer)
+#endif
+    {
+      GLenum mipmapFilter = (m_scalingMethod == TEXTURE_SCALING::NEAREST
+                                 ? GL_LINEAR_MIPMAP_NEAREST
+                                 : GL_LINEAR_MIPMAP_LINEAR);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, mipmapFilter);
+      while (glGetError() != GL_NO_ERROR)
+        ;
+      glGenerateMipmap(GL_TEXTURE_2D);
+      const GLenum mipmapError = glGetError();
+      if (mipmapError != GL_NO_ERROR)
+      {
+        const GLenum filter =
+            (m_scalingMethod == TEXTURE_SCALING::NEAREST ? GL_NEAREST : GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+        logM(LOGWARNING,
+             "mipmap upgrade failed (0x{:x}) for {}x{}, reverted to unmipmapped filter",
+             mipmapError, m_textureWidth, m_textureHeight);
+      }
+    }
+    m_mipmapsApplied = true;
+  }
 }
 

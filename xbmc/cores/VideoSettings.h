@@ -132,8 +132,8 @@ private:
       {VS_SCALINGMETHOD_VDPAU_HARDWARE, "vdpau"},
       {VS_SCALINGMETHOD_DXVA_HARDWARE, "dxva"},
       {VS_SCALINGMETHOD_AUTO, "auto"},
-      {VS_SCALINGMETHOD_SPLINE36_FAST, "spline32 fast"},
-      {VS_SCALINGMETHOD_SPLINE36, "spline32"},
+      {VS_SCALINGMETHOD_SPLINE36_FAST, "spline36 fast"},
+      {VS_SCALINGMETHOD_SPLINE36, "spline36"},
   });
 
   static_assert(VS_SCALINGMETHOD_MAX == scalingMethodMap.size(),

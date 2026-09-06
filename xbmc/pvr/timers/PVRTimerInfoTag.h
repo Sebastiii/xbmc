@@ -155,6 +155,8 @@ public:
    */
   void ResetChildState();
 
+  void ResetClientIndex();
+
   /*!
    * @brief Whether this timer is active.
    * @return True if this timer is active, false otherwise.

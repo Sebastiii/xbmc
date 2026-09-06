@@ -49,9 +49,10 @@ void CGUIWindowScreensaver::Render()
   {
     auto& context = CServiceBroker::GetWinSystem()->GetGfxContext();
 
-    context.CaptureStateBlock();
-    m_addon->Render();
-    context.ApplyStateBlock();
+    {
+      CGraphicContextStateBlock stateBlock(context);
+      m_addon->Render();
+    }
     return;
   }
 

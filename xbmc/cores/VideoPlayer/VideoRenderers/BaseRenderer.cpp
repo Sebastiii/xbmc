@@ -20,6 +20,7 @@
 #include "utils/MathUtils.h"
 #include "utils/log.h"
 #include "windowing/GraphicContext.h"
+#include "windowing/WinSystem.h"
 
 #include <algorithm>
 #include <cstdlib> // std::abs(int) prototype
@@ -340,9 +341,6 @@ void CBaseRenderer::ManageRenderArea()
         m_sourceRect.x2 *= 0.5f;
       else if(stereo_view == RENDER_STEREO_VIEW_RIGHT)
         m_sourceRect.x1 += m_sourceRect.x2*0.5f;
-
-      if (inputFrameRatio == ratio)
-        inputFrameRatio /= (m_sourceRect.x2 / 1920.0f);
       break;
 
     default:

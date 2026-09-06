@@ -27,6 +27,7 @@ public:
   ~CGUIWindowPVRRecordingsBase() override;
 
   void OnWindowLoaded() override;
+  void OnInitWindow() override;
   bool OnMessage(CGUIMessage& message) override;
   bool OnAction(const CAction& action) override;
   void GetContextButtons(int itemNumber, CContextButtons& buttons) override;
@@ -45,6 +46,7 @@ protected:
 private:
   bool OnContextButtonDeleteAll(CFileItem* item, CONTEXT_BUTTON button);
 
+  bool m_forceUngrouped{false};
   CVideoThumbLoader m_thumbLoader;
   CVideoDatabase m_database;
   CPVRSettings m_settings;

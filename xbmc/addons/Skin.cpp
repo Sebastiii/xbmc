@@ -36,6 +36,8 @@
 #include <charconv>
 #include <memory>
 
+#include <fmt/format.h>
+
 #define XML_SETTINGS      "settings"
 #define XML_SETTING       "setting"
 #define XML_ATTR_TYPE     "type"
@@ -397,7 +399,11 @@ void CSkinInfo::OnPreInstall()
 void CSkinInfo::OnPostInstall(bool update, bool modal)
 {
   if (!g_SkinInfo)
+  {
+    CServiceBroker::GetAppMessenger()->SendMsg(TMSG_EXECUTE_BUILT_IN, -1, -1, nullptr,
+                                               fmt::format("LoadSkin({})", ID()));
     return;
+  }
 
   if (IsInUse() || (!update && !modal &&
                     HELPERS::ShowYesNoDialogText(CVariant{Name()}, CVariant{24099}) ==
@@ -708,6 +714,16 @@ bool CSkinInfo::GetBool(int setting) const
     return it->second->value;
 
   // default is to return false
+  return false;
+}
+
+bool CSkinInfo::GetBool(const std::string &setting) const
+{
+  for (const auto& it : m_bools)
+  {
+    if (StringUtils::EqualsNoCase(setting, it.second->name))
+      return it.second->value;
+  }
   return false;
 }
 

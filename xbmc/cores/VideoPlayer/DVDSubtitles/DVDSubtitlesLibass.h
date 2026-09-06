@@ -45,6 +45,8 @@ public:
                          const std::shared_ptr<struct KODI::SUBTITLES::STYLE::style>& subStyle,
                          int* changes = nullptr);
 
+  bool NeedsRerender(double pts) const;
+
   ASS_Event* GetEvents() const;
 
   /*!
@@ -89,6 +91,8 @@ public:
   * \return True when there is any event active
   */
   bool EventActive(double pts) const;
+
+  ASSSubType GetSubtitleType() const { return m_subtitleType; }
 
 protected:
   /*!
@@ -161,11 +165,22 @@ private:
   void ApplyStyle(const std::shared_ptr<struct KODI::SUBTITLES::STYLE::style>& subStyle,
                   KODI::SUBTITLES::STYLE::renderOpts opts);
 
+  bool IsDynamicEvent(const ASS_Event* assEvent) const;
+
+  void UpdateRenderCache(int64_t ptsMs);
+  void InvalidateRenderCache() const;
+
   ASS_Library* m_library = nullptr;
   ASS_Track* m_track = nullptr;
   ASS_Renderer* m_renderer = nullptr;
   mutable CCriticalSection m_section;
   ASSSubType m_subtitleType{NATIVE};
+
+  mutable ASS_Image* m_lastImages{nullptr};
+  mutable KODI::SUBTITLES::STYLE::renderOpts m_lastOpts{};
+  mutable bool m_renderCacheValid{false};
+  mutable int64_t m_cacheValidFrom{0};
+  mutable int64_t m_cacheValidUntil{0};
 
   // current default style ID of the ASS track
   int m_currentDefaultStyleId{ASS_NO_ID};

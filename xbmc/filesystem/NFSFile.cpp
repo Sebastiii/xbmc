@@ -30,6 +30,9 @@
 #ifdef TARGET_WINDOWS
 #include <fcntl.h>
 #include <sys\stat.h>
+#ifndef S_ISDIR
+#define S_ISDIR(m) (((m) & _S_IFDIR) != 0)
+#endif
 #endif
 
 #if defined(TARGET_WINDOWS)
@@ -678,7 +681,7 @@ bool CNFSFile::Open(const CURL& url)
 
   struct __stat64 tmpBuffer;
 
-  if( Stat(&tmpBuffer) )
+  if (Stat(&tmpBuffer) != 0 || S_ISDIR(tmpBuffer.st_mode))
   {
     m_url.Reset();
     Close();

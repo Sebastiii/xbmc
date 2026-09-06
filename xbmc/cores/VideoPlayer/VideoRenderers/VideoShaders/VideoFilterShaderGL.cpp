@@ -11,6 +11,7 @@
 
 #include "ConvolutionKernels.h"
 #include "ServiceBroker.h"
+#include "rendering/GLExtensions.h"
 #include "rendering/RenderSystem.h"
 #include "utils/GLUtils.h"
 #include "utils/log.h"

@@ -33,7 +33,8 @@ enum class Align
   BOTTOM_INSIDE,
   BOTTOM_OUTSIDE,
   TOP_INSIDE,
-  TOP_OUTSIDE
+  TOP_OUTSIDE,
+  ORIGINAL
 };
 
 enum class HorizontalAlign
@@ -191,10 +192,23 @@ public:
   OverrideStyles GetOverrideStyles() const;
 
   /*!
+   * \brief Check if ASS / SSA style override is enabled
+   * \return True if native ASS / SSA styles should be overridden
+   */
+  bool IsOverrideAss();
+
+  /*!
    * \brief Get the subtitle vertical margin
    * \return The vertical margin in %
    */
   float GetVerticalMarginPerc() const;
+
+  int GetPgsVerticalMode() const;
+  void SetPgsVerticalMode(int mode) const;
+  int GetPgsVerticalOffsetSteps() const;
+  int GetPgsBitmapZoom() const;
+  std::string GetPgsManualActiveAspect() const;
+  bool GetRestrictToActiveArea() const;
 
   static void SettingOptionsSubtitleFontsFiller(const std::shared_ptr<const CSetting>& setting,
                                                 std::vector<StringSettingOption>& list,

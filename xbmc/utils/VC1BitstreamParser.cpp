@@ -61,6 +61,47 @@ bool CVC1BitstreamParser::IsIFrame(const uint8_t *buf, int buf_size)
   return vc1_parse_frame(buf, buf + buf_size, false);
 };
 
+CVC1BitstreamParser::ScanType
+CVC1BitstreamParser::GetScanType(const uint8_t *buf, int buf_size) const
+{
+  uint8_t profile = m_Profile;
+  uint8_t advInterlace = m_AdvInterlace;
+  bool haveSequence = (profile != VC1_PROFILE_NOPROFILE);
+
+  uint32_t state = -1;
+  const uint8_t *buf_end = buf + buf_size;
+
+  for (;;)
+  {
+    buf = find_start_code(buf, buf_end, &state);
+    if (buf >= buf_end)
+      break;
+
+    if (buf[-1] == VC1_SEQUENCE && !haveSequence)
+    {
+      CBitstreamReader br(buf, buf_end - buf);
+      profile = static_cast<uint8_t>(br.ReadBits(2));
+      if (profile == VC1_PROFILE_ADVANCED)
+      {
+        br.SkipBits(39);
+        advInterlace = static_cast<uint8_t>(br.ReadBits(1));
+      }
+      haveSequence = true;
+    }
+    else if (buf[-1] == VC1_FRAME && haveSequence)
+    {
+      if (profile != VC1_PROFILE_ADVANCED || !advInterlace)
+        return ScanType::Progressive;
+
+      CBitstreamReader br(buf, buf_end - buf);
+      if (br.ReadBits(1))
+        return ScanType::Interlaced;
+      return ScanType::Progressive;
+    }
+  }
+  return ScanType::Unknown;
+}
+
 bool CVC1BitstreamParser::vc1_parse_frame(const uint8_t *buf, const uint8_t *buf_end, bool sequence_only)
 {
   uint32_t state = -1;
@@ -107,11 +148,8 @@ bool CVC1BitstreamParser::vc1_parse_frame(const uint8_t *buf, const uint8_t *buf
       if (m_Profile == VC1_PROFILE_ADVANCED)
       {
         uint8_t fcm;
-        if (m_AdvInterlace) {
-          fcm = br.ReadBits(1);
-          if (fcm)
-            fcm = br.ReadBits(1) + 1;
-        }
+        if (m_AdvInterlace && br.ReadBits(1))
+          fcm = 0x10 | br.ReadBits(1);
         else
           fcm = VC1_FRAME_PROGRESSIVE;
         if (fcm == VC1_FIELD_INTERLACE) {

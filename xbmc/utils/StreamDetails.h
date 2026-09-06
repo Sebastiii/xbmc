@@ -47,6 +47,7 @@ class CStreamDetailVideo final : public CStreamDetail
 public:
   CStreamDetailVideo();
   CStreamDetailVideo(const VideoStreamInfo &info, int duration = 0);
+  void SetHdrTypes(StreamHdrType primary, StreamHdrType alternate);
   void Archive(CArchive& ar) override;
   void Serialize(CVariant& value) const override;
   bool IsWorseThan(const CStreamDetail &that) const override;
@@ -59,11 +60,14 @@ public:
   std::string m_strStereoMode;
   std::string m_strLanguage;
   std::string m_strHdrType;
+  std::string m_strHdrTypeAlt;
+  std::string m_strDvProfile;
 };
 
 class CStreamDetailAudio final : public CStreamDetail
 {
 public:
+  void SetCodecFromStream(const std::string& codec);
   CStreamDetailAudio();
   CStreamDetailAudio(const AudioStreamInfo &info);
   void Archive(CArchive& ar) override;
@@ -71,8 +75,12 @@ public:
   bool IsWorseThan(const CStreamDetail &that) const override;
 
   int m_iChannels = -1;
+  int m_iAudioObjects = -1;
+  int m_iAudioObjectChannels = -1;
+  int m_iAudioBedChannels = -1;
   std::string m_strCodec;
   std::string m_strLanguage;
+  std::string m_strProfile;
 };
 
 class CStreamDetailSubtitle final : public CStreamDetail
@@ -107,6 +115,7 @@ public:
   int GetAudioStreamCount(void) const;
   int GetSubtitleStreamCount(void) const;
   static std::string HdrTypeToString(StreamHdrType hdrType);
+  static StreamHdrType StringToHdrType(const std::string& hdrType);
   const CStreamDetail* GetNthStream(CStreamDetail::StreamType type, int idx) const;
 
   std::string GetVideoCodec(int idx = 0) const;
@@ -114,6 +123,8 @@ public:
   int GetVideoWidth(int idx = 0) const;
   int GetVideoHeight(int idx = 0) const;
   std::string GetVideoHdrType (int idx = 0) const;
+  std::string GetVideoHdrTypeAlt(int idx = 0) const;
+  std::string GetVideoDvProfile(int idx = 0) const;
   int GetVideoDuration(int idx = 0) const;
   void SetVideoDuration(int idx, const int duration) const;
   std::string GetStereoMode(int idx = 0) const;
@@ -122,6 +133,10 @@ public:
   std::string GetAudioCodec(int idx = 0) const;
   std::string GetAudioLanguage(int idx = 0) const;
   int GetAudioChannels(int idx = 0) const;
+  std::string GetAudioProfile(int idx = 0) const;
+  int GetAudioObjects(int idx = 0) const;
+  int GetAudioObjectChannels(int idx = 0) const;
+  int GetAudioBedChannels(int idx = 0) const;
 
   std::string GetSubtitleLanguage(int idx = 0) const;
 

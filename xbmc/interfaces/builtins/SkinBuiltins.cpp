@@ -31,6 +31,7 @@
 #include "storage/MediaManager.h"
 #include "utils/StringUtils.h"
 #include "utils/URIUtils.h"
+#include "utils/log.h"
 
 using namespace ADDON;
 
@@ -57,6 +58,22 @@ static int UnloadSkin(const std::vector<std::string>& params)
   const auto appSkin = components.GetComponent<CApplicationSkinHandling>();
   appSkin->UnloadSkin();
 
+  return 0;
+}
+
+static int LoadSkin(const std::vector<std::string>& params)
+{
+  if (!params.empty())
+  {
+    auto& components = CServiceBroker::GetAppComponents();
+    const auto appSkin = components.GetComponent<CApplicationSkinHandling>();
+    if (!appSkin->LoadSkin(params[0]))
+      logM(LOGERROR, "error loading the skin {}", params[0]);
+  }
+  else
+  {
+    logM(LOGDEBUG, "empty params - abort.");
+  }
   return 0;
 }
 
@@ -680,6 +697,7 @@ CBuiltins::CommandMap CSkinBuiltins::GetOperations() const
 {
   return {{"reloadskin", {"Reload Kodi's skin", 0, ReloadSkin}},
           {"unloadskin", {"Unload Kodi's skin", 0, UnloadSkin}},
+          {"loadskin", {"Load Kodi's skin", 0, LoadSkin}},
           {"skin.reset", {"Resets a skin setting to default", 1, SkinReset}},
           {"skin.resetsettings", {"Resets all skin settings", 0, SkinResetAll}},
           {"skin.setaddon", {"Prompts and set an addon", 2, SetAddon}},

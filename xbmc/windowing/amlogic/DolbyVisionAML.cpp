@@ -21,6 +21,7 @@
 #include "guilib/LocalizeStrings.h"
 #include "utils/AMLUtils.h"
 #include "utils/log.h"
+#include "platform/linux/SysfsPath.h"
 #include "interfaces/AnnouncementManager.h"
 
 #include "cores/DataCacheCore.h"
@@ -39,12 +40,25 @@ static void set_visible(const std::string& id, bool visible) {
 }
 
 // Dolby VSVDB Color space data
-static double colour_space_data[3][6] = {
+static double colour_space_data[4][6] = {
     // Rx--[5/8]-------  Ry--[1/4]------  Gx--[1]-  Gy--[1/2]-----  Bx--[1/8]-------  By--[1/32]--------
       {(0.6800 - 0.625), (0.3200 - 0.25), (0.2650), (0.6900 - 0.5), (0.1500 - 0.125), (0.0600 - 0.03125)}, // DCI-P3  - https://en.wikipedia.org/wiki/DCI-P3
       {(0.7080 - 0.625), (0.2920 - 0.25), (0.1700), (0.7970 - 0.5), (0.1310 - 0.125), (0.0460 - 0.03125)}, // BT.2020 - https://en.wikipedia.org/wiki/Rec._2020
-      {(0.6400 - 0.625), (0.3300 - 0.25), (0.3000), (0.6000 - 0.5), (0.1500 - 0.125), (0.0600 - 0.03125)}  // BT.709  - https://en.wikipedia.org/wiki/Rec._709
+      {(0.6400 - 0.625), (0.3300 - 0.25), (0.3000), (0.6000 - 0.5), (0.1500 - 0.125), (0.0600 - 0.03125)}, // BT.709  - https://en.wikipedia.org/wiki/Rec._709
+      {(0.6670 - 0.625), (0.3310 - 0.25), (0.3140), (0.6720 - 0.5), (0.1480 - 0.125), (0.0420 - 0.03125)}  // EPSON LS12000
 };
+
+static const double* colour_space_row(int cs)
+{
+  switch (cs)
+  {
+    case 0: return colour_space_data[0];
+    case 1: return colour_space_data[1];
+    case 2: return colour_space_data[2];
+    case 4: return colour_space_data[3];
+    default: return colour_space_data[1];
+  }
+}
 
 static inline int find_closest_lut_index(int value, const int *lut, int lut_size)
 {
@@ -111,6 +125,31 @@ static const int max_direct_to_nits_lut_2[32] = {
   1082, 1252, 1450, 1678, 1943, 2250, 2607, 3020, 3501, 4060, 4710, 5467, 6351, 7382, 8588, 10000
 };
 
+static const int bt2020_vsvdb_cs[6] = {  43, 204,  33,  11, 181,  74 };
+static const int p3_vsvdb_cs[6]     = {  67, 176,  38,  15, 174,  81 };
+static const int bt709_vsvdb_cs[6]  = {  76, 153,  38,  15, 163,  84 };
+
+static bool vsvdb_cs_matches(const int* c, const int* std_cs)
+{
+  for (int i = 0; i < 6; i++)
+    if (c[i] != std_cs[i]) return false;
+
+  return true;
+}
+
+static int vsvdb_cs_from_cap()
+{
+  const int c[6] = { xbmc_dv_cap::dv_gx_i, xbmc_dv_cap::dv_gy_i,
+                     xbmc_dv_cap::dv_bx_i, xbmc_dv_cap::dv_by_i,
+                     xbmc_dv_cap::dv_rx_i, xbmc_dv_cap::dv_ry_i };
+
+  if (vsvdb_cs_matches(c, bt2020_vsvdb_cs)) return 1;
+  if (vsvdb_cs_matches(c, p3_vsvdb_cs)) return 0;
+  if (vsvdb_cs_matches(c, bt709_vsvdb_cs)) return 2;
+
+  return 3;
+}
+
 void CalculateVSVDBPayload()
 {
   int max_lum_nits_value(settings()->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_MAX_LUM));
@@ -125,21 +164,7 @@ void CalculateVSVDBPayload()
     if ((cs == 3) && aml_display_support_dv())
     {
       aml_get_dv_cap();
-      switch (xbmc_dv_cap::dv_gx_i)
-	    {
-        case 43:
-          cs = 1;
-          break;
-        case 67:
-          cs = 0;
-          break;
-        case 76:
-          cs = 2;
-          break;
-        default:
-          cs = 3;
-          break;
-      }
+      cs = vsvdb_cs_from_cap();
       settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_CS, cs);
     }
     else if ((cs == 3) && !aml_display_support_dv())
@@ -153,24 +178,17 @@ void CalculateVSVDBPayload()
     if (aml_display_support_dv())
     {
       aml_get_dv_cap();
-      switch (xbmc_dv_cap::dv_gx_i)
-  	  {
-        case 43:
-          cs = 1;
-          break;
-        case 67:
-          cs = 0;
-          break;
-        case 76:
-          cs = 2;
-          break;
-        default:
-          cs = 3;
-          break;
-      }
+      cs = vsvdb_cs_from_cap();
       settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_CS, cs);
       switch (xbmc_dv_cap::dv_ver_i)
       {
+        case 0:
+        {
+          max_lum_idx = find_closest_lut_index(xbmc_dv_cap::dv_max_v2_i, max_direct_to_pq_lut, 128);
+          max_lum_nits_value = max_direct_to_nits_lut[max_lum_idx];
+          settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_MAX_LUM, max_lum_nits_value);
+          break;
+        }
         case 1:
         {
           max_lum_idx = xbmc_dv_cap::dv_max_v1_i;
@@ -240,18 +258,19 @@ void CalculateVSVDBPayload()
   }
   else
   {
-      byte[3] = (static_cast<int>(colour_space_data[cs][4] / one_256) << 5) |
-                ((static_cast<int>(colour_space_data[cs][5] / one_256) << 2) & 0x1C) |
+      const double* c = colour_space_row(cs);
+      byte[3] = (static_cast<int>(c[4] / one_256) << 5) |
+                ((static_cast<int>(c[5] / one_256) << 2) & 0x1C) |
                 (1 << 0);
 
-      byte[4] = (static_cast<int>(colour_space_data[cs][2] / one_256) << 1) |
-                (static_cast<int>(colour_space_data[cs][1] / one_256) & 0x01);
+      byte[4] = (static_cast<int>(c[2] / one_256) << 1) |
+                (static_cast<int>(c[1] / one_256) & 0x01);
 
-      byte[5] = (static_cast<int>(colour_space_data[cs][3] / one_256) << 1) |
-                ((static_cast<int>(colour_space_data[cs][1] / one_256) >> 1) & 0x01);
+      byte[5] = (static_cast<int>(c[3] / one_256) << 1) |
+                ((static_cast<int>(c[1] / one_256) >> 1) & 0x01);
 
-      byte[6] = (static_cast<int>(colour_space_data[cs][0] / one_256) << 3) |
-                ((static_cast<int>(colour_space_data[cs][1] / one_256) >> 2 ) & 0x07);
+      byte[6] = (static_cast<int>(c[0] / one_256) << 3) |
+                ((static_cast<int>(c[1] / one_256) >> 2 ) & 0x07);
   }
   std::stringstream ss;
   for (size_t i = 0; i < 7; i++) {
@@ -260,7 +279,7 @@ void CalculateVSVDBPayload()
   settings()->SetString(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_PAYLOAD, ss.str());
 }
 
-void CalculateVSVDBPayload_2()
+void CalculateVSVDBPayload_2(enum DV_TYPE dv_type)
 {
   int max_lum_nits_value(settings()->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_MAX_LUM));
   int max_lum_idx = find_closest_lut_index(max_lum_nits_value, max_direct_to_nits_lut_2_adj, 32);
@@ -272,21 +291,7 @@ void CalculateVSVDBPayload_2()
     if ((cs == 3) && aml_display_support_dv())
     {
       aml_get_dv_cap();
-      switch (xbmc_dv_cap::dv_gx_i)
-      {
-        case 43:
-          cs = 1;
-          break;
-        case 67:
-          cs = 0;
-          break;
-        case 76:
-          cs = 2;
-          break;
-        default:
-          cs = 3;
-          break;
-      }
+      cs = vsvdb_cs_from_cap();
       settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_CS, cs);
     }
     else if ((cs == 3) && !aml_display_support_dv())
@@ -300,24 +305,17 @@ void CalculateVSVDBPayload_2()
     if (aml_display_support_dv())
     {
       aml_get_dv_cap();
-      switch (xbmc_dv_cap::dv_gx_i)
-	    {
-        case 43:
-          cs = 1;
-          break;
-        case 67:
-          cs = 0;
-          break;
-        case 76:
-          cs = 2;
-          break;
-        default:
-          cs = 3;
-          break;
-      }
+      cs = vsvdb_cs_from_cap();
       settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_CS, cs);
       switch (xbmc_dv_cap::dv_ver_i)
       {
+        case 0:
+        {
+          max_lum_idx = find_closest_lut_index(xbmc_dv_cap::dv_max_v2_i, max_direct_to_pq_lut_2, 32);
+          max_lum_nits_value = max_direct_to_nits_lut_2[max_lum_idx];
+          settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_MAX_LUM, max_lum_nits_value);
+          break;
+        }
         case 1:
         {
           max_lum_nits_value = max_direct_to_nits_lut[xbmc_dv_cap::dv_max_v1_i];
@@ -364,7 +362,6 @@ void CalculateVSVDBPayload_2()
             (0 << 2) |       // Global Dimming (Unsupported [0]) in 2
             (3 << 0);        // Backlight Min Lum (Disabled 3 [11]) in 1-0
 
-  enum DV_TYPE dv_type(static_cast<DV_TYPE>(settings()->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE)));
   int dv_type_bits = (dv_type == DV_TYPE_DISPLAY_LED) ? 2 : 1;
 
   byte[2] = (max_lum_idx << 3) | // Maximum Luminance (PQ) in 7-3
@@ -376,31 +373,32 @@ void CalculateVSVDBPayload_2()
 
   if (cs == 3)
   {
-      byte[3] = (xbmc_dv_cap::dv_gx_i << 1) |
+      byte[3] = ((xbmc_dv_cap::dv_gx_i & 0x7F) << 1) |
                 (dv_12b_444_bits << 0);
 
-      byte[4] = (xbmc_dv_cap::dv_gy_i << 1) |
+      byte[4] = ((xbmc_dv_cap::dv_gy_i & 0x7F) << 1) |
                 (0 << 0);
 
-      byte[5] = (xbmc_dv_cap::dv_rx_i << 3) |
-                (xbmc_dv_cap::dv_bx_i << 0);
+      byte[5] = ((xbmc_dv_cap::dv_rx_i & 0x1F) << 3) |
+                (xbmc_dv_cap::dv_bx_i & 0x07);
 
-      byte[6] = (xbmc_dv_cap::dv_ry_i << 3) |
-                (xbmc_dv_cap::dv_by_i << 0);
+      byte[6] = ((xbmc_dv_cap::dv_ry_i & 0x1F) << 3) |
+                (xbmc_dv_cap::dv_by_i & 0x07);
   }
   else
   {
-    byte[3] = (static_cast<int>(colour_space_data[cs][2] / one_256) << 1) | // Gx in 7-1
-              (dv_12b_444_bits << 0);                                       // 12b 444 (Unsupported [0]) in 0
+    const double* c = colour_space_row(cs);
+    byte[3] = (static_cast<int>(c[2] / one_256) << 1) | // Gx in 7-1
+              (dv_12b_444_bits << 0);                   // 12b 444 (Unsupported [0]) in 0
 
-    byte[4] = (static_cast<int>(colour_space_data[cs][3] / one_256) << 1) | // Gy in 7-1
-              (0 << 0);                                                     // 10b 444 (Unsupported [0]) in 0
+    byte[4] = (static_cast<int>(c[3] / one_256) << 1) | // Gy in 7-1
+              (0 << 0);                                 // 10b 444 (Unsupported [0]) in 0
 
-    byte[5] = (static_cast<int>(colour_space_data[cs][0] / one_256) << 3) | // Rx in 7-3
-              (static_cast<int>(colour_space_data[cs][4] / one_256) << 0);  // Bx in 2-0
+    byte[5] = (static_cast<int>(c[0] / one_256) << 3) | // Rx in 7-3
+              (static_cast<int>(c[4] / one_256) << 0);  // Bx in 2-0
 
-    byte[6] = (static_cast<int>(colour_space_data[cs][1] / one_256) << 3) | // Ry in 7-3
-              (static_cast<int>(colour_space_data[cs][5] / one_256) << 0);  // By in 2-0
+    byte[6] = (static_cast<int>(c[1] / one_256) << 3) | // Ry in 7-3
+              (static_cast<int>(c[5] / one_256) << 0);  // By in 2-0
   }
   std::stringstream ss;
   for (size_t i = 0; i < 7; i++) {
@@ -535,7 +533,7 @@ void vs10_hdr10_filler(const SettingConstPtr& setting, std::vector<IntegerSettin
   if (aml_display_support_hdr_pq()) add_vs10_bypass(list);
   add_vs10_sdr(list);
   if (aml_display_support_hdr_pq()) add_vs10_hdr10(list);
-  if (support_dv()) add_vs10_dv(list); 
+  if (support_dv()) add_vs10_dv(list);
 }
 
 void vs10_hdr_hlg_filler(const SettingConstPtr& setting, std::vector<IntegerSettingOption>& list, int& current, void* data)
@@ -550,13 +548,68 @@ void vs10_hdr_hlg_filler(const SettingConstPtr& setting, std::vector<IntegerSett
 void vs10_dv_filler(const SettingConstPtr& setting, std::vector<IntegerSettingOption>& list, int& current, void* data)
 {
   list.clear();
+  if (!support_dv()) add_vs10_bypass(list);
   add_vs10_sdr(list);
   if (support_dv()) add_vs10_dv_bypass(list);
 }
 
 CDolbyVisionAML::CDolbyVisionAML()
 {
+  CSysfsPath("/sys/module/amdolby_vision/parameters/dolby_vision_vsif_hold", 0);
 }
+
+static void dv_auto_assign_output_type()
+{
+  if (settings()->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE_ASSIGNED))
+    return;
+
+  if (!aml_display_connected())
+    return;
+
+  int type = DV_TYPE_VS10_ONLY;
+  if (aml_display_support_dv_std())
+    type = DV_TYPE_DISPLAY_LED;
+  else if (aml_display_support_dv_ll())
+    type = DV_TYPE_PLAYER_LED_LLDV;
+  else if (aml_display_support_hdr_pq())
+    type = DV_TYPE_PLAYER_LED_HDR2;
+
+  settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VIDEO_PROCESSOR, 0);
+  settings()->SetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE_VP_AUTO, false);
+  settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE, type);
+
+  if (type == DV_TYPE_VS10_ONLY)
+  {
+    settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_DV, DOLBY_VISION_OUTPUT_MODE_SDR10);
+    settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_HDR10, DOLBY_VISION_OUTPUT_MODE_SDR10);
+    settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_HDR10PLUS, DOLBY_VISION_OUTPUT_MODE_SDR10);
+    settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_HDRHLG, DOLBY_VISION_OUTPUT_MODE_SDR10);
+  }
+  else
+  {
+    const int hlg_mode = aml_display_support_hdr_hlg() ? DOLBY_VISION_OUTPUT_MODE_BYPASS
+                                                       : DOLBY_VISION_OUTPUT_MODE_HDR10;
+    settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_HDR10, DOLBY_VISION_OUTPUT_MODE_BYPASS);
+    settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_HDR10PLUS, DOLBY_VISION_OUTPUT_MODE_BYPASS);
+    settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_HDRHLG, hlg_mode);
+    if (type == DV_TYPE_DISPLAY_LED || type == DV_TYPE_PLAYER_LED_LLDV)
+      settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_DV, DOLBY_VISION_OUTPUT_MODE_IPT);
+    else
+      settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_DV, DOLBY_VISION_OUTPUT_MODE_BYPASS);
+  }
+
+  settings()->SetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE_ASSIGNED, true);
+  settings()->Save();
+
+  logM(LOGINFO,
+       "CDolbyVisionAML: auto-assigned DV output type {} from display capabilities "
+       "(dv_std={} dv_ll={} hdr_pq={} hlg={})",
+       aml_dv_type_to_string(static_cast<DV_TYPE>(type)), aml_display_support_dv_std(),
+       aml_display_support_dv_ll(), aml_display_support_hdr_pq(),
+       aml_display_support_hdr_hlg());
+}
+
+static enum DV_TYPE previous_dv_type = DV_TYPE_DISPLAY_LED;
 
 bool CDolbyVisionAML::Setup()
 {
@@ -583,6 +636,10 @@ bool CDolbyVisionAML::Setup()
   settingsManager->RegisterSettingOptionsFiller("DolbyVisionVS10HDRHLG", vs10_hdr_hlg_filler);
   settingsManager->RegisterSettingOptionsFiller("DolbyVisionVS10DV", vs10_dv_filler);
 
+  dv_auto_assign_output_type();
+
+  previous_dv_type = static_cast<DV_TYPE>(settings()->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE));
+
   set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_MODE_ON_LUMINANCE, true);
   set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE, true);
   set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_VIDEO_PROCESSOR, true);
@@ -597,6 +654,8 @@ bool CDolbyVisionAML::Setup()
   set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_STD_SOURCE_LEVEL_5_OSDST, true);
   set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_SDR8, true);
   set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_SDR10, true);
+  set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_SDR_BOOST, true);
+  set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_SDR_SRC_MAX_NITS, true);
   set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_HDR10, true);
   set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_HDR10PLUS, true);
   set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_HDRHLG, true);
@@ -607,13 +666,15 @@ bool CDolbyVisionAML::Setup()
   set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_HDR10PLUS_PEAK_BRIGHTNESS_SOURCE, true);
   set_visible(CSettings::SETTING_VIDEOPLAYER_CONVERTDOVI, true);
   set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_CMV40_APPEND, true);
-  set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_AUDIO_SEAMLESSBRANCH, true);
+  set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_CMV40_AUTO_TRIGGER, true);
+  set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_CMV40_AUTO2_THRESHOLD, true);
 
   // Register for ui dv mode change - to change on the fly.
   std::set<std::string> settingSet;
   settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_MODE);
   settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_MODE_ON_LUMINANCE);
   settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE);
+  settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE_ASSIGNED);
   settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_VIDEO_PROCESSOR);
   settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE_VP_AUTO);
   settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_INJECT);  
@@ -626,17 +687,27 @@ bool CDolbyVisionAML::Setup()
   settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_HDR10);
   settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_HDRHLG);
   settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_DV);
+  settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_SDR_BOOST);
+  settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_SDR_SRC_MAX_NITS);
   settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_STD_SOURCE_LEVEL_5);
   settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_STD_SOURCE_LEVEL_5_OSDST);
 // settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_DV_HDR10PLUS_PEAK_BRIGHTNESS_SOURCE);
+  settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_HDR10_LIMITER);
+  settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_HDR10_MAX_LUMINANCE);
+  settingSet.insert(CSettings::SETTING_COREELEC_AMLOGIC_HDR10_MAX_CLL);
+  settingSet.insert(CSettings::SETTING_COREELEC_AUDIO_DDR_PRIORITY);
   settingsManager->RegisterCallback(this, settingSet);
 
   // register for announcements to capture OnWake and re-apply DV if needed.
   auto announcer = CServiceBroker::GetAnnouncementManager();
   announcer->AddAnnouncer(this);
 
+  aml_dv_write_vsvdb_policy();
+
   // Turn on dv - if dv mode is on, limit the menu luminance as menu now can be in DV/HDR.
   aml_dv_start();
+
+  aml_apply_hdr10_overrides();
 
   CLog::Log(LOGDEBUG, "CDolbyVisionAML::Setup - Complete");
 
@@ -647,13 +718,25 @@ void CDolbyVisionAML::OnSettingChanged(const std::shared_ptr<const CSetting>& se
 {
   if (!setting) return;
 
+  if (setting->GetId() == CSettings::SETTING_COREELEC_AUDIO_DDR_PRIORITY)
+  {
+    aml_set_audio_ddr_urgent(settings()->GetBool(CSettings::SETTING_COREELEC_AUDIO_DDR_PRIORITY));
+    return;
+  }
+
+  if (setting->GetId() == CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE_ASSIGNED)
+  {
+    if (!settings()->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE_ASSIGNED))
+      dv_auto_assign_output_type();
+    return;
+  }
+
   DOVIStreamMetadata dovi_stream_metadata;
   dovi_stream_metadata = CServiceBroker::GetDataCacheCore().GetVideoDoViStreamMetadata();
   int source_max_pq = static_cast<int>(dovi_stream_metadata.source_max_pq);
   enum DV_TYPE dv_type(static_cast<DV_TYPE>(settings()->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE)));
   int max_lum_nits_value(settings()->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_MAX_LUM));
 
-  static enum DV_TYPE previous_dv_type = DV_TYPE_DISPLAY_LED;
   bool reset_dv_vs10_hdr10 = false;
   bool reset_dv_vs10_hdrhlg = false;
   bool reset_dv_vs10_dv = false;
@@ -668,7 +751,23 @@ void CDolbyVisionAML::OnSettingChanged(const std::shared_ptr<const CSetting>& se
   bool dv_type_vp_auto(settings()->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE_VP_AUTO));
 
   const std::string& settingId = setting->GetId();
-  
+
+  if (settingId == CSettings::SETTING_COREELEC_AMLOGIC_HDR10_LIMITER ||
+      settingId == CSettings::SETTING_COREELEC_AMLOGIC_HDR10_MAX_LUMINANCE ||
+      settingId == CSettings::SETTING_COREELEC_AMLOGIC_HDR10_MAX_CLL)
+  {
+    aml_apply_hdr10_overrides();
+    return;
+  }
+
+  if (settingId == CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_SDR_BOOST ||
+      settingId == CSettings::SETTING_COREELEC_AMLOGIC_DV_VS10_SDR_SRC_MAX_NITS)
+  {
+    if (aml_is_dv_enable() && aml_dv_dolby_vision_mode() == DOLBY_VISION_OUTPUT_MODE_SDR10)
+      aml_dv_set_sdr_source_max_nits(aml_dv_sdr_boost_param());
+    return;
+  }
+
   if (settingId == CSettings::SETTING_COREELEC_AMLOGIC_DV_MODE)
   {
     // Not working for some cases - needs video playback for mode switch to work correctly everytime.
@@ -697,11 +796,27 @@ void CDolbyVisionAML::OnSettingChanged(const std::shared_ptr<const CSetting>& se
   {
     set_vsvdb_payload_ver(dv_type, max_lum_nits_value, source_max_pq);
     if ((dv_vp != 0) && (dv_mode == DV_MODE_ON)) settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_MODE, DV_MODE_ON_DEMAND);
+    switch (dv_vp)
+    {
+    case 1:
+      settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE, DV_TYPE_PLAYER_LED_HDR);
+      break;
+    case 2:
+      settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE, DV_TYPE_PLAYER_LED_HDR2);
+      break;
+    case 3:
+      settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE, DV_TYPE_PLAYER_LED_LLDV);
+      break;
+    case 4:
+      settings()->SetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE, DV_TYPE_PLAYER_LED_LLDV);
+      break;
+    default:
+      break;
+    }
   }
-  else if (settingId == CSettings::SETTING_COREELEC_AMLOGIC_DV_MODE_ON_LUMINANCE) 
+  else if (settingId == CSettings::SETTING_COREELEC_AMLOGIC_DV_MODE_ON_LUMINANCE)
   {
-    int max(std::dynamic_pointer_cast<const CSettingInt>(setting)->GetValue());
-    aml_dv_set_osd_max(max);
+    aml_dv_set_osd_max(aml_dv_osd_max_nits());
     set_vsvdb_payload_ver(dv_type, max_lum_nits_value, source_max_pq);
   }
 //  else if (settingId == CSettings::SETTING_COREELEC_AMLOGIC_DV_HDR10PLUS_PEAK_BRIGHTNESS_SOURCE)
@@ -717,18 +832,14 @@ void CDolbyVisionAML::OnSettingChanged(const std::shared_ptr<const CSetting>& se
   {
     set_vsvdb_payload_ver(dv_type, max_lum_nits_value, source_max_pq);
   }
-//  else if (settingId == CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_CS)
-//  {
-//    set_vsvdb_payload_ver(dv_type, max_lum_nits_value, source_max_pq);
-//  }
-//  else if (settingId == CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_MIN_LUM)
-//  {
-//    set_vsvdb_payload_ver(dv_type, max_lum_nits_value, source_max_pq);
-//  }
-//  else if (settingId == CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_MAX_LUM)
-//  {
-//    set_vsvdb_payload_ver(dv_type, max_lum_nits_value, source_max_pq);
-//  }
+  else if (settingId == CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_CS)
+  {
+    set_vsvdb_payload_ver(dv_type, max_lum_nits_value, source_max_pq);
+  }
+  else if (settingId == CSettings::SETTING_COREELEC_AMLOGIC_DV_VSVDB_MAX_LUM)
+  {
+    set_vsvdb_payload_ver(dv_type, max_lum_nits_value, source_max_pq);
+  }
   else if (settingId == CSettings::SETTING_COREELEC_AMLOGIC_DV_DUAL_PRIORITY)
   {
     set_vsvdb_payload_ver(dv_type, max_lum_nits_value, source_max_pq);
@@ -773,4 +884,6 @@ void CDolbyVisionAML::Announce(ANNOUNCEMENT::AnnouncementFlag flag,
 {
   // When Wake from Suspend re-trigger DV if in DV_MODE_ON
   if ((flag == ANNOUNCEMENT::System) && (message == "OnWake")) aml_dv_start();
+
+  if ((flag == ANNOUNCEMENT::Player) && (message == "OnStop")) aml_dv_restore_gui_osd_max();
 }

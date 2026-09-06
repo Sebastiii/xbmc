@@ -9,6 +9,7 @@
 #pragma once
 
 #include "guilib/guiinfo/GUIInfoProvider.h"
+#include "threads/CriticalSection.h"
 #include "utils/EventStream.h"
 #include "utils/TimeFormat.h"
 
@@ -21,6 +22,7 @@
 class CApplicationPlayer;
 class CApplicationVolumeHandling;
 class CDataCacheCore;
+struct CPlayerGUIInfoFrameCache;
 
 namespace KODI
 {
@@ -59,7 +61,9 @@ public:
   bool ToggleShowInfo();
 
 private:
+  bool GetLabelUncached(std::string& value, const CFileItem* item, int contextWindow, const CGUIInfo& info, std::string* fallback) const;
   std::string GetAMLConfigInfo(std::string item) const;
+  std::string GetHdr10LimitedValue(int source, int limit, int dvLevel6) const;
   int GetTotalPlayTime() const;
   int GetPlayTime() const;
   int GetPlayTimeRemaining() const;
@@ -82,6 +86,8 @@ private:
                                                    std::time_t duration) const;
 
   std::unique_ptr<CFileItem> m_currentItem;
+  std::unique_ptr<CPlayerGUIInfoFrameCache> m_frameCache;
+  mutable CCriticalSection m_frameCacheSection;
   std::atomic_bool m_playerShowTime{false};
   std::atomic_bool m_playerShowInfo{false};
   const std::shared_ptr<CApplicationPlayer> m_appPlayer;

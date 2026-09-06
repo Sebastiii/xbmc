@@ -8,16 +8,89 @@
 
 #include "DVDClock.h"
 
+#include "ServiceBroker.h"
 #include "VideoReferenceClock.h"
 #include "cores/VideoPlayer/Interface/TimingConstants.h"
+#include "settings/Settings.h"
+#include "settings/SettingsComponent.h"
+#include "utils/AudioDelayTrace.h"
 #include "utils/MathUtils.h"
 #include "utils/TimeUtils.h"
+#include "utils/LogThrottle.h"
 #include "utils/log.h"
 
+#include <algorithm>
 #include <inttypes.h>
-#include <math.h>
+#include <cmath>
+#include <limits>
 #include <memory>
 #include <mutex>
+
+namespace
+{
+constexpr int MASTER_CLOCK_VSYNC_DELAY_MS{8};
+constexpr int MIN_MASTER_CLOCK_VSYNC_DELAY_MS{0};
+constexpr int MAX_MASTER_CLOCK_VSYNC_DELAY_MS{15};
+constexpr int64_t MS_PER_SECOND{1000};
+
+int GetMasterClockStartupVSyncDelayMs()
+{
+  const auto settingsComponent = CServiceBroker::GetSettingsComponent();
+  if (!settingsComponent)
+    return MASTER_CLOCK_VSYNC_DELAY_MS;
+
+  const auto settings = settingsComponent->GetSettings();
+  if (!settings)
+    return MASTER_CLOCK_VSYNC_DELAY_MS;
+
+  return std::clamp(
+      settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_MASTERCLOCK_VSYNC_OFFSET),
+      MIN_MASTER_CLOCK_VSYNC_DELAY_MS, MAX_MASTER_CLOCK_VSYNC_DELAY_MS);
+}
+
+int64_t NormalizeMasterClockStartupVSyncDelay(
+    const std::unique_ptr<CVideoReferenceClock>& videoRefClock,
+    int64_t delay,
+    int64_t systemFrequency)
+{
+  if (!videoRefClock || delay <= 0 || systemFrequency <= 0)
+    return std::max<int64_t>(0, delay);
+
+  double intervalSeconds{0.0};
+  if (videoRefClock->GetRefreshRate(&intervalSeconds) <= 0.0 || intervalSeconds <= 0.0)
+    return delay;
+
+  const int64_t interval = static_cast<int64_t>(std::llround(intervalSeconds * systemFrequency));
+  if (interval <= 0)
+    return delay;
+
+  return delay % interval;
+}
+
+int64_t GetMasterClockStartupVSyncDelay(const std::unique_ptr<CVideoReferenceClock>& videoRefClock,
+                                        int64_t systemFrequency)
+{
+  const double delay = static_cast<double>(systemFrequency) *
+                       GetMasterClockStartupVSyncDelayMs() / MS_PER_SECOND;
+
+  if (delay >= static_cast<double>(std::numeric_limits<int64_t>::max()))
+    return std::numeric_limits<int64_t>::max();
+
+  return NormalizeMasterClockStartupVSyncDelay(
+      videoRefClock, static_cast<int64_t>(std::llround(delay)), systemFrequency);
+}
+
+int64_t AlignMasterClockStartupToVSync(const std::unique_ptr<CVideoReferenceClock>& videoRefClock,
+                                       int64_t startClock,
+                                       int64_t systemFrequency)
+{
+  if (!videoRefClock) return startClock;
+
+  return startClock +
+         videoRefClock->GetTimeUntilVsyncPhase(
+             GetMasterClockStartupVSyncDelay(videoRefClock, systemFrequency));
+}
+}
 
 CDVDClock::CDVDClock()
 {
@@ -70,9 +143,12 @@ double CDVDClock::GetClock(double& absolute, bool interpolated /*= true*/)
 {
   int64_t current = m_videoRefClock->GetTime(interpolated);
 
-  std::lock_guard lock(m_systemsection);
+  {
+    std::lock_guard lock(m_systemsection);
+    absolute = SystemToAbsolute(current);
+  }
 
-  absolute = SystemToAbsolute(current);
+  std::lock_guard lock(m_critSection);
 
   m_systemAdjust += m_speedAdjust * (current - m_lastSystemTime);
   m_lastSystemTime = current;
@@ -84,6 +160,15 @@ void CDVDClock::SetVsyncAdjust(double adjustment)
 {
   std::lock_guard lock(m_critSection);
 
+  if (m_frameTime > 0.0)
+  {
+    adjustment = fmod(adjustment, m_frameTime);
+    if (adjustment > m_frameTime / 2)
+      adjustment -= m_frameTime;
+    else if (adjustment <= -m_frameTime / 2)
+      adjustment += m_frameTime;
+  }
+
   m_vSyncAdjust = adjustment;
 }
 
@@ -92,6 +177,12 @@ double CDVDClock::GetVsyncAdjust()
   std::lock_guard lock(m_critSection);
 
   return m_vSyncAdjust;
+}
+
+bool CDVDClock::IsPaused() const
+{
+  std::unique_lock<CCriticalSection> lock(m_critSection);
+  return m_pauseClock != 0;
 }
 
 void CDVDClock::Pause(bool pause)
@@ -159,7 +250,7 @@ void CDVDClock::SetSpeed(int iSpeed)
 
 void CDVDClock::SetSpeedAdjust(double adjust)
 {
-  CLog::Log(LOGDEBUG, "CDVDClock::SetSpeedAdjust - adjusted:{:f}", adjust);
+  LOG_THROTTLE_PERIODIC(LOGDEBUG, LOGAVTIMING, 1000, "adjusted:{:f}", adjust);
 
   std::lock_guard lock(m_critSection);
 
@@ -184,6 +275,12 @@ double CDVDClock::ErrorAdjust(double error, const char* log)
   // -> adjusting buffer levels
   if (m_speedAdjust != 0 && error < DVD_MSEC_TO_TIME(100))
   {
+    AUDIODELAY_LOG("DVDClock.ErrorAdjust.Skipped",
+                   "caller={} errorMs={:.3f} speedAdjust={:.6f} clockBeforeMs={:.3f}",
+                   log,
+                   error / DVD_TIME_BASE * 1000,
+                   m_speedAdjust,
+                   clock / DVD_TIME_BASE * 1000);
     return 0;
   }
 
@@ -204,9 +301,31 @@ double CDVDClock::ErrorAdjust(double error, const char* log)
   }
 
   if (adjustment == 0)
+  {
+    AUDIODELAY_LOG("DVDClock.ErrorAdjust.Zeroed",
+                   "caller={} errorMs={:.3f} vSyncAdjust={:.6f} clockBeforeMs={:.3f}",
+                   log,
+                   error / DVD_TIME_BASE * 1000,
+                   m_vSyncAdjust,
+                   clock / DVD_TIME_BASE * 1000);
     return 0;
+  }
 
   Discontinuity(clock+adjustment, absolute);
+
+  AUDIODELAY_LOG("DVDClock.ErrorAdjust.Jump",
+                 "caller={} errorMs={:.3f} adjustmentMs={:.3f} "
+                 "clockBeforeMs={:.3f} clockAfterMs={:.3f} "
+                 "speedAdjust={:.6f} vSyncAdjust={:.6f} mIDiscMs={:.3f} frameTimeMs={:.3f}",
+                 log,
+                 error / DVD_TIME_BASE * 1000,
+                 adjustment / DVD_TIME_BASE * 1000,
+                 clock / DVD_TIME_BASE * 1000,
+                 (clock + adjustment) / DVD_TIME_BASE * 1000,
+                 m_speedAdjust,
+                 m_vSyncAdjust,
+                 m_iDisc / DVD_TIME_BASE * 1000,
+                 m_frameTime / DVD_TIME_BASE * 1000);
 
   CLog::Log(LOGDEBUG, "CDVDClock::ErrorAdjust - {} - error:{:f}, adjusted:{:f}", log, error,
             adjustment);
@@ -218,6 +337,8 @@ void CDVDClock::Discontinuity(double clock, double absolute)
   std::lock_guard lock(m_critSection);
   
   m_startClock = AbsoluteToSystem(absolute);
+  if (m_bReset)
+    m_startClock = AlignMasterClockStartupToVSync(m_videoRefClock, m_startClock, m_systemFrequency);
   if(m_pauseClock)
     m_pauseClock = m_startClock;
   m_iDisc = clock;
@@ -240,7 +361,10 @@ int CDVDClock::UpdateFramerate(double fps, double* interval /*= NULL*/)
   if(fps == 0.0)
     return -1;
 
-  m_frameTime = 1/fps * DVD_TIME_BASE;
+  {
+    std::lock_guard lock(m_critSection);
+    m_frameTime = 1 / fps * DVD_TIME_BASE;
+  }
 
   //check if the videoreferenceclock is running, will return -1 if not
   double rate = m_videoRefClock->GetRefreshRate(interval);
@@ -286,7 +410,7 @@ double CDVDClock::SystemToPlaying(int64_t system)
 
   if (m_bReset)
   {
-    m_startClock = system;
+    m_startClock = AlignMasterClockStartupToVSync(m_videoRefClock, system, m_systemFrequency);
     m_systemUsed = m_systemFrequency;
     if(m_pauseClock)
       m_pauseClock = m_startClock;

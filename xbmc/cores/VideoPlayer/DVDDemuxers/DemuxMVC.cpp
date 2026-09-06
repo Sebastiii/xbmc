@@ -25,6 +25,8 @@
 #include "cores/FFmpeg.h"
 #include "utils/log.h"
 
+#include <cmath>
+
 extern "C" {
 #include "libavutil/opt.h"
 };
@@ -36,9 +38,11 @@ static int mvc_file_read(void *h, uint8_t* buf, int size)
   CDVDInputStream* pInputStream = static_cast<CDemuxMVC*>(h)->m_pInput;
   int s = pInputStream->Read(buf, size);
 
-  if (pInputStream->IsEOF()) {
-	  return AVERROR_EOF;
-  }
+  if (s > 0)
+    return s;
+
+  if (s == 0 || pInputStream->IsEOF())
+    return AVERROR_EOF;
 
   return s;
 }
@@ -112,14 +116,23 @@ bool CDemuxMVC::Open(CDVDInputStream* pInput)
   CLog::Log(LOGDEBUG, "{}: MVC m2ts has {} streams", __FUNCTION__, m_pFormatContext->nb_streams);
   for (unsigned i = 0; i < m_pFormatContext->nb_streams; i++)
   {
-    if (m_pFormatContext->streams[i]->codecpar->codec_id == AV_CODEC_ID_H264_MVC
-      && m_pFormatContext->streams[i]->codecpar->extradata_size > 0)
+    if (m_pFormatContext->streams[i]->codecpar->codec_id == AV_CODEC_ID_H264_MVC)
     {
       m_nStreamIndex = i;
       break;
     }
     else
       m_pFormatContext->streams[i]->discard = AVDISCARD_ALL;
+  }
+
+  if (m_nStreamIndex < 0 && m_pFormatContext->nb_streams == 1)
+  {
+    const AVMediaType soleType = m_pFormatContext->streams[0]->codecpar->codec_type;
+    if (soleType == AVMEDIA_TYPE_VIDEO || soleType == AVMEDIA_TYPE_UNKNOWN)
+    {
+      m_pFormatContext->streams[0]->discard = AVDISCARD_DEFAULT;
+      m_nStreamIndex = 0;
+    }
   }
 
   if (m_nStreamIndex < 0)
@@ -210,8 +223,9 @@ bool CDemuxMVC::SeekTime(double time, bool backwards, double* startpts)
   int64_t seek_pts = av_rescale(DVD_MSEC_TO_TIME(time), time_base.den, (int64_t)time_base.num * AV_TIME_BASE);
   int64_t starttime = 0;
 
-  if (m_pFormatContext->start_time != (int64_t)AV_NOPTS_VALUE)
-    starttime = av_rescale(m_pFormatContext->start_time, time_base.den, (int64_t)time_base.num * AV_TIME_BASE);
+  if (m_menu_type != MenuType::NATIVE &&
+      m_pFormatContext->start_time != (int64_t)AV_NOPTS_VALUE)
+    starttime = av_rescale(m_start_time, time_base.den, (int64_t)time_base.num * AV_TIME_BASE);
   if (starttime != 0)
     seek_pts += starttime;
   if (seek_pts < MVC_SEEK_TIME_WINDOW)
@@ -219,9 +233,25 @@ bool CDemuxMVC::SeekTime(double time, bool backwards, double* startpts)
   else
     seek_pts -= MVC_SEEK_TIME_WINDOW;
 
-  av_seek_frame(m_pFormatContext, m_nStreamIndex, seek_pts, backwards ? AVSEEK_FLAG_BACKWARD : 0);
+  int ret = av_seek_frame(m_pFormatContext, m_nStreamIndex, seek_pts, backwards ? AVSEEK_FLAG_BACKWARD : 0);
+  if (ret < 0)
+  {
+    logM(LOGWARNING,
+         "CDemuxMVC::SeekTime - av_seek_frame to pts {} failed ({}), extension demux position unchanged",
+         seek_pts, ret);
+    return false;
+  }
 
   return true;
+}
+
+bool CDemuxMVC::SeekTimeRelative(double time, bool backwards)
+{
+  if (m_menu_type == MenuType::NATIVE && m_pFormatContext &&
+      m_pFormatContext->start_time != static_cast<int64_t>(AV_NOPTS_VALUE))
+    time += static_cast<double>(m_pFormatContext->start_time) / 1000.0;
+
+  return SeekTime(time, backwards);
 }
 
 std::string CDemuxMVC::GetFileName()
@@ -271,7 +301,10 @@ double CDemuxMVC::ConvertTimestamp(int64_t pts, int den, int num) const {
   else if (timestamp + 0.5 > starttime)
     timestamp = 0;
 
-  return timestamp * DVD_TIME_BASE;
+  if (den <= 1000000)
+    return static_cast<double>((static_cast<int64_t>(std::round(timestamp * den / num)) * num * DVD_TIME_BASE) / den);
+  else
+    return timestamp * DVD_TIME_BASE;
 }
 
 std::vector<CDemuxStream*> CDemuxMVC::GetStreams() const

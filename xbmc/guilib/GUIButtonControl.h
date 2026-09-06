@@ -22,6 +22,8 @@
 
 #include <optional>
 
+#include <optional>
+
 /*!
  \ingroup controls
  \brief

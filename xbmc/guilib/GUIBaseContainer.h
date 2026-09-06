@@ -50,7 +50,8 @@ public:
   void SetFocus(bool bOnOff) override;
   void AllocResources() override;
   void FreeResources(bool immediately = false) override;
-  void UpdateVisibility(const CGUIListItem *item = nullptr) override;
+  void UpdateVisibility(const CGUIListItem *item = NULL) override;
+  void AssignDepth() override;
 
   virtual unsigned int GetRows() const;
 

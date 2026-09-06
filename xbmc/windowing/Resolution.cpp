@@ -80,9 +80,21 @@ RESOLUTION CResolutionUtils::ChooseBestResolution(float fps, int width, int heig
     }
   }
 
-  CLog::Log(LOGINFO, "Display resolution ADJUST : {} ({}) (weight: {:.3f})",
-            CServiceBroker::GetWinSystem()->GetGfxContext().GetResInfo(res).strMode, res, weight);
+  logM(LOGDEBUG, "Display resolution ADJUST : {} ({}) (weight: {:.3f})",
+       CServiceBroker::GetWinSystem()->GetGfxContext().GetResInfo(res).strMode, res, weight);
   return res;
+}
+
+static unsigned int CountMismatchedModeFlags(uint32_t candidateFlags, uint32_t requestedFlags)
+{
+  uint32_t diff = (candidateFlags ^ requestedFlags) & D3DPRESENTFLAG_MODEMASK;
+  unsigned int count = 0;
+  while (diff)
+  {
+    diff &= diff - 1;
+    count++;
+  }
+  return count;
 }
 
 void CResolutionUtils::FindResolutionFromWhitelist(float fps, int width, int height, bool is3D, RESOLUTION &resolution)
@@ -118,9 +130,9 @@ void CResolutionUtils::FindResolutionFromWhitelist(float fps, int width, int hei
     }
   }
 
-  CLog::Log(LOGINFO,
-            "[WHITELIST] Searching the whitelist for: width: {}, height: {}, fps: {:0.3f}, 3D: {}:(0x{:x}), stereo mode: {:d}",
-            width, height, fps, is3D ? "true" : "false", dwFlags, stereo_mode);
+  logM(LOGDEBUG,
+       "[WHITELIST] Searching the whitelist for: width: {}, height: {}, fps: {:0.3f}, 3D: {}:(0x{:x}), stereo mode: {:d}",
+       width, height, fps, is3D ? "true" : "false", dwFlags, stereo_mode);
 
   if (noWhiteList)
   {
@@ -146,6 +158,7 @@ void CResolutionUtils::FindResolutionFromWhitelist(float fps, int width, int hei
   CLog::Log(LOGDEBUG, "[WHITELIST] Searching for an exact resolution with an exact refresh rate");
 
   unsigned int penalty = std::numeric_limits<unsigned int>::max();
+  unsigned int flagMismatch = std::numeric_limits<unsigned int>::max();
   bool found = false;
 
   for (const auto& mode : indexList)
@@ -156,7 +169,7 @@ void CResolutionUtils::FindResolutionFromWhitelist(float fps, int width, int hei
     // allow resolutions that are exact and have the correct refresh rate
     // allow macroblock alignment / padding errors (e.g. 1080 mod16 == 8)
     if (((height == info.iScreenHeight && width <= info.iScreenWidth + 8) ||
-         (width == info.iScreenWidth && height <= info.iScreenHeight + 8)) &&
+         (width == info.iScreenWidth && height <= info.iScreenHeight + 32)) &&
         (info.dwFlags & dwFlags) == dwFlags &&
         MathUtils::FloatEquals(info.fRefreshRate, fps, 0.01f))
     {
@@ -164,11 +177,13 @@ void CResolutionUtils::FindResolutionFromWhitelist(float fps, int width, int hei
                 "[WHITELIST] Matched an exact resolution with an exact refresh rate {}, 0x{:x} ({})",
                 info.strMode, info.dwFlags, i);
       unsigned int pen = abs(info.iScreenHeight - height) + abs(info.iScreenWidth - width);
-      if (pen < penalty)
+      unsigned int mismatch = CountMismatchedModeFlags(info.dwFlags, dwFlags);
+      if (pen < penalty || (pen == penalty && mismatch < flagMismatch))
       {
         resolution = i;
         found = true;
         penalty = pen;
+        flagMismatch = mismatch;
       }
     }
     if (found && !CServiceBroker::GetSettingsComponent()->GetSettings()->GetBool(
@@ -193,7 +208,7 @@ void CResolutionUtils::FindResolutionFromWhitelist(float fps, int width, int hei
       // allow resolutions that are exact and have double the refresh rate
       // allow macroblock alignment / padding errors (e.g. 1080 mod16 == 8)
       if (((height == info.iScreenHeight && width <= info.iScreenWidth + 8) ||
-           (width == info.iScreenWidth && height <= info.iScreenHeight + 8)) &&
+           (width == info.iScreenWidth && height <= info.iScreenHeight + 32)) &&
           (info.dwFlags & dwFlags) == dwFlags &&
           MathUtils::FloatEquals(info.fRefreshRate, fps * 2, 0.01f))
       {
@@ -201,11 +216,13 @@ void CResolutionUtils::FindResolutionFromWhitelist(float fps, int width, int hei
                   "[WHITELIST] Matched an exact resolution with double the refresh rate {} ({})",
                   info.strMode, i);
         unsigned int pen = abs(info.iScreenHeight - height) + abs(info.iScreenWidth - width);
-        if (pen <= penalty)
+        unsigned int mismatch = CountMismatchedModeFlags(info.dwFlags, dwFlags);
+        if (pen < penalty || (pen == penalty && mismatch <= flagMismatch))
         {
           resolution = i;
           found = true;
           penalty = pen;
+          flagMismatch = mismatch;
         }
       }
     }
@@ -232,7 +249,7 @@ void CResolutionUtils::FindResolutionFromWhitelist(float fps, int width, int hei
       // allow resolutions that are exact and have 2.5 times the refresh rate
       // allow macroblock alignment / padding errors (e.g. 1080 mod16 == 8)
       if (((height == info.iScreenHeight && width <= info.iScreenWidth + 8) ||
-           (width == info.iScreenWidth && height <= info.iScreenHeight + 8)) &&
+           (width == info.iScreenWidth && height <= info.iScreenHeight + 32)) &&
           (info.dwFlags & dwFlags) == dwFlags &&
           MathUtils::FloatEquals(info.fRefreshRate, fps * 2.5f, 0.01f))
       {
@@ -241,11 +258,13 @@ void CResolutionUtils::FindResolutionFromWhitelist(float fps, int width, int hei
             "[WHITELIST] Matched an exact resolution with a 3:2 pulldown refresh rate {} ({})",
             info.strMode, i);
         unsigned int pen = abs(info.iScreenHeight - height) + abs(info.iScreenWidth - width);
-        if (pen < penalty)
+        unsigned int mismatch = CountMismatchedModeFlags(info.dwFlags, dwFlags);
+        if (pen < penalty || (pen == penalty && mismatch < flagMismatch))
         {
           resolution = i;
           found = true;
           penalty = pen;
+          flagMismatch = mismatch;
         }
       }
     }
@@ -267,7 +286,8 @@ void CResolutionUtils::FindResolutionFromWhitelist(float fps, int width, int hei
         MathUtils::FloatEquals(info.fRefreshRate, fps, 0.01f))
     {
       unsigned int pen = abs(info.iScreenHeight - height) + abs(info.iScreenWidth - width);
-      if (pen < penalty)
+      unsigned int mismatch = CountMismatchedModeFlags(info.dwFlags, dwFlags);
+      if (pen < penalty || (pen == penalty && mismatch < flagMismatch))
       {
         CLog::Log(LOGDEBUG,
                   "[WHITELIST] Matched a closest resolution with an exact refresh rate {} ({}), penalty {}",
@@ -275,6 +295,7 @@ void CResolutionUtils::FindResolutionFromWhitelist(float fps, int width, int hei
         resolution = i;
         found = true;
         penalty = pen;
+        flagMismatch = mismatch;
       }
     }
   }
@@ -296,7 +317,8 @@ void CResolutionUtils::FindResolutionFromWhitelist(float fps, int width, int hei
           MathUtils::FloatEquals(info.fRefreshRate, fps * 2, 0.01f))
       {
         unsigned int pen = abs(info.iScreenHeight - height) + abs(info.iScreenWidth - width);
-        if (pen <= penalty)
+        unsigned int mismatch = CountMismatchedModeFlags(info.dwFlags, dwFlags);
+        if (pen < penalty || (pen == penalty && mismatch <= flagMismatch))
         {
           CLog::Log(LOGDEBUG,
                     "[WHITELIST] Matched a closest resolution with double refresh rate {} ({}), penalty {}",
@@ -304,6 +326,7 @@ void CResolutionUtils::FindResolutionFromWhitelist(float fps, int width, int hei
           resolution = i;
           found = true;
           penalty = pen;
+          flagMismatch = mismatch;
         }
       }
     }
@@ -405,7 +428,7 @@ void CResolutionUtils::FindResolutionFromWhitelist(float fps, int width, int hei
       // allow resolutions that are exact and have the correct refresh rate
       // allow macroblock alignment / padding errors (e.g. 1080 mod16 == 8)
       if (((height == info.iScreenHeight && width <= info.iScreenWidth + 8) ||
-           (width == info.iScreenWidth && height <= info.iScreenHeight + 8)) &&
+           (width == info.iScreenWidth && height <= info.iScreenHeight + 32)) &&
           (info.dwFlags & dwFlags) == dwFlags &&
           MathUtils::FloatEquals(info.fRefreshRate, curr.fRefreshRate, 0.01f))
       {
@@ -413,11 +436,13 @@ void CResolutionUtils::FindResolutionFromWhitelist(float fps, int width, int hei
                   "[WHITELIST] Matched an fallback resolution with an exact refresh rate {} ({})",
                   info.strMode, i);
         unsigned int pen = abs(info.iScreenHeight - height) + abs(info.iScreenWidth - width);
-        if (pen < penalty)
+        unsigned int mismatch = CountMismatchedModeFlags(info.dwFlags, dwFlags);
+        if (pen < penalty || (pen == penalty && mismatch < flagMismatch))
         {
           resolution = i;
           found = true;
           penalty = pen;
+          flagMismatch = mismatch;
         }
       }
     }

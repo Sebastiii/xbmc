@@ -60,6 +60,24 @@ void CPackerMAT::Reset()
   m_pendingDiscontinuity = false;
 }
 
+void CPackerMAT::SoftReset()
+{
+  m_buffer.clear();
+  m_bufferCount = 0;
+  m_outputQueue.clear();
+  m_offsetQueue.clear();
+  m_discontinuityQueue.clear();
+  m_lastOutputSamplesOffset = 0;
+  m_lastOutputHadDiscontinuity = false;
+  m_pendingDiscontinuity = false;
+
+  const bool init = m_state.init;
+  const int ratebits = m_state.ratebits;
+  m_state = {};
+  m_state.init = init;
+  m_state.ratebits = ratebits;
+}
+
 // On a high level, a MAT frame consists of a sequence of padded TrueHD frames
 // The size of the padded frame can be determined from the frame time/sequence code in the frame header,
 // since it varies to accommodate spikes in bitrate.
@@ -70,6 +88,9 @@ void CPackerMAT::Reset()
 // high-bitrate streams can overshoot this size and therefor require proper handling of dynamic padding.
 bool CPackerMAT::PackTrueHD(const uint8_t* data, int size)
 {
+  if (size < 10)
+    return false;
+
   TrueHDMajorSyncInfo info;
   bool isMajorSync = (AV_RB32(data + 4) == FORMAT_MAJOR_SYNC);
 
@@ -110,23 +131,23 @@ bool CPackerMAT::PackTrueHD(const uint8_t* data, int size)
       // Reset frame timing state and use default padding (like LAV Filters)
       // NOTE: Do NOT reset prevMatFramesize - LAV keeps it for proper padding calculation
       m_state.prevFrametimeValid = false;
-      // Standard padding: 40 samples * (64 >> ratebits) bytes = 2560 bytes for 48kHz
-      spaceSize = 40 * (64 >> (m_state.ratebits & 7));
+      // Standard padding: frameSamples * (64 >> ratebits) bytes = 2560 bytes at every rate
+      spaceSize = frameSamples * (64 >> (m_state.ratebits & 7));
 
       // LAV fix: Calculate and carry forward padding based on output time offset
       // The output timing is always one frame ahead for buffering reasons, so deduct one frame worth
       uint32_t prevOutput = static_cast<uint16_t>(info.outputTiming - frameSamples);
       if (prevOutput < frameTime) // wrap around, output is always in front of frame time
-        prevOutput += UINT16_MAX;
+        prevOutput += 0x10000u;
 
       // Get the offset of this frame, so we can compare to the previous frame,
       // and determine the amount of padding that needs to be inserted
       int32_t currentFrameOutputOffset = static_cast<int32_t>(prevOutput - frameTime);
 
-      // The previous offset should never be smaller than the incoming offset,
-      // or we will lack the reserved space
       if (m_state.nOutputTimeOffset >= currentFrameOutputOffset)
         m_state.padding += (m_state.nOutputTimeOffset - currentFrameOutputOffset) * static_cast<int32_t>(64 >> (m_state.ratebits & 7));
+      else
+        m_state.padding += (currentFrameOutputOffset - m_state.nOutputTimeOffset) * static_cast<int32_t>(64 >> (m_state.ratebits & 7));
 
       CLog::Log(LOGDEBUG, "CPackerMAT::PackTrueHD: carrying forward {} padding (offset {} - {})",
                 m_state.padding, m_state.nOutputTimeOffset, currentFrameOutputOffset);
@@ -151,16 +172,7 @@ bool CPackerMAT::PackTrueHD(const uint8_t* data, int size)
 
   m_state.padding += static_cast<int32_t>(spaceSize - m_state.prevMatFramesize);
 
-  if (m_lavStyleEnabled)
-  {
-    // LAV Filters has no overflow safety net - it trusts the early discontinuity detection.
-    // If padding goes negative, WritePadding() will simply skip (padding <= 0 check).
-    // If padding is excessively large, it will be consumed over multiple MAT frames.
-    // We only clamp negative padding to 0 to prevent issues in WritePadding loop.
-    if (m_state.padding < 0)
-      m_state.padding = 0;
-  }
-  else
+  if (!m_lavStyleEnabled)
   {
     // Baseline (non-LAV): detect seeks and re-initialize internal state
     // i.e. skip stream until the next major sync frame
@@ -174,6 +186,14 @@ bool CPackerMAT::PackTrueHD(const uint8_t* data, int size)
       return false;
     }
   }
+  else if (m_state.padding > MAT_BUFFER_SIZE * 5)
+  {
+    logM(LOGDEBUG, "CPackerMAT::PackTrueHD: excessive padding, re-initializing MAT packer state");
+    SoftReset();
+    m_state = {};
+    m_state.init = true;
+    return false;
+  }
 
   // LAV: Record the offset of frame time to output time, which is used to verify
   // the size of the padding on discontinuities
@@ -181,7 +201,7 @@ bool CPackerMAT::PackTrueHD(const uint8_t* data, int size)
   {
     uint32_t prevOutput = static_cast<uint16_t>(m_state.outputTiming - frameSamples);
     if (prevOutput < frameTime) // wrap around, output is always in front of frame time
-      prevOutput += UINT16_MAX;
+      prevOutput += 0x10000u;
 
     m_state.nOutputTimeOffset = static_cast<int32_t>(prevOutput - frameTime);
   }
@@ -393,7 +413,7 @@ int CPackerMAT::FillDataBuffer(const uint8_t* data, int size, Type type)
 
     // write remaining data after the MAT marker
     if (remaining > 0)
-      remaining = FillDataBuffer(data + nBytesBefore, remaining, type);
+      remaining = FillDataBuffer(data ? data + nBytesBefore : nullptr, remaining, type);
 
     return remaining;
   }
@@ -474,6 +494,9 @@ TrueHDMajorSyncInfo CPackerMAT::ParseTrueHDMajorSyncHeaders(const uint8_t* p, in
     int extensionSize = p[30] >> 4; // calculate headers size
     majorSyncSize += 2 + extensionSize * 2;
   }
+
+  if (majorSyncSize > buffsize)
+    return {};
 
   CBitStream bs(p + 4, buffsize - 4);
 

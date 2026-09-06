@@ -462,6 +462,9 @@ bool CVideoGUIInfo::GetLabel(std::string& value, const CFileItem *item, int cont
       case LISTITEM_AUDIO_CODEC:
         value = tag->m_streamDetails.GetAudioCodec();
         return true;
+      case LISTITEM_AUDIO_PROFILE:
+        value = tag->m_streamDetails.GetAudioProfile();
+        return true;
       case LISTITEM_AUDIO_CHANNELS:
       {
         int iChannels = tag->m_streamDetails.GetAudioChannels();
@@ -480,6 +483,7 @@ bool CVideoGUIInfo::GetLabel(std::string& value, const CFileItem *item, int cont
         return true;
       case LISTITEM_FILENAME:
       case LISTITEM_FILE_EXTENSION:
+      case LISTITEM_FILENAME_NO_EXTENSION:
         if (item->IsVideoDb())
           value = URIUtils::GetFileName(tag->m_strFileNameAndPath);
         else if (item->HasMusicInfoTag()) // special handling for music videos, which have both a videotag and a musictag
@@ -491,6 +495,10 @@ bool CVideoGUIInfo::GetLabel(std::string& value, const CFileItem *item, int cont
         {
           std::string strExtension = URIUtils::GetExtension(value);
           value = StringUtils::TrimLeft(strExtension, ".");
+        }
+        else if (info.m_info == LISTITEM_FILENAME_NO_EXTENSION)
+        {
+          URIUtils::RemoveExtension(value);
         }
         return true;
       case LISTITEM_FOLDERNAME:
@@ -528,6 +536,45 @@ bool CVideoGUIInfo::GetLabel(std::string& value, const CFileItem *item, int cont
       case LISTITEM_VIDEO_HDR_TYPE:
         value = tag->m_streamDetails.GetVideoHdrType();
         return true;
+      case LISTITEM_VIDEO_HDR_TYPE_ALT:
+        value = tag->m_streamDetails.GetVideoHdrTypeAlt();
+        return true;
+      case LISTITEM_VIDEO_DV_PROFILE:
+        value = tag->m_streamDetails.GetVideoDvProfile();
+        return true;
+      case LISTITEM_AUDIO_OBJECTS:
+      {
+        int objects = tag->m_streamDetails.GetAudioObjects();
+        const int audioStreams = tag->m_streamDetails.GetAudioStreamCount();
+        for (int i = 1; objects < 0 && i <= audioStreams; ++i)
+          objects = tag->m_streamDetails.GetAudioObjects(i);
+        if (objects < 0)
+          return false;
+        value = std::to_string(objects);
+        return true;
+      }
+      case LISTITEM_AUDIO_BED_CHANNELS:
+      {
+        int bedChannels = tag->m_streamDetails.GetAudioBedChannels();
+        const int audioStreams = tag->m_streamDetails.GetAudioStreamCount();
+        for (int i = 1; bedChannels <= 0 && i <= audioStreams; ++i)
+          bedChannels = tag->m_streamDetails.GetAudioBedChannels(i);
+        if (bedChannels <= 0)
+          return false;
+        value = std::to_string(bedChannels);
+        return true;
+      }
+      case LISTITEM_AUDIO_OBJECT_CHANNELS:
+      {
+        int objectChannels = tag->m_streamDetails.GetAudioObjectChannels();
+        const int audioStreams = tag->m_streamDetails.GetAudioStreamCount();
+        for (int i = 1; objectChannels <= 0 && i <= audioStreams; ++i)
+          objectChannels = tag->m_streamDetails.GetAudioObjectChannels(i);
+        if (objectChannels <= 0)
+          return false;
+        value = std::to_string(objectChannels);
+        return true;
+      }
       case LISTITEM_LABEL:
       {
         //! @todo get rid of "videos with versions as folder" hack!
@@ -589,6 +636,12 @@ bool CVideoGUIInfo::GetLabel(std::string& value, const CFileItem *item, int cont
     }
     case VIDEOPLAYER_SUBTITLES_NAME:
       value = m_subtitleInfo.name;
+      return true;
+    case VIDEOPLAYER_SUBTITLE_CODEC:
+      value = m_subtitleInfo.codecName;
+      return true;
+    case VIDEOPLAYER_HDR_DETAIL:
+      value = m_videoInfo.hdrDetail;
       return true;
     case VIDEOPLAYER_COVER:
       if (m_appPlayer->IsPlayingVideo())
@@ -839,6 +892,9 @@ bool CVideoGUIInfo::GetInt(int& value, const CGUIListItem *gitem, int contextWin
     ///////////////////////////////////////////////////////////////////////////////////////////////
     // VIDEOPLAYER_*
     ///////////////////////////////////////////////////////////////////////////////////////////////
+    case VIDEOPLAYER_VIDEOSTREAMCOUNT:
+      value = m_appPlayer->GetVideoStreamCount();
+      return true;
     case VIDEOPLAYER_AUDIOSTREAMCOUNT:
       value = m_appPlayer->GetAudioStreamCount();
       return true;

@@ -15,13 +15,20 @@
 #include "guilib/WindowIDs.h"
 #include "messaging/IMessageTarget.h"
 
+#include <array>
+#include <atomic>
+#include <chrono>
 #include <list>
+#include <memory>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
 class CGUIDialog;
+class CGUIRenderTargetFBO;
+class CRenderSystemBase;
 class CGUIMediaWindow;
+class CFullscreenOverlayRenderThread;
 
 #ifdef TARGET_WINDOWS_STORE
 #pragma pack(push, 8)
@@ -56,7 +63,7 @@ public:
   bool SendMessage(int message, int senderID, int destID, int param1 = 0, int param2 = 0);
   bool SendMessage(CGUIMessage& message, int window);
   void Initialize();
-  void Add(CGUIWindow* pWindow);
+  bool Add(CGUIWindow* pWindow);
   void AddUniqueInstance(CGUIWindow *window);
   void AddCustomWindow(CGUIWindow* pWindow);
   void Remove(int id);
@@ -67,6 +74,7 @@ public:
   void ActivateWindow(int iWindowID, const std::vector<std::string>& params, bool swappingWindows = false, bool force = false);
   void PreviousWindow();
   bool HasVisibleDialog() const { return !m_activeDialogs.empty(); }
+  bool HasVisibleDialogContentInRegions(const std::vector<CRect>& regions) const;
 
   /**
    * \brief Switch window to fullscreen
@@ -99,18 +107,25 @@ public:
    */
   void MarkDirty(const CRect& rect);
 
+  void MarkDirtyRegionOnly(const CRect& rect);
+
   /*! \brief Rendering of the current window and any dialogs
    Render is called every frame to draw the current window and any dialogs.
    It should only be called from the application thread.
    Returns true only if it has rendered something.
    */
-  bool Render() const;
+  bool Render();
 
   void RenderEx() const;
 
   /*! \brief Do any post render activities.
    */
   void AfterRender();
+
+  void QuiesceFullscreenOverlayWorker();
+  void ScheduleAsyncFullscreenOverlayRender();
+  bool BeginRenderExclusion();
+  void EndRenderExclusion();
 
   /*! \brief Per-frame updating of the current window and any dialogs
    FrameMove is called every frame to update the current window and any dialogs
@@ -233,6 +248,115 @@ public:
 #endif
 private:
   void RenderPass() const;
+  /*! \brief Render in one back to front pass.
+   */
+  void RenderPassSingle() const;
+  /*! \brief Render opaque elements front to back, and transparent ones back to front
+   */
+  void RenderPassDual() const;
+  void UpdateFullscreenOverlayRenderTarget() const;
+
+  enum class FullscreenOverlayCompositeSource
+  {
+    NONE,
+    SYNC_TARGET,
+    WORKER_FBO,
+  };
+
+  enum class FullscreenOverlayPromoteResult
+  {
+    NONE,
+    PROMOTED,
+    KEEP_DISPLAYED,
+  };
+
+  struct FullscreenOverlayWorkerCounters
+  {
+    int prep{0};
+    double prepMsTotal{0.0};
+    int promo{0};
+    int stale{0};
+    int fenceNR{0};
+    int fenceWait{0};
+    int wdRetry{0};
+    int wdDemote{0};
+    int busySkip{0};
+    int stall{0};
+    int relReq{0};
+    int inlineFill{0};
+    int excl{0};
+    int compNone{0};
+    int syncComposites{0};
+    int syncFills{0};
+    int syncCreates{0};
+    int syncReleases{0};
+    int syncDeclines{0};
+    const char* syncLastReason{nullptr};
+    int fenceNRMax{0};
+    int pendSkip{0};
+    int gpuSamples{0};
+    int gpuZeroSamples{0};
+    double gpuMsTotal{0.0};
+    double gpuMsMax{0.0};
+    int contentSamples{0};
+    double contentPctTotal{0.0};
+    double contentPctMax{0.0};
+    int fillSig{0};
+    int fillAnim{0};
+    int fillDirty{0};
+    int fillInterval{0};
+    int fillSuppressed{0};
+    int staleFocus{0};
+  };
+
+  struct FullscreenOverlayFillStats
+  {
+    int composites{0};
+    int fills{0};
+    int creates{0};
+    int releases{0};
+    int declines{0};
+    const char* lastReason{nullptr};
+    int fboW{-1};
+    int fboH{-1};
+    int fillSig{0};
+    int fillAnim{0};
+    int fillDirty{0};
+    int fillInterval{0};
+    int fillSuppressed{0};
+    int staleFocus{0};
+  };
+
+  struct AsyncFullscreenOverlaySignature
+  {
+    int activeWindowID{0};
+    unsigned int width{0};
+    unsigned int height{0};
+    unsigned int shaderEpoch{0};
+    std::vector<int> dialogIds;
+    std::vector<int> focusIds;
+
+    bool operator==(const AsyncFullscreenOverlaySignature& other) const
+    {
+      return activeWindowID == other.activeWindowID && width == other.width &&
+             height == other.height && shaderEpoch == other.shaderEpoch &&
+             dialogIds == other.dialogIds && focusIds == other.focusIds;
+    }
+  };
+
+  bool FillFullscreenOverlayTarget(FullscreenOverlayFillStats& stats,
+                                   std::chrono::steady_clock::time_point now) const;
+  void SelectFullscreenOverlayCompositeSource() const;
+  void AccumulateSyncFillStats(const FullscreenOverlayFillStats& stats) const;
+  static bool HasFullscreenOverlayWorkerActivity(const FullscreenOverlayWorkerCounters& counters);
+  bool WaitPreparedFullscreenOverlayFence(CRenderSystemBase* renderSystem) const;
+  FullscreenOverlayPromoteResult PromotePreparedFullscreenOverlayRenderTarget(
+      const AsyncFullscreenOverlaySignature& current) const;
+  AsyncFullscreenOverlaySignature BuildAsyncFullscreenOverlaySignature() const;
+  const CGUIRenderTargetFBO* GetFullscreenOverlayCompositeTarget() const;
+  void CompositeFullscreenOverlay(CRenderSystemBase* renderSystem,
+                                  const CGUIRenderTargetFBO& target) const;
+  void StopFullscreenOverlayRenderThread();
 
   void LoadNotOnDemandWindows() const;
   void UnloadNotOnDemandWindows() const;
@@ -265,10 +389,68 @@ private:
 
   bool HandleAction(const CAction &action) const;
 
-  std::unordered_map<int, CGUIWindow*> m_mapWindows;
-  std::vector<CGUIWindow*> m_vecCustomWindows;
-  std::vector<CGUIWindow*> m_activeDialogs;
-  std::vector<CGUIWindow*> m_deleteWindows;
+  std::unordered_map<int, std::shared_ptr<CGUIWindow>> m_mapWindows;
+  std::vector<std::shared_ptr<CGUIWindow>> m_vecCustomWindows;
+  std::vector<std::shared_ptr<CGUIWindow>> m_dialogWindows;
+  std::vector<std::shared_ptr<CGUIWindow>> m_activeDialogs;
+  std::vector<std::shared_ptr<CGUIWindow>> m_deleteWindows;
+
+  mutable std::unique_ptr<CGUIRenderTargetFBO> m_fullscreenOverlayRenderTarget;
+  mutable std::chrono::steady_clock::time_point m_fullscreenOverlayLastFillTime;
+  mutable std::chrono::steady_clock::time_point m_fullscreenOverlayLastActiveTime;
+  mutable size_t m_fullscreenOverlaySignature{0};
+  mutable bool m_fullscreenOverlayDirtyEpisodeFilled{false};
+  mutable bool m_fullscreenOverlayComposite{false};
+  mutable std::vector<int> m_fullscreenOverlayCompositeIds;
+  mutable std::vector<std::pair<int, int>> m_fullscreenOverlayFilledFocus;
+  mutable const char* m_osdTraceReason{"none"};
+  mutable const char* m_osdTraceFill{"none"};
+  mutable int m_osdTraceBlitIndex{-1};
+  mutable int m_osdTraceLiveAfterBlit{0};
+  mutable int m_osdTracePrevSource{-1};
+  mutable unsigned int m_osdTraceFrame{0};
+  mutable std::atomic<bool> m_osdTraceArmed{false};
+  mutable int m_osdTraceBlitCount{0};
+  mutable int m_osdTracePass{0};
+  mutable int m_osdTraceSkinRet{-1};
+
+  mutable std::unique_ptr<CGUIRenderTargetFBO> m_skinHdrRenderTarget;
+  mutable bool m_skinHdrTargetValid{false};
+  bool m_skinHdrEngagedLogged{false};
+  mutable bool m_skinHdrEngagedLastFrame{false};
+
+  static constexpr size_t FULLSCREEN_OVERLAY_RENDER_TARGET_COUNT{2};
+  mutable CCriticalSection m_fullscreenOverlayStateSection;
+  mutable std::array<std::unique_ptr<CGUIRenderTargetFBO>, FULLSCREEN_OVERLAY_RENDER_TARGET_COUNT>
+      m_fullscreenOverlayRenderTargets;
+  mutable int m_preparedFullscreenOverlayRenderTargetIndex{-1};
+  mutable int m_displayedFullscreenOverlayRenderTargetIndex{-1};
+  mutable AsyncFullscreenOverlaySignature m_preparedFullscreenOverlaySignature;
+  mutable AsyncFullscreenOverlaySignature m_displayedFullscreenOverlaySignature;
+  mutable AsyncFullscreenOverlaySignature m_pendingFullscreenOverlaySignature;
+  mutable void* m_preparedFullscreenOverlayFence{nullptr};
+  mutable std::atomic<bool> m_fullscreenOverlayRenderThreadDisabled{false};
+  mutable std::atomic<uint32_t> m_fullscreenOverlayDepthLayer{2};
+  mutable bool m_fullscreenOverlayReleaseRequested{false};
+  mutable FullscreenOverlayCompositeSource m_fullscreenOverlayCompositeSource{
+      FullscreenOverlayCompositeSource::NONE};
+  std::unique_ptr<CFullscreenOverlayRenderThread> m_fullscreenOverlayRenderThread;
+  mutable FullscreenOverlayWorkerCounters m_fullscreenOverlayWorkerCounters;
+  mutable bool m_fullscreenOverlayContentSampled{false};
+  mutable std::chrono::steady_clock::time_point m_preparedFullscreenOverlayPublishTime;
+  mutable std::chrono::steady_clock::time_point m_fullscreenOverlayWorkerLastActivity;
+  mutable std::chrono::steady_clock::time_point m_fullscreenOverlayLastQueueTime;
+  mutable int m_fullscreenOverlayFenceNRStreak{0};
+  mutable std::atomic<bool> m_fullscreenOverlayDiagEnabled{false};
+  mutable bool m_fullscreenOverlayDiagConfigLogged{false};
+  mutable int m_fullscreenOverlayFenceNRIndex{-1};
+  mutable std::chrono::steady_clock::time_point m_fullscreenOverlayFenceNRPublishTime;
+  mutable bool m_fullscreenOverlayRetryRequested{false};
+  mutable bool m_fullscreenOverlayRetryAttempted{false};
+  CCriticalSection m_guiRenderExclusion;
+  bool m_renderExclusionHeld{false};
+
+  friend class ::CFullscreenOverlayRenderThread;
 
   std::deque<int> m_windowHistory;
 
@@ -284,4 +466,6 @@ private:
 
   CDirtyRegionList m_dirtyregions;
   CDirtyRegionTracker m_tracker;
+  int m_bufAgeLastStereoMode{0};
+  std::vector<CRect> m_lastPromotedRegions;
 };

@@ -12,18 +12,26 @@
 #include "DVDCodecs/Overlay/DVDOverlay.h"
 #include "DVDCodecs/Overlay/DVDOverlayCodec.h"
 #include "DVDCodecs/Overlay/DVDOverlaySpu.h"
+#include "DVDDemuxers/DemuxStreamSSIF.h"
 #include "DVDSubtitles/DVDSubtitleParser.h"
+#include "ServiceBroker.h"
 #include "cores/VideoPlayer/Interface/DemuxPacket.h"
 #include "cores/VideoPlayer/Interface/TimingConstants.h"
+#include "settings/AdvancedSettings.h"
+#include "settings/SettingsComponent.h"
 #include "utils/log.h"
 
+#include <chrono>
 #include <mutex>
 
+using namespace std::chrono_literals;
+
 CVideoPlayerSubtitle::CVideoPlayerSubtitle(CDVDOverlayContainer* pOverlayContainer, CProcessInfo &processInfo)
-: IDVDStreamPlayer(processInfo)
+: CThread("VideoPlayerSubtitle"), IDVDStreamPlayer(processInfo), m_messageQueue("subtitle")
 {
   m_pOverlayContainer = pOverlayContainer;
   m_lastPts = DVD_NOPTS_VALUE;
+  m_messageQueue.SetMaxDataSize(4 * 1024 * 1024);
 }
 
 CVideoPlayerSubtitle::~CVideoPlayerSubtitle()
@@ -33,7 +41,14 @@ CVideoPlayerSubtitle::~CVideoPlayerSubtitle()
 
 void CVideoPlayerSubtitle::Flush()
 {
-  SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::GENERAL_FLUSH), 0);
+  if (m_asyncParse.load(std::memory_order_relaxed) && m_messageQueue.IsInited())
+  {
+    m_messageQueue.Flush();
+    m_messageQueue.Put(std::make_shared<CDVDMsg>(CDVDMsg::GENERAL_FLUSH), 1);
+    m_wakeEvent.Set();
+  }
+  else
+    HandleMessage(std::make_shared<CDVDMsg>(CDVDMsg::GENERAL_FLUSH));
 }
 
 namespace
@@ -51,7 +66,7 @@ std::shared_ptr<CDVDOverlayGroup> InitialiseNewOverlayGroup(std::shared_ptr<CDVD
 }
 } // namespace
 
-void CVideoPlayerSubtitle::SendMessage(std::shared_ptr<CDVDMsg> pMsg, int priority)
+void CVideoPlayerSubtitle::HandleMessage(const std::shared_ptr<CDVDMsg>& pMsg)
 {
   std::lock_guard lock(m_section);
 
@@ -59,6 +74,7 @@ void CVideoPlayerSubtitle::SendMessage(std::shared_ptr<CDVDMsg> pMsg, int priori
   {
     auto pMsgDemuxerPacket = std::static_pointer_cast<CDVDMsgDemuxerPacket>(pMsg);
     DemuxPacket* pPacket = pMsgDemuxerPacket->GetPacket();
+    CDemuxStreamSSIF* pSSIF = m_pSSIF.load(std::memory_order_acquire);
 
     if (m_pOverlayCodec)
     {
@@ -68,9 +84,27 @@ void CVideoPlayerSubtitle::SendMessage(std::shared_ptr<CDVDMsg> pMsg, int priori
       {
         if (std::shared_ptr<CDVDOverlay> overlay{m_pOverlayCodec->GetOverlay()}; overlay != nullptr)
         {
+          if (m_streaminfo.codec == AV_CODEC_ID_HDMV_PGS_SUBTITLE)
+          {
+            int depth = 0;
+            if (pSSIF && m_streaminfo.m_3dSubtitlePlane != 0xFF)
+              depth = pSSIF->GetSubtitleOffsetAtPts(pPacket->pts, m_streaminfo.m_3dSubtitlePlane);
+            else
+              depth = m_streaminfo.m_3dSubtitlePlane;
+            overlay->m_3dSubtitleDepth = depth;
+          }
           auto group{InitialiseNewOverlayGroup(overlay)};
           while ((overlay = m_pOverlayCodec->GetOverlay()) != nullptr)
           {
+            if (m_streaminfo.codec == AV_CODEC_ID_HDMV_PGS_SUBTITLE)
+            {
+              int depth = 0;
+              if (pSSIF && m_streaminfo.m_3dSubtitlePlane != 0xFF)
+                depth = pSSIF->GetSubtitleOffsetAtPts(pPacket->pts, m_streaminfo.m_3dSubtitlePlane);
+              else
+                depth = m_streaminfo.m_3dSubtitlePlane;
+              overlay->m_3dSubtitleDepth = depth;
+            }
             if (*group->m_overlays.back() == *overlay)
               group->m_overlays.emplace_back(overlay);
             else
@@ -125,7 +159,22 @@ void CVideoPlayerSubtitle::SendMessage(std::shared_ptr<CDVDMsg> pMsg, int priori
       m_pSubtitleFileParser->Reset();
 
     if (m_pOverlayCodec)
+    {
       m_pOverlayCodec->Flush();
+
+      if (m_streaminfo.codec == AV_CODEC_ID_HDMV_PGS_SUBTITLE)
+      {
+        logComponentM(LOGDEBUG, LOGVIDEO,
+                      "overlay subtitle flush: recreating PGS codec to clear stale "
+                      "composition/palette/object cache");
+        m_pOverlayCodec.reset();
+        m_pOverlayCodec = CDVDFactoryCodec::CreateOverlayCodec(m_streaminfo);
+        if (!m_pOverlayCodec)
+          CLog::Log(LOGERROR,
+                    "CVideoPlayerSubtitle: failed to recreate PGS overlay codec on flush");
+        m_hasOverlayCodec.store(m_pOverlayCodec != nullptr, std::memory_order_relaxed);
+      }
+    }
 
     /* We must flush active overlays on flush or if we have a file
      * parser since it will re-populate active items.  */
@@ -136,53 +185,142 @@ void CVideoPlayerSubtitle::SendMessage(std::shared_ptr<CDVDMsg> pMsg, int priori
   }
 }
 
+void CVideoPlayerSubtitle::SendMessage(std::shared_ptr<CDVDMsg> pMsg, int priority)
+{
+  if (m_asyncParse.load(std::memory_order_relaxed) && m_messageQueue.IsInited())
+  {
+    m_messageQueue.Put(pMsg, priority);
+    m_wakeEvent.Set();
+  }
+  else
+    HandleMessage(pMsg);
+}
+
+void CVideoPlayerSubtitle::Process()
+{
+  while (!m_bStop)
+  {
+    m_wakeEvent.Reset();
+
+    std::shared_ptr<CDVDMsg> pMsg;
+    MsgQueueReturnCode ret;
+    bool worked = false;
+    while ((ret = m_messageQueue.Get(pMsg, 0ms)) == MSGQ_OK)
+    {
+      HandleMessage(pMsg);
+      worked = true;
+    }
+    if (MSGQ_IS_ERROR(ret))
+    {
+      if (!m_messageQueue.ReceivedAbortRequest())
+        logM(LOGERROR, "MSGQ_IS_ERROR returned true ({})", ret);
+      return;
+    }
+
+    if (m_hasPendingTiming.exchange(false, std::memory_order_acquire))
+    {
+      const double pts = m_latestPts.load(std::memory_order_relaxed);
+      const double offset = m_latestOffset.load(std::memory_order_relaxed);
+      std::lock_guard lock(m_section);
+      ProcessParser(pts, offset);
+      worked = true;
+    }
+
+    if (!worked)
+      m_wakeEvent.Wait(100ms);
+  }
+}
+
+void CVideoPlayerSubtitle::UpdatePlaybackPosition(double pts, double offset)
+{
+  if (!m_asyncParse.load(std::memory_order_relaxed))
+  {
+    std::lock_guard lock(m_section);
+    ProcessParser(pts, offset);
+    return;
+  }
+
+  if (!m_usesTimedParser.load(std::memory_order_relaxed) || pts == DVD_NOPTS_VALUE)
+    return;
+
+  m_latestPts.store(pts, std::memory_order_relaxed);
+  m_latestOffset.store(offset, std::memory_order_relaxed);
+  m_hasPendingTiming.store(true, std::memory_order_release);
+  m_wakeEvent.Set();
+}
+
 bool CVideoPlayerSubtitle::OpenStream(CDVDStreamInfo &hints, std::string &filename)
 {
-  std::lock_guard lock(m_section);
-
   CloseStream(false);
-  m_streaminfo = hints;
 
-  // okey check if this is a filesubtitle
-  if (!filename.empty() && filename != "dvd")
+  bool startThread = false;
   {
-    m_pSubtitleFileParser.reset(CDVDFactorySubtitle::CreateParser(filename));
-    if (!m_pSubtitleFileParser)
-    {
-      CLog::Log(LOGERROR, "{} - Unable to create subtitle parser", __FUNCTION__);
-      CloseStream(true);
-      return false;
-    }
+    std::lock_guard lock(m_section);
 
-    CLog::Log(LOGDEBUG, "Created subtitles parser: {}", m_pSubtitleFileParser->GetName());
+    m_streaminfo = hints;
 
-    if (!m_pSubtitleFileParser->Open(hints))
+    if (!filename.empty() && filename != "dvd")
     {
-      CLog::Log(LOGERROR, "{} - Unable to init subtitle parser", __FUNCTION__);
-      CloseStream(true);
-      return false;
+      m_pSubtitleFileParser.reset(CDVDFactorySubtitle::CreateParser(filename));
+      if (!m_pSubtitleFileParser)
+      {
+        CLog::Log(LOGERROR, "{} - Unable to create subtitle parser", __FUNCTION__);
+        CloseStream(true);
+        return false;
+      }
+
+      CLog::Log(LOGDEBUG, "Created subtitles parser: {}", m_pSubtitleFileParser->GetName());
+
+      if (!m_pSubtitleFileParser->Open(hints))
+      {
+        CLog::Log(LOGERROR, "{} - Unable to init subtitle parser", __FUNCTION__);
+        CloseStream(true);
+        return false;
+      }
+      m_pSubtitleFileParser->Reset();
+      m_usesTimedParser.store(true, std::memory_order_relaxed);
+      startThread = true;
     }
-    m_pSubtitleFileParser->Reset();
-    return true;
+    else if (hints.codec == AV_CODEC_ID_DVD_SUBTITLE && filename == "dvd")
+    {
+    }
+    else
+    {
+      m_pOverlayCodec = CDVDFactoryCodec::CreateOverlayCodec(hints);
+      if (!m_pOverlayCodec)
+      {
+        CLog::Log(LOGERROR, "{} - Unable to init overlay codec", __FUNCTION__);
+        return false;
+      }
+      CLog::Log(LOGDEBUG, "Created subtitles overlay codec: {}", m_pOverlayCodec->GetName());
+      m_hasOverlayCodec.store(true, std::memory_order_relaxed);
+      startThread = true;
+    }
   }
 
-  // dvd's use special subtitle decoder
-  if(hints.codec == AV_CODEC_ID_DVD_SUBTITLE && filename == "dvd")
-    return true;
-
-  m_pOverlayCodec = CDVDFactoryCodec::CreateOverlayCodec(hints);
-  if (m_pOverlayCodec)
+  m_asyncParse.store(CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_videoSubtitleAsyncParse,
+                     std::memory_order_relaxed);
+  if (startThread && m_asyncParse.load(std::memory_order_relaxed))
   {
-    CLog::Log(LOGDEBUG, "Created subtitles overlay codec: {}", m_pOverlayCodec->GetName());
-    return true;
+    m_messageQueue.Init();
+    Create();
   }
-
-  CLog::Log(LOGERROR, "{} - Unable to init overlay codec", __FUNCTION__);
-  return false;
+  return true;
 }
 
 void CVideoPlayerSubtitle::CloseStream(bool bWaitForBuffers)
 {
+  if (IsRunning())
+  {
+    m_messageQueue.Abort();
+    m_wakeEvent.Set();
+    StopThread();
+    m_messageQueue.End();
+  }
+  m_usesTimedParser.store(false, std::memory_order_relaxed);
+  m_hasOverlayCodec.store(false, std::memory_order_relaxed);
+  m_hasPendingTiming.store(false, std::memory_order_relaxed);
+
   std::lock_guard lock(m_section);
 
   m_pSubtitleFileParser.reset();
@@ -194,10 +332,8 @@ void CVideoPlayerSubtitle::CloseStream(bool bWaitForBuffers)
     m_pOverlayContainer->Clear();
 }
 
-void CVideoPlayerSubtitle::Process(double pts, double offset)
+void CVideoPlayerSubtitle::ProcessParser(double pts, double offset)
 {
-  std::lock_guard lock(m_section);
-
   if (m_pSubtitleFileParser)
   {
     if(pts == DVD_NOPTS_VALUE)
@@ -230,6 +366,18 @@ void CVideoPlayerSubtitle::Process(double pts, double offset)
 
 bool CVideoPlayerSubtitle::AcceptsData() const
 {
+  if (m_asyncParse.load(std::memory_order_relaxed))
+  {
+    if (m_messageQueue.IsInited() && m_messageQueue.IsFull())
+      return false;
+    if (m_hasOverlayCodec.load(std::memory_order_relaxed))
+      return m_pOverlayContainer->GetSize() < 200;
+    return m_pOverlayContainer->GetSize() < 5;
+  }
+
+  if (m_pOverlayCodec)
+    return m_pOverlayContainer->GetSize() < 200;
+
   // FIXME : This may still be causing problems + magic number :(
   return m_pOverlayContainer->GetSize() < 5;
 }

@@ -16,6 +16,7 @@ if(AML_FOUND)
   list(APPEND SOURCES AMLCodec.cpp
                       DVDVideoCodecAmlogic.cpp)
   list(APPEND HEADERS AMLCodec.h
+                      AMLFrameMetadata.h
                       DVDVideoCodecAmlogic.h)
 endif()
 

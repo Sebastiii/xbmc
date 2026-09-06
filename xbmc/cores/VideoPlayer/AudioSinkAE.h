@@ -14,6 +14,7 @@
 #include "threads/CriticalSection.h"
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
 
 #include "PlatformDefs.h"
@@ -46,6 +47,7 @@ public:
   double GetMaxDelay(); // returns total time of audio in AE for the stream
   double GetDelay(); // returns the time it takes to play a packet if we add one at this time
   double GetSyncError() const;
+  bool IsSyncFromFirstCycle() const { return m_syncFromFirstCycle; }
   void SetSyncErrorCorrection(double correction);
 
   /*!
@@ -54,6 +56,7 @@ public:
   double GetResampleRatio() const;
 
   void SetResampleMode(int mode);
+  void SetHybridFirstCycleInterval(std::chrono::milliseconds interval);
   void Flush();
   void Drain();
   void AbortAddPackets();
@@ -83,4 +86,6 @@ protected:
 
   std::atomic_bool m_bAbort;
   CDVDClock *m_pClock;
+  std::chrono::milliseconds m_hybridFirstCycleInterval{0};
+  bool m_syncFromFirstCycle{false};
 };

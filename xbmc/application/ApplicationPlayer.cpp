@@ -550,6 +550,22 @@ void CApplicationPlayer::FrameAdvance(int frames)
     player->FrameAdvance(frames);
 }
 
+void CApplicationPlayer::WaitAsyncMainPace()
+{
+  std::shared_ptr<IPlayer> player = GetInternal();
+  if (player)
+    player->WaitAsyncMainPace();
+}
+
+uint64_t CApplicationPlayer::GetVisibleOverlaySetSignature(bool& animated) const
+{
+  const std::shared_ptr<const IPlayer> player = GetInternal();
+  if (player)
+    return player->GetVisibleOverlaySetSignature(animated);
+  animated = false;
+  return 0;
+}
+
 std::string CApplicationPlayer::GetPlayerState()
 {
   std::shared_ptr<IPlayer> player = GetInternal();
@@ -764,18 +780,18 @@ void CApplicationPlayer::LoadPage(int p, int sp, unsigned char* buffer)
     player->LoadPage(p, sp, buffer);
 }
 
-void CApplicationPlayer::GetAudioCapabilities(std::vector<int>& audioCaps) const
+void CApplicationPlayer::GetAudioCapabilities(std::vector<IPlayerAudioCaps>& caps) const
 {
   const std::shared_ptr<const IPlayer> player = GetInternal();
   if (player)
-    player->GetAudioCapabilities(audioCaps);
+    player->GetAudioCapabilities(caps);
 }
 
-void CApplicationPlayer::GetSubtitleCapabilities(std::vector<int>& subCaps) const
+void CApplicationPlayer::GetSubtitleCapabilities(std::vector<IPlayerSubtitleCaps>& caps) const
 {
   const std::shared_ptr<const IPlayer> player = GetInternal();
   if (player)
-    player->GetSubtitleCapabilities(subCaps);
+    player->GetSubtitleCapabilities(caps);
 }
 
 int  CApplicationPlayer::SeekChapter(int iChapter)
@@ -853,6 +869,20 @@ void CApplicationPlayer::FlushRenderer()
   std::shared_ptr<IPlayer> player = GetInternal();
   if (player)
     player->FlushRenderer();
+}
+
+void CApplicationPlayer::PreInitRenderer()
+{
+  std::shared_ptr<IPlayer> player = GetInternal();
+  if (player)
+    player->PreInitRenderer();
+}
+
+void CApplicationPlayer::UnInitRenderer()
+{
+  std::shared_ptr<IPlayer> player = GetInternal();
+  if (player)
+    player->UnInitRenderer();
 }
 
 void CApplicationPlayer::SetRenderViewMode(int mode, float zoom, float par, float shift, bool stretch)

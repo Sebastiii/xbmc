@@ -10,8 +10,11 @@
 
 #include "ActiveAE.h"
 #include "ActiveAEFilter.h"
+#include "ServiceBroker.h"
 #include "cores/AudioEngine/AEResampleFactory.h"
 #include "cores/AudioEngine/Utils/AEUtil.h"
+#include "settings/Settings.h"
+#include "settings/SettingsComponent.h"
 
 #include "utils/log.h"
 
@@ -78,6 +81,7 @@ CSampleBuffer* CActiveAEBufferPool::GetFreeBuffer()
     m_freeSamples.pop_front();
     buf->refCount = 1;
     buf->centerMixLevel = M_SQRT1_2;
+    buf->surroundMixLevel = M_SQRT1_2;
   }
   return buf;
 }
@@ -155,6 +159,11 @@ bool CActiveAEBufferPoolResample::Create(
   m_stereoUpmix = upmix;
   m_mixSubLevel = sublevel;
 
+  const std::shared_ptr<CSettings> settings =
+      CServiceBroker::GetSettingsComponent()->GetSettings();
+  m_boostCenter = settings->GetNumber(CSettings::SETTING_AUDIOOUTPUT_BOOSTCENTER);
+  m_lfeMixTo = settings->GetInt(CSettings::SETTING_AUDIOOUTPUT_LFEMIXTO);
+
   m_normalize = true;
   if ((m_format.m_channelLayout.Count() < m_inputFormat.m_channelLayout.Count() && !normalize))
     m_normalize = false;
@@ -189,8 +198,8 @@ void CActiveAEBufferPoolResample::ChangeResampler()
   srcConfig.dither_bits = CAEUtil::DataFormatToDitherBits(m_inputFormat.m_dataFormat);
 
   m_resampler->Init(dstConfig, srcConfig, m_stereoUpmix, m_normalize, m_centerMixLevel,
-                    m_remap ? &m_format.m_channelLayout : nullptr, m_resampleQuality,
-                    m_forceResampler, m_mixSubLevel);
+                    m_surroundMixLevel, m_remap ? &m_format.m_channelLayout : nullptr,
+                    m_resampleQuality, m_forceResampler, m_mixSubLevel);
 
   m_changeResampler = false;
 }
@@ -244,9 +253,11 @@ bool CActiveAEBufferPoolResample::ResampleBuffers(int64_t timestamp)
       if (hasInput && !skipInput && !m_changeResampler)
       {
         in = m_inputSamples.front();
-        if (in->centerMixLevel != m_centerMixLevel)
+        if (in->centerMixLevel != m_centerMixLevel ||
+            in->surroundMixLevel != m_surroundMixLevel)
         {
           m_centerMixLevel = in->centerMixLevel;
+          m_surroundMixLevel = in->surroundMixLevel;
           m_changeResampler = true;
           in = nullptr;
         }
@@ -360,13 +371,24 @@ void CActiveAEBufferPoolResample::ConfigureResampler(bool normalizelevels,
     normalize = false;
   }
 
-  if (m_normalize != normalize || m_resampleQuality != quality)
+  const std::shared_ptr<CSettings> settings =
+      CServiceBroker::GetSettingsComponent()->GetSettings();
+  double boostCenter = settings->GetNumber(CSettings::SETTING_AUDIOOUTPUT_BOOSTCENTER);
+  int lfeMixTo = settings->GetInt(CSettings::SETTING_AUDIOOUTPUT_LFEMIXTO);
+
+  if (m_normalize != normalize || m_resampleQuality != quality ||
+      m_stereoUpmix != stereoupmix || m_mixSubLevel != sublevel ||
+      m_boostCenter != boostCenter || m_lfeMixTo != lfeMixTo)
   {
     m_changeResampler = true;
   }
 
   m_resampleQuality = quality;
   m_normalize = normalize;
+  m_stereoUpmix = stereoupmix;
+  m_mixSubLevel = sublevel;
+  m_boostCenter = boostCenter;
+  m_lfeMixTo = lfeMixTo;
 }
 
 float CActiveAEBufferPoolResample::GetDelay()
@@ -374,17 +396,28 @@ float CActiveAEBufferPoolResample::GetDelay()
   float delay = 0;
   std::deque<CSampleBuffer*>::iterator itBuf;
 
+  const bool inIsRaw = m_inputFormat.m_dataFormat == AE_FMT_RAW;
+  const bool outIsRaw = m_format.m_dataFormat == AE_FMT_RAW;
+  const float rawInPacketTime =
+      inIsRaw ? static_cast<float>(m_inputFormat.m_streamInfo.GetDuration()) / 1000.0f : 0.0f;
+  const float rawOutPacketTime =
+      outIsRaw ? static_cast<float>(m_format.m_streamInfo.GetDuration()) / 1000.0f : 0.0f;
+
   if (m_procSample)
-    delay += (float)m_procSample->pkt->nb_samples / m_procSample->pkt->config.sample_rate;
+    delay += outIsRaw
+                 ? rawOutPacketTime
+                 : (float)m_procSample->pkt->nb_samples / m_procSample->pkt->config.sample_rate;
 
   for(itBuf=m_inputSamples.begin(); itBuf!=m_inputSamples.end(); ++itBuf)
   {
-    delay += (float)(*itBuf)->pkt->nb_samples / (*itBuf)->pkt->config.sample_rate;
+    delay += inIsRaw ? rawInPacketTime
+                     : (float)(*itBuf)->pkt->nb_samples / (*itBuf)->pkt->config.sample_rate;
   }
 
   for(itBuf=m_outputSamples.begin(); itBuf!=m_outputSamples.end(); ++itBuf)
   {
-    delay += (float)(*itBuf)->pkt->nb_samples / (*itBuf)->pkt->config.sample_rate;
+    delay += outIsRaw ? rawOutPacketTime
+                      : (float)(*itBuf)->pkt->nb_samples / (*itBuf)->pkt->config.sample_rate;
   }
 
   if (m_resampler)
@@ -564,7 +597,11 @@ bool CActiveAEBufferPoolAtempo::ProcessBuffers()
           in->pkt_start_offset = 0;
 
         // pts of last sample we added to the buffer
-        m_lastSamplePts += (in->pkt->nb_samples-in->pkt_start_offset) * 1000 / m_format.m_sampleRate;
+        if (m_format.m_dataFormat == AE_FMT_RAW)
+          m_lastSamplePts += static_cast<int64_t>(m_format.m_streamInfo.GetDuration());
+        else
+          m_lastSamplePts +=
+              (in->pkt->nb_samples - in->pkt_start_offset) * 1000 / m_format.m_sampleRate;
       }
 
       // calculate pts for last sample in m_procSample
@@ -649,17 +686,22 @@ void CActiveAEBufferPoolAtempo::Flush()
 float CActiveAEBufferPoolAtempo::GetDelay() const {
   float delay = 0;
 
+  const bool isRaw = m_format.m_dataFormat == AE_FMT_RAW;
+  const float rawPacketTime =
+      isRaw ? static_cast<float>(m_format.m_streamInfo.GetDuration()) / 1000.0f : 0.0f;
+
   if (m_procSample)
-    delay += (float)m_procSample->pkt->nb_samples / m_procSample->pkt->config.sample_rate;
+    delay += isRaw ? rawPacketTime
+                   : (float)m_procSample->pkt->nb_samples / m_procSample->pkt->config.sample_rate;
 
   for (auto &buf : m_inputSamples)
   {
-    delay += (float)buf->pkt->nb_samples / buf->pkt->config.sample_rate;
+    delay += isRaw ? rawPacketTime : (float)buf->pkt->nb_samples / buf->pkt->config.sample_rate;
   }
 
   for (auto &buf : m_outputSamples)
   {
-    delay += (float)buf->pkt->nb_samples / buf->pkt->config.sample_rate;
+    delay += isRaw ? rawPacketTime : (float)buf->pkt->nb_samples / buf->pkt->config.sample_rate;
   }
 
   if (m_pTempoFilter->IsActive())

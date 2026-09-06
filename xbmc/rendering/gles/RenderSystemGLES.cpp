@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2005-2018 Team Kodi
+ *  Copyright (C) 2005-2026 Team Kodi
  *  This file is part of Kodi - https://kodi.tv
  *
  *  SPDX-License-Identifier: GPL-2.0-or-later
@@ -8,29 +8,189 @@
 
 #include "RenderSystemGLES.h"
 
+#include "ServiceBroker.h"
+#include "URL.h"
 #include "guilib/DirtyRegion.h"
 #include "guilib/GUITextureGLES.h"
 #include "platform/MessagePrinter.h"
+#include "rendering/GLExtensions.h"
 #include "rendering/MatrixGL.h"
 #include "settings/AdvancedSettings.h"
 #include "settings/SettingsComponent.h"
+#include "utils/FileUtils.h"
 #include "utils/GLUtils.h"
 #include "utils/MathUtils.h"
 #include "utils/SystemInfo.h"
 #include "utils/TimeUtils.h"
 #include "utils/XTimeUtils.h"
+#include "utils/LogThrottle.h"
 #include "utils/log.h"
+#include "guilib/Shader.h"
 #include "windowing/GraphicContext.h"
+#include "windowing/WinSystem.h"
+
+#include <chrono>
 
 #if defined(TARGET_LINUX)
 #include "utils/EGLUtils.h"
 #endif
 
+#include <cmath>
+
 using namespace std::chrono_literals;
+
+namespace
+{
+thread_local GLint tlsSavedGuiRenderTargetViewport[4]{};
+thread_local GLint tlsSavedGuiRenderTargetScissor[4]{};
+thread_local GLint tlsSavedGuiRenderTargetFramebuffer{0};
+thread_local bool tlsGuiRenderTargetActive{false};
+thread_local bool tlsGuiRenderTargetFillBypass{false};
+thread_local bool tlsWorkerShaderScope{false};
+thread_local unsigned int tlsWorkerShaderEpoch{0};
+thread_local ShaderMethodGLES tlsMethod{ShaderMethodGLES::SM_DEFAULT};
+
+constexpr GLenum GUI_TIME_ELAPSED_EXT = 0x88BF;
+constexpr GLenum GUI_QUERY_RESULT_EXT = 0x8866;
+constexpr GLenum GUI_QUERY_RESULT_AVAILABLE_EXT = 0x8867;
+constexpr GLenum GUI_GPU_DISJOINT_EXT = 0x8FBB;
+constexpr size_t GUI_RENDER_TIMER_SLOTS = 4;
+
+using PFNGenQueriesEXT = void(GL_APIENTRYP)(GLsizei, GLuint*);
+using PFNDeleteQueriesEXT = void(GL_APIENTRYP)(GLsizei, const GLuint*);
+using PFNBeginQueryEXT = void(GL_APIENTRYP)(GLenum, GLuint);
+using PFNEndQueryEXT = void(GL_APIENTRYP)(GLenum);
+using PFNGetQueryObjectuivEXT = void(GL_APIENTRYP)(GLuint, GLenum, GLuint*);
+using PFNGetQueryObjectui64vEXT = void(GL_APIENTRYP)(GLuint, GLenum, GLuint64*);
+
+struct GuiRenderTimerApi
+{
+  PFNGenQueriesEXT genQueries{nullptr};
+  PFNDeleteQueriesEXT deleteQueries{nullptr};
+  PFNBeginQueryEXT beginQuery{nullptr};
+  PFNEndQueryEXT endQuery{nullptr};
+  PFNGetQueryObjectuivEXT getObjectuiv{nullptr};
+  PFNGetQueryObjectui64vEXT getObjectui64v{nullptr};
+  bool resolved{false};
+  bool usable{false};
+};
+
+GuiRenderTimerApi& GetGuiRenderTimerApi()
+{
+  static GuiRenderTimerApi api;
+  if (!api.resolved)
+  {
+    api.resolved = true;
+    api.genQueries = reinterpret_cast<PFNGenQueriesEXT>(eglGetProcAddress("glGenQueriesEXT"));
+    api.deleteQueries =
+        reinterpret_cast<PFNDeleteQueriesEXT>(eglGetProcAddress("glDeleteQueriesEXT"));
+    api.beginQuery = reinterpret_cast<PFNBeginQueryEXT>(eglGetProcAddress("glBeginQueryEXT"));
+    api.endQuery = reinterpret_cast<PFNEndQueryEXT>(eglGetProcAddress("glEndQueryEXT"));
+    api.getObjectuiv =
+        reinterpret_cast<PFNGetQueryObjectuivEXT>(eglGetProcAddress("glGetQueryObjectuivEXT"));
+    api.getObjectui64v =
+        reinterpret_cast<PFNGetQueryObjectui64vEXT>(eglGetProcAddress("glGetQueryObjectui64vEXT"));
+    api.usable = api.genQueries && api.deleteQueries && api.beginQuery && api.endQuery &&
+                 api.getObjectuiv && api.getObjectui64v;
+  }
+  return api;
+}
+
+thread_local GLuint tlsGuiRenderTimerQuery[GUI_RENDER_TIMER_SLOTS]{};
+thread_local bool tlsGuiRenderTimerPending[GUI_RENDER_TIMER_SLOTS]{};
+thread_local size_t tlsGuiRenderTimerHead{0};
+thread_local size_t tlsGuiRenderTimerTail{0};
+thread_local bool tlsGuiRenderTimerActive{false};
+
+class CGUIRenderTargetGLES final : public CGUIRenderTargetFBO
+{
+public:
+  CGUIRenderTargetGLES(unsigned int width, unsigned int height)
+    : m_width(width), m_height(height)
+  {
+  }
+
+  ~CGUIRenderTargetGLES() override
+  {
+    if (m_depthBuffer != 0)
+      glDeleteRenderbuffers(1, &m_depthBuffer);
+    if (m_framebuffer != 0)
+      glDeleteFramebuffers(1, &m_framebuffer);
+    if (m_texture != 0)
+      glDeleteTextures(1, &m_texture);
+  }
+
+  unsigned int GetWidth() const override { return m_width; }
+  unsigned int GetHeight() const override { return m_height; }
+
+  GLuint GetFramebuffer() const { return m_framebuffer; }
+  GLuint GetTexture() const { return m_texture; }
+  void SetFramebuffer(GLuint framebuffer) { m_framebuffer = framebuffer; }
+  void SetTexture(GLuint texture) { m_texture = texture; }
+  void SetDepthBuffer(GLuint depthBuffer) { m_depthBuffer = depthBuffer; }
+
+private:
+  unsigned int m_width{0};
+  unsigned int m_height{0};
+  GLuint m_framebuffer{0};
+  GLuint m_texture{0};
+  GLuint m_depthBuffer{0};
+};
+}
 
 CRenderSystemGLES::CRenderSystemGLES()
  : CRenderSystemBase()
 {
+}
+
+const std::array<std::unique_ptr<CGLESShader>, CRenderSystemGLES::SM_COUNT>& CRenderSystemGLES::
+    activeShaderArray() const
+{
+  return tlsWorkerShaderScope ? m_pShaderWorker : m_pShader;
+}
+
+std::array<std::unique_ptr<CGLESShader>, CRenderSystemGLES::SM_COUNT>& CRenderSystemGLES::
+    activeShaderArray()
+{
+  return tlsWorkerShaderScope ? m_pShaderWorker : m_pShader;
+}
+
+CGLESShader* CRenderSystemGLES::shader(ShaderMethodGLES m) const
+{
+  return activeShaderArray()[static_cast<size_t>(m)].get();
+}
+
+std::unique_ptr<CGLESShader>& CRenderSystemGLES::shaderSlot(ShaderMethodGLES m)
+{
+  return activeShaderArray()[static_cast<size_t>(m)];
+}
+
+void CRenderSystemGLES::SetThreadGuiShaderScope(bool worker)
+{
+  tlsWorkerShaderScope = worker;
+}
+
+void CRenderSystemGLES::ReleaseThreadGuiShaders()
+{
+  ReleaseShaders();
+  tlsWorkerShaderEpoch = 0;
+
+  auto& api = GetGuiRenderTimerApi();
+  for (size_t i = 0; i < GUI_RENDER_TIMER_SLOTS; ++i)
+  {
+    if (tlsGuiRenderTimerQuery[i] != 0 && api.usable)
+      api.deleteQueries(1, &tlsGuiRenderTimerQuery[i]);
+    tlsGuiRenderTimerQuery[i] = 0;
+    tlsGuiRenderTimerPending[i] = false;
+  }
+  tlsGuiRenderTimerHead = 0;
+  tlsGuiRenderTimerTail = 0;
+  tlsGuiRenderTimerActive = false;
+}
+
+unsigned int CRenderSystemGLES::GetGuiShaderEpoch() const
+{
+  return m_guiShaderEpoch.load(std::memory_order_relaxed);
 }
 
 bool CRenderSystemGLES::InitRenderSystem()
@@ -75,8 +235,7 @@ bool CRenderSystemGLES::InitRenderSystem()
     m_RenderExtensions += " ";
   }
 
-#if defined(GL_KHR_debug) && defined(TARGET_LINUX) \
-    && !defined(HAS_LIBAMCODEC)
+#if defined(GL_KHR_debug) && defined(TARGET_LINUX)
   if (CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_openGlDebugging)
   {
     if (IsExtSupported("GL_KHR_debug"))
@@ -111,7 +270,9 @@ bool CRenderSystemGLES::InitRenderSystem()
 
   m_bRenderCreated = true;
 
+  Shaders::LogShaderBinaryCacheState();
   InitialiseShaders();
+  WarmAllGuiHdrModeShaderCaches();
 
   CGUITextureGLES::Register();
 
@@ -145,8 +306,7 @@ bool CRenderSystemGLES::ResetRenderSystem(int width, int height)
   glMatrixTexture.Load();
 
   glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-  glEnable(GL_BLEND);          // Turn Blending On
-  glDisable(GL_DEPTH_TEST);
+  glEnable(GL_BLEND); // Turn Blending On
 
   return true;
 }
@@ -163,6 +323,8 @@ bool CRenderSystemGLES::DestroyRenderSystem()
   PresentRenderImpl(true);
 
   ReleaseShaders();
+  for (auto& workerSlot : m_pShaderWorker)
+    workerSlot.reset();
   m_bRenderCreated = false;
 
   return true;
@@ -174,17 +336,20 @@ bool CRenderSystemGLES::BeginRender()
     return false;
 
   const bool useLimited = CServiceBroker::GetWinSystem()->UseLimitedColor();
-  const bool usePQ = CServiceBroker::GetWinSystem()->GetGfxContext().IsTransferPQ();
+  const GuiHdr useGuiHdr = CServiceBroker::GetWinSystem()->GetGfxContext().GetGuiHdr();
 
-  if (m_limitedColorRange != useLimited || m_transferPQ != usePQ)
+  if (m_limitedColorRange != useLimited || m_guiHdr != useGuiHdr)
   {
     ReleaseShaders();
 
     m_limitedColorRange = useLimited;
-    m_transferPQ = usePQ;
+    m_guiHdr = useGuiHdr;
 
     InitialiseShaders();
+    m_guiShaderEpoch.fetch_add(1, std::memory_order_relaxed);
   }
+
+  CGLESShader::RefreshFrameGuiValues();
 
   return true;
 }
@@ -195,6 +360,407 @@ bool CRenderSystemGLES::EndRender()
     return false;
 
   return true;
+}
+
+bool CRenderSystemGLES::SupportsGuiRenderTargets() const
+{
+  return m_bRenderCreated;
+}
+
+std::unique_ptr<CGUIRenderTargetFBO> CRenderSystemGLES::CreateGuiRenderTarget(unsigned int width,
+                                                                           unsigned int height)
+{
+  if (!m_bRenderCreated || width == 0 || height == 0)
+    return {};
+
+  auto target = std::make_unique<CGUIRenderTargetGLES>(width, height);
+
+  GLint previousFramebuffer = 0;
+  GLint previousRenderbuffer = 0;
+  GLint previousTexture = 0;
+  glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previousFramebuffer);
+  glGetIntegerv(GL_RENDERBUFFER_BINDING, &previousRenderbuffer);
+  glGetIntegerv(GL_TEXTURE_BINDING_2D, &previousTexture);
+
+  GLuint texture = 0;
+  GLuint framebuffer = 0;
+  GLuint depthBuffer = 0;
+
+  glGenTextures(1, &texture);
+  glBindTexture(GL_TEXTURE_2D, texture);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+
+  glGenFramebuffers(1, &framebuffer);
+  glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+
+  glGenRenderbuffers(1, &depthBuffer);
+  glBindRenderbuffer(GL_RENDERBUFFER, depthBuffer);
+  glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, width, height);
+  glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depthBuffer);
+
+  static std::atomic<bool> s_guiTargetFailLogged{false};
+  if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+  {
+    if (!s_guiTargetFailLogged.exchange(true, std::memory_order_relaxed))
+      logM(LOGERROR, "GLES: failed to create GUI render target {}x{} (status: 0x{:04x})", width,
+           height, glCheckFramebufferStatus(GL_FRAMEBUFFER));
+    if (depthBuffer != 0)
+      glDeleteRenderbuffers(1, &depthBuffer);
+    if (framebuffer != 0)
+      glDeleteFramebuffers(1, &framebuffer);
+    if (texture != 0)
+      glDeleteTextures(1, &texture);
+    glBindFramebuffer(GL_FRAMEBUFFER, previousFramebuffer);
+    glBindRenderbuffer(GL_RENDERBUFFER, previousRenderbuffer);
+    glBindTexture(GL_TEXTURE_2D, previousTexture);
+    return {};
+  }
+  s_guiTargetFailLogged.store(false, std::memory_order_relaxed);
+
+  target->SetTexture(texture);
+  target->SetFramebuffer(framebuffer);
+  target->SetDepthBuffer(depthBuffer);
+
+  glBindFramebuffer(GL_FRAMEBUFFER, previousFramebuffer);
+  glBindRenderbuffer(GL_RENDERBUFFER, previousRenderbuffer);
+  glBindTexture(GL_TEXTURE_2D, previousTexture);
+
+  return target;
+}
+
+bool CRenderSystemGLES::BeginGuiRenderTarget(CGUIRenderTargetFBO& target)
+{
+  if (!BindGuiRenderTarget(target))
+    return false;
+
+  return ClearBuffers(0);
+}
+
+bool CRenderSystemGLES::BeginGuiRenderTargetPersistent(CGUIRenderTargetFBO& target, bool clearColor)
+{
+  if (!BindGuiRenderTarget(target))
+    return false;
+
+  if (clearColor)
+    return ClearBuffers(0);
+
+  const auto settingsComponent = CServiceBroker::GetSettingsComponent();
+  const auto advancedSettings = settingsComponent ? settingsComponent->GetAdvancedSettings() : nullptr;
+  if (advancedSettings && advancedSettings->m_guiFrontToBackRendering)
+  {
+    glClearDepthf(0);
+    glDepthMask(GL_TRUE);
+    glClear(GL_DEPTH_BUFFER_BIT);
+  }
+
+  return true;
+}
+
+bool CRenderSystemGLES::SupportsGuiRenderTargetConvert() const
+{
+  return m_srgbCompositeEnabled && m_guiHdr != GuiHdr::SDR &&
+         shader(ShaderMethodGLES::SM_TEXTURE_RAW_CONVERT) != nullptr;
+}
+
+bool CRenderSystemGLES::BindGuiRenderTarget(CGUIRenderTargetFBO& target)
+{
+  auto* glesTarget = dynamic_cast<CGUIRenderTargetGLES*>(&target);
+  if (!m_bRenderCreated || !glesTarget || tlsGuiRenderTargetActive)
+    return false;
+
+  if (tlsWorkerShaderScope)
+  {
+    const unsigned int epoch = m_guiShaderEpoch.load(std::memory_order_relaxed);
+    if (tlsWorkerShaderEpoch != epoch)
+    {
+      ReleaseShaders();
+      InitialiseShaders();
+      tlsWorkerShaderEpoch = epoch;
+    }
+  }
+
+  glGetIntegerv(GL_FRAMEBUFFER_BINDING, &tlsSavedGuiRenderTargetFramebuffer);
+  glGetIntegerv(GL_VIEWPORT, tlsSavedGuiRenderTargetViewport);
+  glGetIntegerv(GL_SCISSOR_BOX, tlsSavedGuiRenderTargetScissor);
+
+  glBindFramebuffer(GL_FRAMEBUFFER, glesTarget->GetFramebuffer());
+  glViewport(0, 0, glesTarget->GetWidth(), glesTarget->GetHeight());
+  glScissor(0, 0, glesTarget->GetWidth(), glesTarget->GetHeight());
+
+  m_viewPort[0] = 0;
+  m_viewPort[1] = 0;
+  m_viewPort[2] = glesTarget->GetWidth();
+  m_viewPort[3] = glesTarget->GetHeight();
+  tlsGuiRenderTargetActive = true;
+  tlsGuiRenderTargetFillBypass = m_srgbCompositeEnabled && m_guiHdr != GuiHdr::SDR &&
+                                 shader(ShaderMethodGLES::SM_TEXTURE_RAW_CONVERT) != nullptr;
+
+  return true;
+}
+
+void CRenderSystemGLES::EndGuiRenderTarget(CGUIRenderTargetFBO& target)
+{
+  auto* glesTarget = dynamic_cast<CGUIRenderTargetGLES*>(&target);
+  if (!glesTarget || !tlsGuiRenderTargetActive)
+    return;
+
+  glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(tlsSavedGuiRenderTargetFramebuffer));
+  glViewport(tlsSavedGuiRenderTargetViewport[0], tlsSavedGuiRenderTargetViewport[1],
+             tlsSavedGuiRenderTargetViewport[2], tlsSavedGuiRenderTargetViewport[3]);
+  glScissor(tlsSavedGuiRenderTargetScissor[0], tlsSavedGuiRenderTargetScissor[1],
+            tlsSavedGuiRenderTargetScissor[2], tlsSavedGuiRenderTargetScissor[3]);
+
+  m_viewPort[0] = tlsSavedGuiRenderTargetViewport[0];
+  m_viewPort[1] = tlsSavedGuiRenderTargetViewport[1];
+  m_viewPort[2] = tlsSavedGuiRenderTargetViewport[2];
+  m_viewPort[3] = tlsSavedGuiRenderTargetViewport[3];
+  tlsGuiRenderTargetActive = false;
+  tlsGuiRenderTargetFillBypass = false;
+}
+
+bool CRenderSystemGLES::RenderGuiRenderTarget(const CGUIRenderTargetFBO& target, bool replace)
+{
+  const auto* glesTarget = dynamic_cast<const CGUIRenderTargetGLES*>(&target);
+  if (!m_bRenderCreated || !glesTarget)
+    return false;
+
+  const float fboWidth = static_cast<float>(glesTarget->GetWidth());
+  const float fboHeight = static_cast<float>(glesTarget->GetHeight());
+  if (fboWidth <= 0.0f || fboHeight <= 0.0f)
+    return false;
+  const CRect full(0.0f, 0.0f, fboWidth, fboHeight);
+
+  constexpr size_t maxQuads = CGUIRenderTargetFBO::MAX_CONTENT_RECTS;
+  CRect quads[maxQuads];
+  size_t quadCount = 0;
+  const std::vector<CRect>& content = target.GetContentRects();
+  if (content.empty() || content.size() > maxQuads)
+  {
+    quads[quadCount++] = full;
+  }
+  else
+  {
+    for (const CRect& candidate : content)
+    {
+      CRect clipped = candidate;
+      clipped.Intersect(full);
+      if (!clipped.IsEmpty())
+        quads[quadCount++] = clipped;
+    }
+  }
+  if (quadCount == 0)
+    quads[quadCount++] = full;
+
+  GLubyte idx[4] = {0, 1, 3, 2};
+  GLfloat ver[4][3] = {};
+  GLfloat tex[4][2] = {};
+
+  const bool convertOnComposite = m_srgbCompositeEnabled && m_guiHdr != GuiHdr::SDR &&
+                                  shader(ShaderMethodGLES::SM_TEXTURE_RAW_CONVERT) != nullptr;
+  const ShaderMethodGLES method = convertOnComposite ? ShaderMethodGLES::SM_TEXTURE_RAW_CONVERT
+                                                     : ShaderMethodGLES::SM_TEXTURE_RAW;
+  if (!shader(method))
+    return false;
+
+  glActiveTexture(GL_TEXTURE0);
+  glBindTexture(GL_TEXTURE_2D, glesTarget->GetTexture());
+  if (replace)
+  {
+    glDisable(GL_BLEND);
+  }
+  else
+  {
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_BLEND);
+  }
+  glDisable(GL_DEPTH_TEST);
+  glDepthMask(GL_FALSE);
+
+  EnableGUIShader(method);
+
+  GLint posLoc = GUIShaderGetPos();
+  GLint tex0Loc = GUIShaderGetCoord0();
+  GLint uniColLoc = GUIShaderGetUniCol();
+  GLint depthLoc = GUIShaderGetDepth();
+
+  glVertexAttribPointer(posLoc, 3, GL_FLOAT, 0, 0, ver);
+  glVertexAttribPointer(tex0Loc, 2, GL_FLOAT, 0, 0, tex);
+  glEnableVertexAttribArray(posLoc);
+  glEnableVertexAttribArray(tex0Loc);
+
+  glUniform4f(uniColLoc, 1.0f, 1.0f, 1.0f, 1.0f);
+  glUniform1f(depthLoc, 0.0f);
+
+  for (size_t quad = 0; quad < quadCount; ++quad)
+  {
+    const CRect& rect = quads[quad];
+    ver[0][0] = rect.x1;
+    ver[0][1] = rect.y1;
+    ver[1][0] = rect.x2;
+    ver[1][1] = rect.y1;
+    ver[2][0] = rect.x2;
+    ver[2][1] = rect.y2;
+    ver[3][0] = rect.x1;
+    ver[3][1] = rect.y2;
+
+    const float u1 = rect.x1 / fboWidth;
+    const float u2 = rect.x2 / fboWidth;
+    const float v1 = 1.0f - rect.y1 / fboHeight;
+    const float v2 = 1.0f - rect.y2 / fboHeight;
+    tex[0][0] = u1;
+    tex[0][1] = v1;
+    tex[1][0] = u2;
+    tex[1][1] = v1;
+    tex[2][0] = u2;
+    tex[2][1] = v2;
+    tex[3][0] = u1;
+    tex[3][1] = v2;
+
+    glDrawElements(GL_TRIANGLE_STRIP, 4, GL_UNSIGNED_BYTE, idx);
+  }
+
+  glDisableVertexAttribArray(posLoc);
+  glDisableVertexAttribArray(tex0Loc);
+  DisableGUIShader();
+
+  auto& depthGfx = CServiceBroker::GetWinSystem()->GetGfxContext();
+  depthGfx.SetRenderOrder(depthGfx.GetRenderOrder());
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+  return true;
+}
+
+void* CRenderSystemGLES::CreateGuiRenderFence()
+{
+  if (!m_bRenderCreated)
+    return nullptr;
+  return glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+}
+
+bool CRenderSystemGLES::WaitGuiRenderFence(void* fence, bool poll)
+{
+  if (!fence)
+    return true;
+  constexpr GLuint64 boundedWaitNs = 100000000;
+  const GLenum result = glClientWaitSync(static_cast<GLsync>(fence), GL_SYNC_FLUSH_COMMANDS_BIT,
+                                         poll ? 0 : boundedWaitNs);
+  return result == GL_ALREADY_SIGNALED || result == GL_CONDITION_SATISFIED;
+}
+
+bool CRenderSystemGLES::WaitGuiRenderFenceBounded(void* fence, uint64_t maxWaitNs)
+{
+  if (!fence)
+    return true;
+  const GLenum result = glClientWaitSync(static_cast<GLsync>(fence), GL_SYNC_FLUSH_COMMANDS_BIT,
+                                         static_cast<GLuint64>(maxWaitNs));
+  return result == GL_ALREADY_SIGNALED || result == GL_CONDITION_SATISFIED;
+}
+
+void CRenderSystemGLES::DeleteGuiRenderFence(void* fence)
+{
+  if (fence)
+    glDeleteSync(static_cast<GLsync>(fence));
+}
+
+bool CRenderSystemGLES::SupportsGuiRenderTimer() const
+{
+  if (!m_bRenderCreated || !IsExtSupported("GL_EXT_disjoint_timer_query"))
+    return false;
+  return GetGuiRenderTimerApi().usable;
+}
+
+void CRenderSystemGLES::BeginGuiRenderTimer()
+{
+  if (tlsGuiRenderTimerActive || tlsGuiRenderTimerPending[tlsGuiRenderTimerHead])
+    return;
+  auto& api = GetGuiRenderTimerApi();
+  if (!api.usable)
+    return;
+  GLuint& query = tlsGuiRenderTimerQuery[tlsGuiRenderTimerHead];
+  if (query == 0)
+    api.genQueries(1, &query);
+  if (query == 0)
+    return;
+  api.beginQuery(GUI_TIME_ELAPSED_EXT, query);
+  tlsGuiRenderTimerActive = true;
+}
+
+void CRenderSystemGLES::EndGuiRenderTimer()
+{
+  if (!tlsGuiRenderTimerActive)
+    return;
+  auto& api = GetGuiRenderTimerApi();
+  api.endQuery(GUI_TIME_ELAPSED_EXT);
+  tlsGuiRenderTimerActive = false;
+  tlsGuiRenderTimerPending[tlsGuiRenderTimerHead] = true;
+  tlsGuiRenderTimerHead = (tlsGuiRenderTimerHead + 1) % GUI_RENDER_TIMER_SLOTS;
+}
+
+bool CRenderSystemGLES::PollGuiRenderTimerNs(uint64_t& elapsedNs)
+{
+  if (!tlsGuiRenderTimerPending[tlsGuiRenderTimerTail])
+    return false;
+  auto& api = GetGuiRenderTimerApi();
+  if (!api.usable)
+    return false;
+  const GLuint query = tlsGuiRenderTimerQuery[tlsGuiRenderTimerTail];
+  GLuint available = 0;
+  api.getObjectuiv(query, GUI_QUERY_RESULT_AVAILABLE_EXT, &available);
+  if (!available)
+    return false;
+  GLuint64 result = 0;
+  api.getObjectui64v(query, GUI_QUERY_RESULT_EXT, &result);
+  GLint disjoint = 0;
+  glGetIntegerv(GUI_GPU_DISJOINT_EXT, &disjoint);
+  tlsGuiRenderTimerPending[tlsGuiRenderTimerTail] = false;
+  tlsGuiRenderTimerTail = (tlsGuiRenderTimerTail + 1) % GUI_RENDER_TIMER_SLOTS;
+  if (disjoint)
+    return false;
+  elapsedNs = result;
+  return true;
+}
+
+void CRenderSystemGLES::EstablishGuiRenderBaseline(unsigned int width, unsigned int height)
+{
+  if (!m_bRenderCreated)
+    return;
+  glEnable(GL_SCISSOR_TEST);
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+  glActiveTexture(GL_TEXTURE0);
+  glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+  glViewport(0, 0, width, height);
+  glScissor(0, 0, width, height);
+  m_viewPort[0] = 0;
+  m_viewPort[1] = 0;
+  m_viewPort[2] = width;
+  m_viewPort[3] = height;
+}
+
+void CRenderSystemGLES::InvalidateColorBuffer()
+{
+  if (!m_bRenderCreated)
+    return;
+
+  // some platforms prefer a clear, instead of rendering over
+  if (!CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_guiGeometryClear)
+  {
+    ClearBuffers(0);
+    return;
+  }
+
+  if (!CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_guiFrontToBackRendering)
+    return;
+
+  glClearDepthf(0);
+  glDepthMask(true);
+  glClear(GL_DEPTH_BUFFER_BIT);
 }
 
 bool CRenderSystemGLES::ClearBuffers(UTILS::COLOR::Color color)
@@ -210,6 +776,14 @@ bool CRenderSystemGLES::ClearBuffers(UTILS::COLOR::Color color)
   glClearColor(r, g, b, a);
 
   GLbitfield flags = GL_COLOR_BUFFER_BIT;
+
+  if (CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_guiFrontToBackRendering)
+  {
+    glClearDepthf(0);
+    glDepthMask(GL_TRUE);
+    flags |= GL_DEPTH_BUFFER_BIT;
+  }
+
   glClear(flags);
 
   return true;
@@ -242,9 +816,31 @@ void CRenderSystemGLES::PresentRender(bool rendered, bool videoLayer)
 
   PresentRenderImpl(rendered);
 
+  static auto s_lastRenderedFrame = std::chrono::steady_clock::now();
+  if (rendered)
+    s_lastRenderedFrame = std::chrono::steady_clock::now();
+
   // if video is rendered to a separate layer, we should not block this thread
   if (!rendered && !videoLayer)
-    KODI::TIME::Sleep(40ms);
+  {
+    auto sleepTime = 40ms;
+    const auto settingsComponent = CServiceBroker::GetSettingsComponent();
+    const auto advancedSettings =
+        settingsComponent ? settingsComponent->GetAdvancedSettings() : nullptr;
+    const int activeWindow = advancedSettings ? advancedSettings->m_guiSkipSleepActiveWindow : 0;
+    if (activeWindow > 0 &&
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - s_lastRenderedFrame) <
+            std::chrono::milliseconds(activeWindow))
+    {
+      const float fps = CServiceBroker::GetWinSystem()->GetGfxContext().GetFPS();
+      const auto interval = std::chrono::milliseconds(
+          static_cast<int64_t>(1000.0f / (fps > 1.0f ? fps : 60.0f)));
+      if (interval < sleepTime)
+        sleepTime = interval;
+    }
+    KODI::TIME::Sleep(sleepTime);
+  }
 }
 
 void CRenderSystemGLES::SetVSync(bool enable)
@@ -357,20 +953,20 @@ void CRenderSystemGLES::SetViewPort(const CRect& viewPort)
 
 bool CRenderSystemGLES::ScissorsCanEffectClipping()
 {
-  if (m_pShader[m_method])
-    return m_pShader[m_method]->HardwareClipIsPossible();
+  if (shader(tlsMethod))
+    return shader(tlsMethod)->HardwareClipIsPossible();
 
   return false;
 }
 
 CRect CRenderSystemGLES::ClipRectToScissorRect(const CRect &rect)
 {
-  if (!m_pShader[m_method])
+  if (!shader(tlsMethod))
     return CRect();
-  float xFactor = m_pShader[m_method]->GetClipXFactor();
-  float xOffset = m_pShader[m_method]->GetClipXOffset();
-  float yFactor = m_pShader[m_method]->GetClipYFactor();
-  float yOffset = m_pShader[m_method]->GetClipYOffset();
+  float xFactor = shader(tlsMethod)->GetClipXFactor();
+  float xOffset = shader(tlsMethod)->GetClipXOffset();
+  float yFactor = shader(tlsMethod)->GetClipYFactor();
+  float yOffset = shader(tlsMethod)->GetClipYOffset();
   return CRect(rect.x1 * xFactor + xOffset,
                rect.y1 * yFactor + yOffset,
                rect.x2 * xFactor + xOffset,
@@ -381,10 +977,10 @@ void CRenderSystemGLES::SetScissors(const CRect &rect)
 {
   if (!m_bRenderCreated)
     return;
-  GLint x1 = MathUtils::round_int(static_cast<double>(rect.x1));
-  GLint y1 = MathUtils::round_int(static_cast<double>(rect.y1));
-  GLint x2 = MathUtils::round_int(static_cast<double>(rect.x2));
-  GLint y2 = MathUtils::round_int(static_cast<double>(rect.y2));
+  GLint x1 = static_cast<GLint>(std::floor(rect.x1));
+  GLint y1 = static_cast<GLint>(std::floor(rect.y1));
+  GLint x2 = static_cast<GLint>(std::ceil(rect.x2));
+  GLint y2 = static_cast<GLint>(std::ceil(rect.y2));
   glScissor(x1, m_height - y2, x2-x1, y2-y1);
 }
 
@@ -393,302 +989,533 @@ void CRenderSystemGLES::ResetScissors()
   SetScissors(CRect(0, 0, (float)m_width, (float)m_height));
 }
 
+void CRenderSystemGLES::SetDepthCulling(DEPTH_CULLING culling)
+{
+  if (culling == DEPTH_CULLING_OFF)
+  {
+    glDisable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
+  }
+  else if (culling == DEPTH_CULLING_BACK_TO_FRONT)
+  {
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
+    glDepthFunc(GL_GEQUAL);
+  }
+  else if (culling == DEPTH_CULLING_FRONT_TO_BACK)
+  {
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+    glDepthFunc(GL_GREATER);
+  }
+}
+
 void CRenderSystemGLES::InitialiseShaders()
 {
   std::string defines;
-  std::string definesNoPQ;
+  std::string definesHdrPgsPqOutput;
+  std::string definesHdrPgsSdrOutput;
   m_limitedColorRange = CServiceBroker::GetWinSystem()->UseLimitedColor();
   if (m_limitedColorRange)
   {
     defines += "#define KODI_LIMITED_RANGE 1\n";
-    definesNoPQ += "#define KODI_LIMITED_RANGE 1\n";
+    definesHdrPgsPqOutput += "#define KODI_LIMITED_RANGE 1\n";
+    definesHdrPgsSdrOutput += "#define KODI_LIMITED_RANGE 1\n";
   }
 
-  // SM_TEXTURE_NOBLEND_NO_PQ is used for HDR-authored overlays (e.g. HDR PGS).
-  definesNoPQ += "#define KODI_HDR_PGS_ADJUST 1\n";
+  definesHdrPgsPqOutput += "#define KODI_HDR_PGS_PQ_OUTPUT 1\n";
+  definesHdrPgsPqOutput += "#define KODI_PREMULTIPLIED_ALPHA 1\n";
+  definesHdrPgsSdrOutput += "#define KODI_HDR_PGS_SDR_OUTPUT 1\n";
+  definesHdrPgsSdrOutput += "#define KODI_PREMULTIPLIED_ALPHA 1\n";
 
-  if (m_transferPQ)
-  {
+  m_guiHdr = CServiceBroker::GetWinSystem()->GetGfxContext().GetGuiHdr();
+  if (m_guiHdr == GuiHdr::HDR_PQ)
     defines += "#define KODI_TRANSFER_PQ 1\n";
-  }
+  else if (m_guiHdr == GuiHdr::HDR)
+    defines += "#define KODI_TRANSFER_HDR 1\n";
 
-  m_pShader[ShaderMethodGLES::SM_DEFAULT] =
+  std::string definesPma = defines + "#define KODI_PREMULTIPLIED_ALPHA 1\n";
+  std::string definesSdrImageSubs = definesPma + "#define KODI_SDR_IMAGE_SUBS 1\n";
+
+  shaderSlot(ShaderMethodGLES::SM_DEFAULT) =
       std::make_unique<CGLESShader>("gles_shader.vert", "gles_shader_default.frag", defines);
-  if (!m_pShader[ShaderMethodGLES::SM_DEFAULT]->CompileAndLink())
+  if (!shaderSlot(ShaderMethodGLES::SM_DEFAULT)->CompileAndLink())
   {
-    m_pShader[ShaderMethodGLES::SM_DEFAULT]->Free();
-    m_pShader[ShaderMethodGLES::SM_DEFAULT].reset();
+    shaderSlot(ShaderMethodGLES::SM_DEFAULT)->Free();
+    shaderSlot(ShaderMethodGLES::SM_DEFAULT).reset();
     CLog::Log(LOGERROR, "GUI Shader gles_shader_default.frag - compile and link failed");
   }
 
-  m_pShader[ShaderMethodGLES::SM_TEXTURE] =
+  shaderSlot(ShaderMethodGLES::SM_TEXTURE) =
       std::make_unique<CGLESShader>("gles_shader_texture.frag", defines);
-  if (!m_pShader[ShaderMethodGLES::SM_TEXTURE]->CompileAndLink())
+  if (!shaderSlot(ShaderMethodGLES::SM_TEXTURE)->CompileAndLink())
   {
-    m_pShader[ShaderMethodGLES::SM_TEXTURE]->Free();
-    m_pShader[ShaderMethodGLES::SM_TEXTURE].reset();
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE)->Free();
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE).reset();
     CLog::Log(LOGERROR, "GUI Shader gles_shader_texture.frag - compile and link failed");
   }
 
-  m_pShader[ShaderMethodGLES::SM_MULTI] =
-      std::make_unique<CGLESShader>("gles_shader_multi.frag", defines);
-  if (!m_pShader[ShaderMethodGLES::SM_MULTI]->CompileAndLink())
+  shaderSlot(ShaderMethodGLES::SM_TEXTURE_111R) =
+      std::make_unique<CGLESShader>("gles_shader_texture_111r.frag", defines);
+  if (!shaderSlot(ShaderMethodGLES::SM_TEXTURE_111R)->CompileAndLink())
   {
-    m_pShader[ShaderMethodGLES::SM_MULTI]->Free();
-    m_pShader[ShaderMethodGLES::SM_MULTI].reset();
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_111R)->Free();
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_111R).reset();
+    CLog::Log(LOGERROR, "GUI Shader gles_shader_texture_111r.frag - compile and link failed");
+  }
+
+  shaderSlot(ShaderMethodGLES::SM_MULTI) =
+      std::make_unique<CGLESShader>("gles_shader_multi.frag", defines);
+  if (!shaderSlot(ShaderMethodGLES::SM_MULTI)->CompileAndLink())
+  {
+    shaderSlot(ShaderMethodGLES::SM_MULTI)->Free();
+    shaderSlot(ShaderMethodGLES::SM_MULTI).reset();
     CLog::Log(LOGERROR, "GUI Shader gles_shader_multi.frag - compile and link failed");
   }
 
-  m_pShader[ShaderMethodGLES::SM_FONTS] =
-      std::make_unique<CGLESShader>("gles_shader_fonts.frag", defines);
-  if (!m_pShader[ShaderMethodGLES::SM_FONTS]->CompileAndLink())
+  shaderSlot(ShaderMethodGLES::SM_MULTI_RGBA_111R) =
+      std::make_unique<CGLESShader>("gles_shader_multi_rgba_111r.frag", defines);
+  if (!shaderSlot(ShaderMethodGLES::SM_MULTI_RGBA_111R)->CompileAndLink())
   {
-    m_pShader[ShaderMethodGLES::SM_FONTS]->Free();
-    m_pShader[ShaderMethodGLES::SM_FONTS].reset();
+    shaderSlot(ShaderMethodGLES::SM_MULTI_RGBA_111R)->Free();
+    shaderSlot(ShaderMethodGLES::SM_MULTI_RGBA_111R).reset();
+    CLog::Log(LOGERROR, "GUI Shader gles_shader_multi_rgba_111r.frag - compile and link failed");
+  }
+
+  shaderSlot(ShaderMethodGLES::SM_FONTS) =
+      std::make_unique<CGLESShader>("gles_shader_simple.vert", "gles_shader_fonts.frag", defines);
+  if (!shaderSlot(ShaderMethodGLES::SM_FONTS)->CompileAndLink())
+  {
+    shaderSlot(ShaderMethodGLES::SM_FONTS)->Free();
+    shaderSlot(ShaderMethodGLES::SM_FONTS).reset();
     CLog::Log(LOGERROR, "GUI Shader gles_shader_fonts.frag - compile and link failed");
   }
 
-  m_pShader[ShaderMethodGLES::SM_TEXTURE_NOBLEND] =
-      std::make_unique<CGLESShader>("gles_shader_texture_noblend.frag", defines);
-  if (!m_pShader[ShaderMethodGLES::SM_TEXTURE_NOBLEND]->CompileAndLink())
+  shaderSlot(ShaderMethodGLES::SM_FONTS_SHADER_CLIP) =
+      std::make_unique<CGLESShader>("gles_shader_clip.vert", "gles_shader_fonts.frag", defines);
+  if (!shaderSlot(ShaderMethodGLES::SM_FONTS_SHADER_CLIP)->CompileAndLink())
   {
-    m_pShader[ShaderMethodGLES::SM_TEXTURE_NOBLEND]->Free();
-    m_pShader[ShaderMethodGLES::SM_TEXTURE_NOBLEND].reset();
+    shaderSlot(ShaderMethodGLES::SM_FONTS_SHADER_CLIP)->Free();
+    shaderSlot(ShaderMethodGLES::SM_FONTS_SHADER_CLIP).reset();
+    CLog::Log(LOGERROR, "GUI Shader gles_shader_clip.vert + gles_shader_fonts.frag - compile "
+                        "and link failed");
+  }
+
+  shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND) =
+      std::make_unique<CGLESShader>("gles_shader_texture_noblend.frag", defines);
+  if (!shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND)->CompileAndLink())
+  {
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND)->Free();
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND).reset();
     CLog::Log(LOGERROR, "GUI Shader gles_shader_texture_noblend.frag - compile and link failed");
   }
 
-  // Same shader, but compiled without KODI_TRANSFER_PQ for HDR-coded overlays (e.g. UHD-BD PGS).
-  m_pShader[ShaderMethodGLES::SM_TEXTURE_NOBLEND_NO_PQ] =
-      std::make_unique<CGLESShader>("gles_shader_texture_noblend.frag", definesNoPQ);
-  if (!m_pShader[ShaderMethodGLES::SM_TEXTURE_NOBLEND_NO_PQ]->CompileAndLink())
+  shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_PMA) =
+      std::make_unique<CGLESShader>("gles_shader_texture_noblend.frag", definesPma);
+  if (!shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_PMA)->CompileAndLink())
   {
-    m_pShader[ShaderMethodGLES::SM_TEXTURE_NOBLEND_NO_PQ]->Free();
-    m_pShader[ShaderMethodGLES::SM_TEXTURE_NOBLEND_NO_PQ].reset();
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_PMA)->Free();
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_PMA).reset();
     CLog::Log(LOGERROR,
-              "GUI Shader gles_shader_texture_noblend.frag (no PQ) - compile and link failed");
+              "GUI Shader gles_shader_texture_noblend.frag (premultiplied alpha) - compile and link failed");
   }
 
-  m_pShader[ShaderMethodGLES::SM_MULTI_BLENDCOLOR] =
-      std::make_unique<CGLESShader>("gles_shader_multi_blendcolor.frag", defines);
-  if (!m_pShader[ShaderMethodGLES::SM_MULTI_BLENDCOLOR]->CompileAndLink())
+  // Same shader, but compiled for HDR-authored PQ overlays targeting PQ GUI output.
+  shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_HDR_PGS_PQ_OUTPUT) =
+      std::make_unique<CGLESShader>("gles_shader_texture_noblend.frag", definesHdrPgsPqOutput);
+  if (!shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_HDR_PGS_PQ_OUTPUT)->CompileAndLink())
   {
-    m_pShader[ShaderMethodGLES::SM_MULTI_BLENDCOLOR]->Free();
-    m_pShader[ShaderMethodGLES::SM_MULTI_BLENDCOLOR].reset();
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_HDR_PGS_PQ_OUTPUT)->Free();
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_HDR_PGS_PQ_OUTPUT).reset();
+    CLog::Log(LOGERROR,
+              "GUI Shader gles_shader_texture_noblend.frag (HDR PGS PQ output) - compile and link failed");
+  }
+
+  shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_HDR_PGS_SDR_OUTPUT) =
+      std::make_unique<CGLESShader>("gles_shader_texture_noblend.frag", definesHdrPgsSdrOutput);
+  if (!shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_HDR_PGS_SDR_OUTPUT)->CompileAndLink())
+  {
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_HDR_PGS_SDR_OUTPUT)->Free();
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_HDR_PGS_SDR_OUTPUT).reset();
+    CLog::Log(LOGERROR,
+              "GUI Shader gles_shader_texture_noblend.frag (HDR PGS SDR output) - compile and link failed");
+  }
+
+  shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_PMA_SDR_IMAGE_SUBS) =
+      std::make_unique<CGLESShader>("gles_shader_texture_noblend.frag", definesSdrImageSubs);
+  if (!shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_PMA_SDR_IMAGE_SUBS)->CompileAndLink())
+  {
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_PMA_SDR_IMAGE_SUBS)->Free();
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_PMA_SDR_IMAGE_SUBS).reset();
+    CLog::Log(LOGERROR,
+              "GUI Shader gles_shader_texture_noblend.frag (SDR-authored image subs) - compile and link failed");
+  }
+
+  shaderSlot(ShaderMethodGLES::SM_MULTI_BLENDCOLOR) =
+      std::make_unique<CGLESShader>("gles_shader_multi_blendcolor.frag", defines);
+  if (!shaderSlot(ShaderMethodGLES::SM_MULTI_BLENDCOLOR)->CompileAndLink())
+  {
+    shaderSlot(ShaderMethodGLES::SM_MULTI_BLENDCOLOR)->Free();
+    shaderSlot(ShaderMethodGLES::SM_MULTI_BLENDCOLOR).reset();
     CLog::Log(LOGERROR, "GUI Shader gles_shader_multi_blendcolor.frag - compile and link failed");
   }
 
-  m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA] =
-      std::make_unique<CGLESShader>("gles_shader_rgba.frag", defines);
-  if (!m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA]->CompileAndLink())
+  shaderSlot(ShaderMethodGLES::SM_MULTI_RGBA_111R_BLENDCOLOR) =
+      std::make_unique<CGLESShader>("gles_shader_multi_rgba_111r_blendcolor.frag", defines);
+  if (!shaderSlot(ShaderMethodGLES::SM_MULTI_RGBA_111R_BLENDCOLOR)->CompileAndLink())
   {
-    m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA]->Free();
-    m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA].reset();
+    shaderSlot(ShaderMethodGLES::SM_MULTI_RGBA_111R_BLENDCOLOR)->Free();
+    shaderSlot(ShaderMethodGLES::SM_MULTI_RGBA_111R_BLENDCOLOR).reset();
+    CLog::Log(LOGERROR,
+              "GUI Shader gles_shader_multi_rgba_111r_blendcolor.frag - compile and link failed");
+  }
+
+  shaderSlot(ShaderMethodGLES::SM_MULTI_111R_111R_BLENDCOLOR) =
+      std::make_unique<CGLESShader>("gles_shader_multi_111r_111r_blendcolor.frag", defines);
+  if (!shaderSlot(ShaderMethodGLES::SM_MULTI_111R_111R_BLENDCOLOR)->CompileAndLink())
+  {
+    shaderSlot(ShaderMethodGLES::SM_MULTI_111R_111R_BLENDCOLOR)->Free();
+    shaderSlot(ShaderMethodGLES::SM_MULTI_111R_111R_BLENDCOLOR).reset();
+    CLog::Log(LOGERROR,
+              "GUI Shader gles_shader_multi_111r_111r_blendcolor.frag - compile and link failed");
+  }
+
+  shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA) =
+      std::make_unique<CGLESShader>("gles_shader_rgba.frag", defines);
+  if (!shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA)->CompileAndLink())
+  {
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA)->Free();
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA).reset();
     CLog::Log(LOGERROR, "GUI Shader gles_shader_rgba.frag - compile and link failed");
   }
 
-  m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA_BLENDCOLOR] =
+  shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA_BLENDCOLOR) =
       std::make_unique<CGLESShader>("gles_shader_rgba_blendcolor.frag", defines);
-  if (!m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA_BLENDCOLOR]->CompileAndLink())
+  if (!shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA_BLENDCOLOR)->CompileAndLink())
   {
-    m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA_BLENDCOLOR]->Free();
-    m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA_BLENDCOLOR].reset();
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA_BLENDCOLOR)->Free();
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA_BLENDCOLOR).reset();
     CLog::Log(LOGERROR, "GUI Shader gles_shader_rgba_blendcolor.frag - compile and link failed");
   }
 
-  m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA_BOB] =
+  shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA_BOB) =
       std::make_unique<CGLESShader>("gles_shader_rgba_bob.frag", defines);
-  if (!m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA_BOB]->CompileAndLink())
+  if (!shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA_BOB)->CompileAndLink())
   {
-    m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA_BOB]->Free();
-    m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA_BOB].reset();
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA_BOB)->Free();
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA_BOB).reset();
     CLog::Log(LOGERROR, "GUI Shader gles_shader_rgba_bob.frag - compile and link failed");
   }
 
   if (IsExtSupported("GL_OES_EGL_image_external"))
   {
-    m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA_OES] =
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA_OES) =
         std::make_unique<CGLESShader>("gles_shader_rgba_oes.frag", defines);
-    if (!m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA_OES]->CompileAndLink())
+    if (!shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA_OES)->CompileAndLink())
     {
-      m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA_OES]->Free();
-      m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA_OES].reset();
+      shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA_OES)->Free();
+      shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA_OES).reset();
       CLog::Log(LOGERROR, "GUI Shader gles_shader_rgba_oes.frag - compile and link failed");
     }
 
 
-    m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA_BOB_OES] =
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA_BOB_OES) =
         std::make_unique<CGLESShader>("gles_shader_rgba_bob_oes.frag", defines);
-    if (!m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA_BOB_OES]->CompileAndLink())
+    if (!shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA_BOB_OES)->CompileAndLink())
     {
-      m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA_BOB_OES]->Free();
-      m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA_BOB_OES].reset();
+      shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA_BOB_OES)->Free();
+      shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA_BOB_OES).reset();
       CLog::Log(LOGERROR, "GUI Shader gles_shader_rgba_bob_oes.frag - compile and link failed");
     }
   }
 
-  m_pShader[ShaderMethodGLES::SM_TEXTURE_NOALPHA] =
+  shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOALPHA) =
       std::make_unique<CGLESShader>("gles_shader_texture_noalpha.frag", defines);
-  if (!m_pShader[ShaderMethodGLES::SM_TEXTURE_NOALPHA]->CompileAndLink())
+  if (!shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOALPHA)->CompileAndLink())
   {
-    m_pShader[ShaderMethodGLES::SM_TEXTURE_NOALPHA]->Free();
-    m_pShader[ShaderMethodGLES::SM_TEXTURE_NOALPHA].reset();
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOALPHA)->Free();
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOALPHA).reset();
     CLog::Log(LOGERROR, "GUI Shader gles_shader_texture_noalpha.frag - compile and link failed");
   }
+
+  const auto advancedSettings = CServiceBroker::GetSettingsComponent()->GetAdvancedSettings();
+  if (advancedSettings &&
+      (advancedSettings->m_videoAsyncFullscreenOSD || advancedSettings->m_guiSkinHdrFbo) &&
+      !shaderSlot(ShaderMethodGLES::SM_TEXTURE_RAW))
+  {
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_RAW) =
+        std::make_unique<CGLESShader>("gles_shader_texture.frag", std::string());
+    if (!shaderSlot(ShaderMethodGLES::SM_TEXTURE_RAW)->CompileAndLink())
+    {
+      shaderSlot(ShaderMethodGLES::SM_TEXTURE_RAW)->Free();
+      shaderSlot(ShaderMethodGLES::SM_TEXTURE_RAW).reset();
+      logM(LOGERROR, "GUI Shader gles_shader_texture.frag (raw passthrough) - compile and link failed");
+    }
+  }
+
+  m_srgbCompositeEnabled = advancedSettings && advancedSettings->m_guiSrgbHdrComposite;
+  if (advancedSettings &&
+      (advancedSettings->m_videoAsyncFullscreenOSD || advancedSettings->m_guiSkinHdrFbo) &&
+      m_srgbCompositeEnabled && m_guiHdr != GuiHdr::SDR &&
+      !shaderSlot(ShaderMethodGLES::SM_TEXTURE_RAW_CONVERT))
+  {
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_RAW_CONVERT) = std::make_unique<CGLESShader>(
+        "gles_shader_texture.frag", defines + "#define KODI_COMPOSITE_CONVERT 1\n");
+    if (!shaderSlot(ShaderMethodGLES::SM_TEXTURE_RAW_CONVERT)->CompileAndLink())
+    {
+      shaderSlot(ShaderMethodGLES::SM_TEXTURE_RAW_CONVERT)->Free();
+      shaderSlot(ShaderMethodGLES::SM_TEXTURE_RAW_CONVERT).reset();
+      logM(LOGERROR,
+           "GUI Shader gles_shader_texture.frag (composite convert) - compile and link failed, "
+           "falling back to per-primitive transfer");
+    }
+  }
+}
+
+void CRenderSystemGLES::WarmAllGuiHdrModeShaderCaches()
+{
+  if (!m_bRenderCreated)
+    return;
+
+  const auto warmStart = std::chrono::steady_clock::now();
+  auto& gfxContext = CServiceBroker::GetWinSystem()->GetGfxContext();
+  const GuiHdr originalMode = m_guiHdr;
+  int warmedModes = 0;
+
+  for (GuiHdr mode : {GuiHdr::SDR, GuiHdr::HDR, GuiHdr::HDR_PQ})
+  {
+    if (mode == originalMode)
+      continue;
+
+    gfxContext.SetGuiHdr(mode);
+    ReleaseShaders();
+    m_guiHdr = mode;
+    InitialiseShaders();
+    ++warmedModes;
+  }
+
+  gfxContext.SetGuiHdr(originalMode);
+  ReleaseShaders();
+  m_guiHdr = originalMode;
+  InitialiseShaders();
+
+  const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - warmStart).count();
+  logM(LOGINFO,
+       "Warmed shader binary cache for {} other GuiHdr mode(s) in {} ms (boot one-time cost; runtime mode-change now hits binary cache)",
+       warmedModes, elapsedMs);
 }
 
 void CRenderSystemGLES::ReleaseShaders()
 {
-  if (m_pShader[ShaderMethodGLES::SM_DEFAULT])
-    m_pShader[ShaderMethodGLES::SM_DEFAULT]->Free();
-  m_pShader[ShaderMethodGLES::SM_DEFAULT].reset();
+  if (shaderSlot(ShaderMethodGLES::SM_DEFAULT))
+    shaderSlot(ShaderMethodGLES::SM_DEFAULT)->Free();
+  shaderSlot(ShaderMethodGLES::SM_DEFAULT).reset();
 
-  if (m_pShader[ShaderMethodGLES::SM_TEXTURE])
-    m_pShader[ShaderMethodGLES::SM_TEXTURE]->Free();
-  m_pShader[ShaderMethodGLES::SM_TEXTURE].reset();
+  if (shaderSlot(ShaderMethodGLES::SM_TEXTURE))
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE)->Free();
+  shaderSlot(ShaderMethodGLES::SM_TEXTURE).reset();
 
-  if (m_pShader[ShaderMethodGLES::SM_MULTI])
-    m_pShader[ShaderMethodGLES::SM_MULTI]->Free();
-  m_pShader[ShaderMethodGLES::SM_MULTI].reset();
+  if (shaderSlot(ShaderMethodGLES::SM_TEXTURE_111R))
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_111R)->Free();
+  shaderSlot(ShaderMethodGLES::SM_TEXTURE_111R).reset();
 
-  if (m_pShader[ShaderMethodGLES::SM_FONTS])
-    m_pShader[ShaderMethodGLES::SM_FONTS]->Free();
-  m_pShader[ShaderMethodGLES::SM_FONTS].reset();
+  if (shaderSlot(ShaderMethodGLES::SM_MULTI))
+    shaderSlot(ShaderMethodGLES::SM_MULTI)->Free();
+  shaderSlot(ShaderMethodGLES::SM_MULTI).reset();
 
-  if (m_pShader[ShaderMethodGLES::SM_TEXTURE_NOBLEND])
-    m_pShader[ShaderMethodGLES::SM_TEXTURE_NOBLEND]->Free();
-  m_pShader[ShaderMethodGLES::SM_TEXTURE_NOBLEND].reset();
+  if (shaderSlot(ShaderMethodGLES::SM_MULTI_RGBA_111R))
+    shaderSlot(ShaderMethodGLES::SM_MULTI_RGBA_111R)->Free();
+  shaderSlot(ShaderMethodGLES::SM_MULTI_RGBA_111R).reset();
 
-  if (m_pShader[ShaderMethodGLES::SM_TEXTURE_NOBLEND_NO_PQ])
-    m_pShader[ShaderMethodGLES::SM_TEXTURE_NOBLEND_NO_PQ]->Free();
-  m_pShader[ShaderMethodGLES::SM_TEXTURE_NOBLEND_NO_PQ].reset();
+  if (shaderSlot(ShaderMethodGLES::SM_FONTS))
+    shaderSlot(ShaderMethodGLES::SM_FONTS)->Free();
+  shaderSlot(ShaderMethodGLES::SM_FONTS).reset();
 
-  if (m_pShader[ShaderMethodGLES::SM_MULTI_BLENDCOLOR])
-    m_pShader[ShaderMethodGLES::SM_MULTI_BLENDCOLOR]->Free();
-  m_pShader[ShaderMethodGLES::SM_MULTI_BLENDCOLOR].reset();
+  if (shaderSlot(ShaderMethodGLES::SM_FONTS_SHADER_CLIP))
+    shaderSlot(ShaderMethodGLES::SM_FONTS_SHADER_CLIP)->Free();
+  shaderSlot(ShaderMethodGLES::SM_FONTS_SHADER_CLIP).reset();
 
-  if (m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA])
-    m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA]->Free();
-  m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA].reset();
+  if (shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND))
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND)->Free();
+  shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND).reset();
 
-  if (m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA_BLENDCOLOR])
-    m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA_BLENDCOLOR]->Free();
-  m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA_BLENDCOLOR].reset();
+  if (shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_PMA))
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_PMA)->Free();
+  shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_PMA).reset();
 
-  if (m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA_BOB])
-    m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA_BOB]->Free();
-  m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA_BOB].reset();
+  if (shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_HDR_PGS_PQ_OUTPUT))
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_HDR_PGS_PQ_OUTPUT)->Free();
+  shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_HDR_PGS_PQ_OUTPUT).reset();
 
-  if (m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA_OES])
-    m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA_OES]->Free();
-  m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA_OES].reset();
+  if (shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_HDR_PGS_SDR_OUTPUT))
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_HDR_PGS_SDR_OUTPUT)->Free();
+  shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOBLEND_HDR_PGS_SDR_OUTPUT).reset();
 
-  if (m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA_BOB_OES])
-    m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA_BOB_OES]->Free();
-  m_pShader[ShaderMethodGLES::SM_TEXTURE_RGBA_BOB_OES].reset();
+  if (shaderSlot(ShaderMethodGLES::SM_MULTI_BLENDCOLOR))
+    shaderSlot(ShaderMethodGLES::SM_MULTI_BLENDCOLOR)->Free();
+  shaderSlot(ShaderMethodGLES::SM_MULTI_BLENDCOLOR).reset();
 
-  if (m_pShader[ShaderMethodGLES::SM_TEXTURE_NOALPHA])
-    m_pShader[ShaderMethodGLES::SM_TEXTURE_NOALPHA]->Free();
-  m_pShader[ShaderMethodGLES::SM_TEXTURE_NOALPHA].reset();
+  if (shaderSlot(ShaderMethodGLES::SM_MULTI_RGBA_111R_BLENDCOLOR))
+    shaderSlot(ShaderMethodGLES::SM_MULTI_RGBA_111R_BLENDCOLOR)->Free();
+  shaderSlot(ShaderMethodGLES::SM_MULTI_RGBA_111R_BLENDCOLOR).reset();
+
+  if (shaderSlot(ShaderMethodGLES::SM_MULTI_111R_111R_BLENDCOLOR))
+    shaderSlot(ShaderMethodGLES::SM_MULTI_111R_111R_BLENDCOLOR)->Free();
+  shaderSlot(ShaderMethodGLES::SM_MULTI_111R_111R_BLENDCOLOR).reset();
+
+  if (shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA))
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA)->Free();
+  shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA).reset();
+
+  if (shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA_BLENDCOLOR))
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA_BLENDCOLOR)->Free();
+  shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA_BLENDCOLOR).reset();
+
+  if (shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA_BOB))
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA_BOB)->Free();
+  shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA_BOB).reset();
+
+  if (shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA_OES))
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA_OES)->Free();
+  shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA_OES).reset();
+
+  if (shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA_BOB_OES))
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA_BOB_OES)->Free();
+  shaderSlot(ShaderMethodGLES::SM_TEXTURE_RGBA_BOB_OES).reset();
+
+  if (shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOALPHA))
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOALPHA)->Free();
+  shaderSlot(ShaderMethodGLES::SM_TEXTURE_NOALPHA).reset();
+
+  if (shaderSlot(ShaderMethodGLES::SM_TEXTURE_RAW))
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_RAW)->Free();
+  shaderSlot(ShaderMethodGLES::SM_TEXTURE_RAW).reset();
+
+  if (shaderSlot(ShaderMethodGLES::SM_TEXTURE_RAW_CONVERT))
+    shaderSlot(ShaderMethodGLES::SM_TEXTURE_RAW_CONVERT)->Free();
+  shaderSlot(ShaderMethodGLES::SM_TEXTURE_RAW_CONVERT).reset();
 }
 
 void CRenderSystemGLES::EnableGUIShader(ShaderMethodGLES method)
 {
-  m_method = method;
-  if (m_pShader[m_method])
+  if (tlsWorkerShaderScope)
   {
-    m_pShader[m_method]->Enable();
+    const unsigned int epoch = m_guiShaderEpoch.load(std::memory_order_relaxed);
+    if (tlsWorkerShaderEpoch != epoch)
+    {
+      ReleaseShaders();
+      InitialiseShaders();
+      tlsWorkerShaderEpoch = epoch;
+    }
+  }
+  tlsMethod = method;
+  if (shader(tlsMethod))
+  {
+    shader(tlsMethod)->Enable();
+    const GLint bypassLoc = shader(tlsMethod)->GetGuiTransferBypassLoc();
+    if (bypassLoc >= 0)
+      glUniform1f(bypassLoc, tlsGuiRenderTargetFillBypass ? 1.0f : 0.0f);
   }
   else
   {
-    CLog::Log(LOGERROR, "Invalid GUI Shader selected - {}", method);
+    LOG_THROTTLE_PERIODIC_GENERAL(LOGERROR, 1000, "Invalid GUI Shader selected - {}", method);
   }
 }
 
 void CRenderSystemGLES::DisableGUIShader()
 {
-  if (m_pShader[m_method])
+  if (shader(tlsMethod))
   {
-    m_pShader[m_method]->Disable();
+    shader(tlsMethod)->Disable();
   }
-  m_method = ShaderMethodGLES::SM_DEFAULT;
+  tlsMethod = ShaderMethodGLES::SM_DEFAULT;
 }
 
 GLint CRenderSystemGLES::GUIShaderGetPos()
 {
-  if (m_pShader[m_method])
-    return m_pShader[m_method]->GetPosLoc();
+  if (shader(tlsMethod))
+    return shader(tlsMethod)->GetPosLoc();
 
   return -1;
 }
 
 GLint CRenderSystemGLES::GUIShaderGetCol()
 {
-  if (m_pShader[m_method])
-    return m_pShader[m_method]->GetColLoc();
+  if (shader(tlsMethod))
+    return shader(tlsMethod)->GetColLoc();
 
   return -1;
 }
 
 GLint CRenderSystemGLES::GUIShaderGetCoord0()
 {
-  if (m_pShader[m_method])
-    return m_pShader[m_method]->GetCord0Loc();
+  if (shader(tlsMethod))
+    return shader(tlsMethod)->GetCord0Loc();
 
   return -1;
 }
 
 GLint CRenderSystemGLES::GUIShaderGetCoord1()
 {
-  if (m_pShader[m_method])
-    return m_pShader[m_method]->GetCord1Loc();
+  if (shader(tlsMethod))
+    return shader(tlsMethod)->GetCord1Loc();
+
+  return -1;
+}
+
+GLint CRenderSystemGLES::GUIShaderGetDepth()
+{
+  if (shader(tlsMethod))
+    return shader(tlsMethod)->GetDepthLoc();
 
   return -1;
 }
 
 GLint CRenderSystemGLES::GUIShaderGetUniCol()
 {
-  if (m_pShader[m_method])
-    return m_pShader[m_method]->GetUniColLoc();
+  if (shader(tlsMethod))
+    return shader(tlsMethod)->GetUniColLoc();
 
   return -1;
 }
 
 GLint CRenderSystemGLES::GUIShaderGetCoord0Matrix()
 {
-  if (m_pShader[m_method])
-    return m_pShader[m_method]->GetCoord0MatrixLoc();
+  if (shader(tlsMethod))
+    return shader(tlsMethod)->GetCoord0MatrixLoc();
 
   return -1;
 }
 
 GLint CRenderSystemGLES::GUIShaderGetField()
 {
-  if (m_pShader[m_method])
-    return m_pShader[m_method]->GetFieldLoc();
+  if (shader(tlsMethod))
+    return shader(tlsMethod)->GetFieldLoc();
 
   return -1;
 }
 
 GLint CRenderSystemGLES::GUIShaderGetStep()
 {
-  if (m_pShader[m_method])
-    return m_pShader[m_method]->GetStepLoc();
+  if (shader(tlsMethod))
+    return shader(tlsMethod)->GetStepLoc();
 
   return -1;
 }
 
 GLint CRenderSystemGLES::GUIShaderGetContrast()
 {
-  if (m_pShader[m_method])
-    return m_pShader[m_method]->GetContrastLoc();
+  if (shader(tlsMethod))
+    return shader(tlsMethod)->GetContrastLoc();
 
   return -1;
 }
 
 GLint CRenderSystemGLES::GUIShaderGetBrightness()
 {
-  if (m_pShader[m_method])
-    return m_pShader[m_method]->GetBrightnessLoc();
+  if (shader(tlsMethod))
+    return shader(tlsMethod)->GetBrightnessLoc();
 
   return -1;
 }
@@ -700,8 +1527,68 @@ bool CRenderSystemGLES::SupportsStereo(RENDER_STEREO_MODE mode) const
 
 GLint CRenderSystemGLES::GUIShaderGetModel()
 {
-  if (m_pShader[m_method])
-    return m_pShader[m_method]->GetModelLoc();
+  if (shader(tlsMethod))
+    return shader(tlsMethod)->GetModelLoc();
 
   return -1;
+}
+
+GLint CRenderSystemGLES::GUIShaderGetMatrix()
+{
+  if (shader(tlsMethod))
+    return shader(tlsMethod)->GetMatrixLoc();
+
+  return -1;
+}
+
+GLint CRenderSystemGLES::GUIShaderGetClip()
+{
+  if (shader(tlsMethod))
+    return shader(tlsMethod)->GetShaderClipLoc();
+
+  return -1;
+}
+
+GLint CRenderSystemGLES::GUIShaderGetCoordStep()
+{
+  if (shader(tlsMethod))
+    return shader(tlsMethod)->GetShaderCoordStepLoc();
+
+  return -1;
+}
+
+std::string CRenderSystemGLES::GetShaderPath(const std::string& filename)
+{
+  std::string path = "GLES/2.0/";
+
+  if (m_RenderVersionMajor > 3 || (m_RenderVersionMajor == 3 && m_RenderVersionMinor >= 2))
+  {
+    std::string file = "special://xbmc/system/shaders/GLES/3.2/" + filename;
+    const CURL pathToUrl(file);
+    if (CFileUtils::Exists(pathToUrl.Get()))
+      return "GLES/3.2/";
+  }
+
+  if (m_RenderVersionMajor > 3 || (m_RenderVersionMajor == 3 && m_RenderVersionMinor >= 1))
+  {
+    std::string file = "special://xbmc/system/shaders/GLES/3.1/" + filename;
+    const CURL pathToUrl(file);
+    if (CFileUtils::Exists(pathToUrl.Get()))
+      return "GLES/3.1/";
+  }
+
+  return path;
+}
+
+namespace KODI::GLES
+{
+bool UsesFixedAttributeLocationsForShader(const std::string& vertexShaderName)
+{
+  const auto renderSystem = dynamic_cast<CRenderSystemGLES*>(CServiceBroker::GetRenderSystem());
+  if (!renderSystem || vertexShaderName.empty())
+    return false;
+
+  const std::string shaderPath = renderSystem->GetShaderPath(vertexShaderName);
+  return shaderPath == "GLES/3.1/" || shaderPath == "GLES/3.2/";
+}
 }

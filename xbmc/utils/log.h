@@ -36,16 +36,13 @@
 
 #include <spdlog/spdlog.h>
 
-namespace spdlog
-{
-namespace sinks
+namespace spdlog::sinks
 {
 class sink;
 
 template<typename Mutex>
 class dist_sink;
-} // namespace sinks
-} // namespace spdlog
+} // namespace spdlog::sinks
 
 #if FMT_VERSION >= 100000
 using fmt::enums::format_as;
@@ -62,8 +59,11 @@ struct formatter<std::atomic<T>, Char> : formatter<T, Char>
 class CLog : public ISettingsHandler, public ISettingCallback
 {
 public:
+  // id of the "general" log component
+  static constexpr uint32_t LOG_COMPONENT_GENERAL = 0;
+
   CLog();
-  ~CLog();
+  ~CLog() override;
 
   // implementation of ISettingsHandler
   void OnSettingsLoaded() override;
@@ -88,65 +88,73 @@ public:
   Logger GetLogger(const std::string& loggerName);
 
   template<typename... Args>
-  static inline void Log(int level, const std::string_view& format, Args&&... args)
+  static void Log(int level, fmt::format_string<Args...> format, Args&&... args)
   {
     Log(MapLogLevel(level), format, std::forward<Args>(args)...);
   }
 
   template<typename... Args>
-  static inline void Log(int level,
-                         uint32_t component,
-                         const std::string_view& format,
-                         Args&&... args)
+  static void Log(int level, uint32_t component, fmt::format_string<Args...> format, Args&&... args)
   {
     if (!GetInstance().CanLogComponent(component))
       return;
 
-    Log(level, format, std::forward<Args>(args)...);
+    Log(MapLogLevel(level), component, format, std::forward<Args>(args)...);
   }
 
   template<typename... Args>
-  static inline void Log(spdlog::level::level_enum level,
-                         const std::string_view& format,
-                         Args&&... args)
+  static void Log(spdlog::level::level_enum level,
+                  fmt::format_string<Args...> format,
+                  Args&&... args)
   {
-    GetInstance().FormatAndLogInternal(level, format, std::forward<Args>(args)...);
+    Log(level, LOG_COMPONENT_GENERAL, format, std::forward<Args>(args)...);
   }
 
   template<typename... Args>
-  static inline void Log(spdlog::level::level_enum level,
-                         uint32_t component,
-                         const std::string_view& format,
-                         Args&&... args)
+  static void Log(spdlog::level::level_enum level,
+                  uint32_t component,
+                  fmt::format_string<Args...> format,
+                  Args&&... args)
   {
     if (!GetInstance().CanLogComponent(component))
       return;
 
-    Log(level, format, std::forward<Args>(args)...);
+    GetInstance().FormatAndLogInternal(level, component, format, fmt::make_format_args(args...));
   }
 
-#define LogF(level, format, ...) Log((level), ("{}: " format), __FUNCTION__, ##__VA_ARGS__)
+  template<typename... Args>
+  static void Log(const std::string& loggerName,
+                  int level,
+                  fmt::format_string<Args...> format,
+                  Args&&... args)
+  {
+    GetInstance().FormatAndLogInternal(loggerName, MapLogLevel(level), format,
+                                       fmt::make_format_args(args...));
+  }
+
+#define LogF(level, format, ...) \
+  Log((level), ("{}: " format), __PRETTY_FUNCTION__, ##__VA_ARGS__)
 #define LogFC(level, component, format, ...) \
-  Log((level), (component), ("{}: " format), __FUNCTION__, ##__VA_ARGS__)
+  Log((level), (component), ("{}: " format), __PRETTY_FUNCTION__, ##__VA_ARGS__)
 
 // Macro for conditional logging
-#define logM(level, classname, format, ...) \
+#define logM(level, format, ...) \
   do { \
     if (CServiceBroker::GetLogging().IsLogLevelLogged(level)) \
-      CLog::Log((level), ("{}::{}: " format), classname, __FUNCTION__, ##__VA_ARGS__); \
+      CLog::Log((level), ("{}: " format), __PRETTY_FUNCTION__, ##__VA_ARGS__); \
   } while(0)
 
-#define logComponentM(level, component, classname, format, ...) \
+#define logComponentM(level, component, format, ...) \
   do { \
     if (CServiceBroker::GetLogging().IsLogLevelLogged(level) && \
         CServiceBroker::GetLogging().CanLogComponent(component)) \
-      CLog::Log((level), (component), ("{}::{}: " format), classname, __FUNCTION__, ##__VA_ARGS__); \
+      CLog::Log((level), (component), ("{}: " format), __PRETTY_FUNCTION__, ##__VA_ARGS__); \
   } while(0)
 
-#define logNoFormatM(level, classname) \
+#define logNoFormatM(level) \
   do { \
     if (CServiceBroker::GetLogging().IsLogLevelLogged(level)) \
-      CLog::Log((level), ("{}::{}"), classname, __FUNCTION__); \
+      CLog::Log((level), ("{}"), __PRETTY_FUNCTION__); \
   } while(0)
 
 private:
@@ -154,24 +162,23 @@ private:
 
   static spdlog::level::level_enum MapLogLevel(int level);
 
-  template<typename... Args>
-  inline void FormatAndLogInternal(spdlog::level::level_enum level,
-                                   const std::string_view& format,
-                                   Args&&... args)
-  {
-    auto message = fmt::format(format, std::forward<Args>(args)...);
+  void FormatAndLogInternal(spdlog::level::level_enum level,
+                            uint32_t component,
+                            fmt::string_view format,
+                            fmt::format_args args);
 
-    // fixup newline alignment, number of spaces should equal prefix length
-    FormatLineBreaks(message);
-
-    m_defaultLogger->log(level, message);
-  }
+  void FormatAndLogInternal(const std::string& loggerName,
+                            spdlog::level::level_enum level,
+                            fmt::string_view format,
+                            fmt::format_args args);
 
   Logger CreateLogger(const std::string& loggerName);
 
+  Logger GetLoggerById(uint32_t component);
+
   void SetComponentLogLevel(const std::vector<CVariant>& components);
 
-  void FormatLineBreaks(std::string& message);
+  void FormatLineBreaks(std::string& message) const;
 
   std::unique_ptr<IPlatformLog> m_platform;
   std::shared_ptr<spdlog::sinks::dist_sink<std::mutex>> m_sinks;
@@ -179,8 +186,8 @@ private:
 
   std::shared_ptr<spdlog::sinks::sink> m_fileSink;
 
-  int m_logLevel;
+  int m_logLevel{LOG_LEVEL_DEBUG};
 
-  bool m_componentLogEnabled = false;
-  uint32_t m_componentLogLevels = 0;
+  bool m_componentLogEnabled{false};
+  uint32_t m_componentLogLevels{0};
 };

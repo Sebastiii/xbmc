@@ -100,8 +100,14 @@ public:
   virtual std::string GetPlayerInfo() = 0;
   virtual int GetVideoBitrate() = 0;
   virtual void SetSpeed(int iSpeed) = 0;
+  virtual void SetEOS(bool eos) {}
   virtual bool IsEOS() { return false; };
+  virtual bool IsOutputPictureInFlight() const { return false; }
   virtual bool SupportsExtention() const = 0;
+  virtual bool HonorsAccurateSeek() const { return true; }
+  virtual void SetMaxTimeSize(double sec) {}
+  virtual double GetMaxTimeSizeSeconds() const { return 0.0; }
+  virtual double GetQueueTimeSize() const { return 0.0; }
 };
 
 class CDVDAudioCodec;
@@ -123,10 +129,24 @@ public:
   virtual void SetMute(bool bOnOff) {}
   virtual void SetDynamicRangeCompression(long drc) = 0;
   virtual std::string GetPlayerInfo() = 0;
+  virtual std::string GetPlayerInfo2() { return {}; }
   virtual int GetAudioChannels() = 0;
   virtual double GetCurrentPts() = 0;
+  virtual double GetCurrentSinkDelay() { return 0.0; }
+  virtual double GetAudioClock() { return 0.0; }
   bool IsStalled() const override = 0;
   virtual bool IsPassthrough() const = 0;
   virtual float GetDynamicRangeAmplification() const = 0;
   virtual bool IsEOS() { return false; }
+  virtual void SetMaxTimeSize(double sec) {}
+  virtual double GetMaxTimeSizeSeconds() const { return 0.0; }
+  virtual double GetQueueTimeSize() const { return 0.0; }
+  virtual bool GetAudioPosition(double& pts,
+                                double& absClock,
+                                double& cacheTime,
+                                double& delay,
+                                bool& passthrough)
+  {
+    return false;
+  }
 };

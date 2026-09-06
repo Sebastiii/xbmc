@@ -15,8 +15,10 @@
 #include "VideoShaders/VideoFilterShaderGLES.h"
 #include "VideoShaders/YUV2RGBShaderGLES.h"
 #include "application/Application.h"
+#include "cores/DataCacheCore.h"
 #include "cores/IPlayer.h"
 #include "guilib/Texture.h"
+#include "rendering/GLExtensions.h"
 #include "rendering/MatrixGL.h"
 #include "rendering/gles/RenderSystemGLES.h"
 #include "settings/AdvancedSettings.h"
@@ -30,6 +32,7 @@
 #include "utils/log.h"
 #include "windowing/WinSystem.h"
 
+#include <algorithm>
 #include <mutex>
 
 using namespace Shaders;
@@ -57,9 +60,266 @@ CLinuxRendererGLES::~CLinuxRendererGLES()
 
   ReleaseShaders();
 
+#if defined(HAS_GLES) && HAS_GLES == 3
+  DestroyGpuTimerQuery(m_renderToFboTimer);
+  DestroyGpuTimerQuery(m_renderFromFboTimer);
+#endif
+
   free(m_planeBuffer);
   m_planeBuffer = nullptr;
 }
+
+void CLinuxRendererGLES::UpdateGpuTimerSupport()
+{
+  if (m_gpuTimersInitialized)
+    return;
+
+  m_gpuTimersInitialized = true;
+  m_gpuTimersEnabled = false;
+
+#if defined(HAS_GLES) && HAS_GLES == 3 && defined(GL_TIME_ELAPSED_EXT) && defined(GL_GPU_DISJOINT_EXT)
+  if (!m_renderSystem)
+    return;
+
+  const auto advancedSettings = CServiceBroker::GetSettingsComponent()->GetAdvancedSettings();
+  unsigned int major{0};
+  unsigned int minor{0};
+  m_renderSystem->GetRenderVersion(major, minor);
+  if (major < 3)
+    return;
+
+  m_gpuTimersEnabled = m_renderSystem->IsExtSupported("GL_EXT_disjoint_timer_query");
+  if (m_gpuTimersEnabled && advancedSettings && advancedSettings->m_openGlDebugging)
+    CLog::Log(LOGDEBUG, "GLES: GPU timer queries enabled for multipass video rendering");
+#endif
+}
+
+void CLinuxRendererGLES::PumpGpuTimerQueries()
+{
+  UpdateGpuTimerSupport();
+
+#if defined(HAS_GLES) && HAS_GLES == 3 && defined(GL_TIME_ELAPSED_EXT) && defined(GL_GPU_DISJOINT_EXT)
+  if (!m_gpuTimersEnabled)
+    return;
+
+  const auto advancedSettings = CServiceBroker::GetSettingsComponent()->GetAdvancedSettings();
+  const bool debugLogging = advancedSettings && advancedSettings->m_openGlDebugging;
+
+  const auto pump = [debugLogging](GpuTimerQuery& query) {
+    if (!query.pending || query.id == 0)
+      return false;
+
+    GLuint available{0};
+    glGetQueryObjectuiv(query.id, GL_QUERY_RESULT_AVAILABLE, &available);
+    if (!available)
+      return false;
+
+    GLuint elapsedNs{0};
+    glGetQueryObjectuiv(query.id, GL_QUERY_RESULT, &elapsedNs);
+
+    GLboolean disjoint{GL_FALSE};
+    glGetBooleanv(GL_GPU_DISJOINT_EXT, &disjoint);
+    query.pending = false;
+    if (disjoint == GL_TRUE)
+      return false;
+
+    const double elapsedMs = static_cast<double>(elapsedNs) / 1000000.0;
+    query.accumulatedMs += elapsedMs;
+    query.samples++;
+    if (!query.hasValue)
+    {
+      query.smoothedMs = elapsedMs;
+      query.hasValue = true;
+    }
+    else
+    {
+      query.smoothedMs = query.smoothedMs * 0.85 + elapsedMs * 0.15;
+    }
+
+    if (debugLogging && query.samples >= 120)
+    {
+      CLog::Log(LOGDEBUG, "GLES GPU timer [{}]: avg {:.3f} ms over {} samples", query.label,
+                query.accumulatedMs / query.samples, query.samples);
+      query.accumulatedMs = 0.0;
+      query.samples = 0;
+    }
+
+    return true;
+  };
+
+  const bool updatedToFbo = pump(m_renderToFboTimer);
+  const bool updatedFromFbo = pump(m_renderFromFboTimer);
+  if (updatedToFbo || updatedFromFbo)
+    EvaluateScalerPerformance();
+#endif
+}
+
+ESCALINGMETHOD CLinuxRendererGLES::ResolveAutoScalingMethod() const
+{
+  const auto advancedSettings = CServiceBroker::GetSettingsComponent()->GetAdvancedSettings();
+  const bool scaleSD = m_sourceHeight < 720 && m_sourceWidth < 1280;
+  const bool scaleUp = static_cast<int>(m_sourceHeight) < m_viewRect.Height() &&
+                       static_cast<int>(m_sourceWidth) < m_viewRect.Width();
+  const float maxAutoScaleFps = advancedSettings ? advancedSettings->m_videoAutoScaleMaxFps : 30.0f;
+  const bool scaleFps = m_fps < maxAutoScaleFps + 0.01f || m_fps <= 0.0f;
+
+  if (Supports(VS_SCALINGMETHOD_LANCZOS3_FAST) && scaleSD && scaleUp && scaleFps)
+    return VS_SCALINGMETHOD_LANCZOS3_FAST;
+
+  return VS_SCALINGMETHOD_LINEAR;
+}
+
+ESCALINGMETHOD CLinuxRendererGLES::GetPerformanceFallbackScalingMethod(ESCALINGMETHOD method) const
+{
+  switch (method)
+  {
+    case VS_SCALINGMETHOD_LANCZOS3:
+      if (Supports(VS_SCALINGMETHOD_LANCZOS3_FAST))
+        return VS_SCALINGMETHOD_LANCZOS3_FAST;
+      break;
+    case VS_SCALINGMETHOD_SPLINE36:
+      if (Supports(VS_SCALINGMETHOD_SPLINE36_FAST))
+        return VS_SCALINGMETHOD_SPLINE36_FAST;
+      if (Supports(VS_SCALINGMETHOD_LANCZOS3_FAST))
+        return VS_SCALINGMETHOD_LANCZOS3_FAST;
+      break;
+    case VS_SCALINGMETHOD_CUBIC_B_SPLINE:
+    case VS_SCALINGMETHOD_CUBIC_MITCHELL:
+    case VS_SCALINGMETHOD_CUBIC_CATMULL:
+    case VS_SCALINGMETHOD_CUBIC_0_075:
+    case VS_SCALINGMETHOD_CUBIC_0_1:
+    case VS_SCALINGMETHOD_LANCZOS2:
+      if (Supports(VS_SCALINGMETHOD_LANCZOS3_FAST))
+        return VS_SCALINGMETHOD_LANCZOS3_FAST;
+      if (Supports(VS_SCALINGMETHOD_SPLINE36_FAST))
+        return VS_SCALINGMETHOD_SPLINE36_FAST;
+      break;
+    default:
+      break;
+  }
+
+  return VS_SCALINGMETHOD_LINEAR;
+}
+
+bool CLinuxRendererGLES::IsHighQualityScalingMethod(ESCALINGMETHOD method) const
+{
+  switch (method)
+  {
+    case VS_SCALINGMETHOD_CUBIC_B_SPLINE:
+    case VS_SCALINGMETHOD_CUBIC_MITCHELL:
+    case VS_SCALINGMETHOD_CUBIC_CATMULL:
+    case VS_SCALINGMETHOD_CUBIC_0_075:
+    case VS_SCALINGMETHOD_CUBIC_0_1:
+    case VS_SCALINGMETHOD_LANCZOS2:
+    case VS_SCALINGMETHOD_SPLINE36:
+    case VS_SCALINGMETHOD_LANCZOS3:
+      return true;
+    default:
+      return false;
+  }
+}
+
+ESCALINGMETHOD CLinuxRendererGLES::ResolveScalingMethod() const
+{
+  ESCALINGMETHOD method = m_scalingMethodGui;
+
+  if (method == VS_SCALINGMETHOD_AUTO)
+    method = ResolveAutoScalingMethod();
+
+  if (m_dynamicScalingFallbackActive && IsHighQualityScalingMethod(method))
+    return m_dynamicScalingMethod;
+
+  return method;
+}
+
+void CLinuxRendererGLES::EvaluateScalerPerformance()
+{
+#if defined(HAS_GLES) && HAS_GLES == 3
+  ESCALINGMETHOD requestedMethod = m_scalingMethodGui;
+  if (requestedMethod == VS_SCALINGMETHOD_AUTO)
+    requestedMethod = ResolveAutoScalingMethod();
+
+  if (!IsHighQualityScalingMethod(requestedMethod) || !m_renderToFboTimer.hasValue ||
+      !m_renderFromFboTimer.hasValue)
+  {
+    m_scalerOverBudgetCount = 0;
+    m_scalerUnderBudgetCount = 0;
+    return;
+  }
+
+  const double totalMs = m_renderToFboTimer.smoothedMs + m_renderFromFboTimer.smoothedMs;
+  const double frameBudgetMs = m_fps > 1.0f ? 1000.0 / static_cast<double>(m_fps) : 16.667;
+  const double degradeThresholdMs = std::clamp(frameBudgetMs * 0.35, 4.0, 9.0);
+
+  if (!m_dynamicScalingFallbackActive)
+  {
+    if (totalMs > degradeThresholdMs)
+    {
+      if (++m_scalerOverBudgetCount >= 45)
+      {
+        m_dynamicScalingMethod = GetPerformanceFallbackScalingMethod(requestedMethod);
+        if (m_dynamicScalingMethod != requestedMethod)
+        {
+          m_dynamicScalingFallbackActive = true;
+          m_scalerOverBudgetCount = 0;
+          m_scalerUnderBudgetCount = 0;
+          CLog::Log(LOGINFO,
+                    "GLES: Adaptive scaler fallback {} -> {} after multipass GPU cost {:.3f} ms "
+                    "(budget {:.3f} ms)",
+                    requestedMethod, m_dynamicScalingMethod, totalMs, degradeThresholdMs);
+          UpdateVideoFilter();
+          m_reloadShaders = true;
+        }
+      }
+    }
+    else
+    {
+      m_scalerOverBudgetCount = 0;
+    }
+  }
+#endif
+}
+
+#if defined(HAS_GLES) && HAS_GLES == 3
+bool CLinuxRendererGLES::BeginGpuTimerQuery(GpuTimerQuery& query, const char* label)
+{
+#if defined(GL_TIME_ELAPSED_EXT) && defined(GL_GPU_DISJOINT_EXT)
+  if (!m_gpuTimersEnabled || query.pending)
+    return false;
+
+  if (query.id == 0)
+    glGenQueries(1, &query.id);
+
+  if (query.id == 0)
+    return false;
+
+  query.label = label;
+  glBeginQuery(GL_TIME_ELAPSED_EXT, query.id);
+  return true;
+#else
+  return false;
+#endif
+}
+
+void CLinuxRendererGLES::EndGpuTimerQuery(GpuTimerQuery& query)
+{
+#if defined(GL_TIME_ELAPSED_EXT) && defined(GL_GPU_DISJOINT_EXT)
+  if (!m_gpuTimersEnabled || query.id == 0 || query.pending)
+    return;
+
+  glEndQuery(GL_TIME_ELAPSED_EXT);
+  query.pending = true;
+#endif
+}
+
+void CLinuxRendererGLES::DestroyGpuTimerQuery(GpuTimerQuery& query)
+{
+  if (query.id != 0)
+    glDeleteQueries(1, &query.id);
+
+  query = {};
+}
+#endif
 
 CBaseRenderer* CLinuxRendererGLES::Create(CVideoBuffer *buffer)
 {
@@ -110,6 +370,7 @@ bool CLinuxRendererGLES::ValidateRenderTarget()
 bool CLinuxRendererGLES::Configure(const VideoPicture &picture, float fps, unsigned int orientation)
 {
   CLog::Log(LOGDEBUG, "LinuxRendererGLES::Configure: fps: {:0.3f}", fps);
+  m_fps = fps;
   m_format = picture.videoBuffer->GetFormat();
   m_sourceWidth = picture.iWidth;
   m_sourceHeight = picture.iHeight;
@@ -117,6 +378,10 @@ bool CLinuxRendererGLES::Configure(const VideoPicture &picture, float fps, unsig
 
   m_srcPrimaries = picture.color_primaries;
   m_toneMap = false;
+  m_dynamicScalingFallbackActive = false;
+  m_dynamicScalingMethod = VS_SCALINGMETHOD_MAX;
+  m_scalerOverBudgetCount = 0;
+  m_scalerUnderBudgetCount = 0;
 
   // Calculate the input frame aspect ratio.
   CalculateFrameAspectRatio(picture.iDisplayWidth, picture.iDisplayHeight);
@@ -141,8 +406,11 @@ bool CLinuxRendererGLES::Configure(const VideoPicture &picture, float fps, unsig
               m_passthroughHDR ? "on" : "off");
   }
 
-  // Configure GUI/OSD for HDR PQ when display is in HDR PQ mode
-  aml_set_transfer_pq(picture.hdrType, picture.colorBits);
+  if (!m_dvOpened)
+  {
+    aml_dv_open(picture.hdrType, picture.colorBits, picture.color_primaries, true);
+    m_dvOpened = true;
+  }
 
   return true;
 }
@@ -362,7 +630,66 @@ void CLinuxRendererGLES::Update()
   ValidateRenderTarget();
 }
 
-void CLinuxRendererGLES::DrawBlackBars() const {
+void CLinuxRendererGLES::ClearBackBuffer()
+{
+  //set the entire backbuffer to black
+  //if we do a two pass render, we have to draw a quad. else we might occlude OSD elements.
+  if (CServiceBroker::GetWinSystem()->GetGfxContext().GetRenderOrder() ==
+      RENDER_ORDER_ALL_BACK_TO_FRONT)
+  {
+    CServiceBroker::GetWinSystem()->GetGfxContext().Clear(0xff000000);
+  }
+  else
+  {
+    ClearBackBufferQuad();
+  }
+}
+
+void CLinuxRendererGLES::ClearBackBufferQuad()
+{
+  CRect windowRect(0, 0, CServiceBroker::GetWinSystem()->GetGfxContext().GetWidth(),
+                   CServiceBroker::GetWinSystem()->GetGfxContext().GetHeight());
+  struct Svertex
+  {
+    float x, y;
+  };
+
+  std::vector<Svertex> vertices{
+      {windowRect.x1, windowRect.y2 * 2},
+      {windowRect.x1, windowRect.y1},
+      {windowRect.x2 * 2, windowRect.y1},
+  };
+
+  glDisable(GL_BLEND);
+
+  m_renderSystem->EnableGUIShader(ShaderMethodGLES::SM_DEFAULT);
+  GLint posLoc = m_renderSystem->GUIShaderGetPos();
+  GLint uniCol = m_renderSystem->GUIShaderGetUniCol();
+  GLint depthLoc = m_renderSystem->GUIShaderGetDepth();
+
+  glUniform4f(uniCol, m_clearColour / 255.0f, m_clearColour / 255.0f, m_clearColour / 255.0f, 1.0f);
+  glUniform1f(depthLoc, -1);
+
+  GLuint vertexVBO;
+  glGenBuffers(1, &vertexVBO);
+  glBindBuffer(GL_ARRAY_BUFFER, vertexVBO);
+  glBufferData(GL_ARRAY_BUFFER, sizeof(Svertex) * vertices.size(), vertices.data(), GL_STATIC_DRAW);
+
+  glVertexAttribPointer(posLoc, 2, GL_FLOAT, GL_FALSE, sizeof(Svertex), 0);
+  glEnableVertexAttribArray(posLoc);
+
+  glDrawArrays(GL_TRIANGLES, 0, vertices.size());
+
+  glDisableVertexAttribArray(posLoc);
+  glBindBuffer(GL_ARRAY_BUFFER, 0);
+  glDeleteBuffers(1, &vertexVBO);
+
+  m_renderSystem->DisableGUIShader();
+  glEnable(GL_BLEND);
+}
+
+void CLinuxRendererGLES::DrawBlackBars()
+{
   CRect windowRect(0, 0, CServiceBroker::GetWinSystem()->GetGfxContext().GetWidth(),
                    CServiceBroker::GetWinSystem()->GetGfxContext().GetHeight());
 
@@ -398,13 +725,18 @@ void CLinuxRendererGLES::DrawBlackBars() const {
   auto renderSystem =
       dynamic_cast<CRenderSystemGLES*>(CServiceBroker::GetRenderSystem());
   if (!renderSystem)
+  {
+    glEnable(GL_BLEND);
     return;
+  }
 
   renderSystem->EnableGUIShader(ShaderMethodGLES::SM_DEFAULT);
   GLint posLoc = renderSystem->GUIShaderGetPos();
   GLint uniCol = renderSystem->GUIShaderGetUniCol();
+  GLint depthLoc = m_renderSystem->GUIShaderGetDepth();
 
   glUniform4f(uniCol, m_clearColour / 255.0f, m_clearColour / 255.0f, m_clearColour / 255.0f, 1.0f);
+  glUniform1f(depthLoc, -1);
 
   GLuint vertexVBO;
   glGenBuffers(1, &vertexVBO);
@@ -421,6 +753,7 @@ void CLinuxRendererGLES::DrawBlackBars() const {
   glDeleteBuffers(1, &vertexVBO);
 
   renderSystem->DisableGUIShader();
+  glEnable(GL_BLEND);
 }
 
 void CLinuxRendererGLES::RenderUpdate(int index, int index2, bool clear, unsigned int flags, unsigned int alpha)
@@ -435,6 +768,9 @@ void CLinuxRendererGLES::RenderUpdate(int index, int index2, bool clear, unsigne
   // if its first pass, just init textures and return
   if (ValidateRenderTarget())
   {
+    if (clear) //if clear is set, we're expected to overwrite all backbuffer pixels, even if we have nothing to render
+      ClearBackBuffer();
+
     return;
   }
 
@@ -459,9 +795,7 @@ void CLinuxRendererGLES::RenderUpdate(int index, int index2, bool clear, unsigne
       DrawBlackBars();
     else
     {
-      glClearColor(m_clearColour, m_clearColour, m_clearColour, 0);
-      glClear(GL_COLOR_BUFFER_BIT);
-      glClearColor(0, 0, 0, 0);
+      ClearBackBuffer();
     }
   }
 
@@ -493,7 +827,8 @@ void CLinuxRendererGLES::RenderUpdate(int index, int index2, bool clear, unsigne
     }
   }
 
-  Render(flags, index);
+  if (!Render(flags, index) && clear)
+    ClearBackBuffer();
 
   VerifyGLState();
   glEnable(GL_BLEND);
@@ -519,15 +854,28 @@ void CLinuxRendererGLES::UpdateVideoFilter()
   CRect viewRect;
   GetVideoRect(srcRect, dstRect, viewRect);
 
-  if (m_scalingMethodGui == m_videoSettings.m_ScalingMethod &&
+  const ESCALINGMETHOD requestedScalingMethod = m_videoSettings.m_ScalingMethod;
+  if (m_scalingMethodGui != VS_SCALINGMETHOD_MAX && m_scalingMethodGui != requestedScalingMethod)
+  {
+    m_dynamicScalingFallbackActive = false;
+    m_dynamicScalingMethod = VS_SCALINGMETHOD_MAX;
+    m_scalerOverBudgetCount = 0;
+    m_scalerUnderBudgetCount = 0;
+  }
+
+  m_scalingMethodGui = requestedScalingMethod;
+  const ESCALINGMETHOD activeScalingMethod = ResolveScalingMethod();
+
+  if (m_scalingMethodGui == requestedScalingMethod && m_scalingMethod == activeScalingMethod &&
       viewRect.Height() == m_viewRect.Height() &&
       viewRect.Width() == m_viewRect.Width())
   {
     return;
   }
 
-  m_scalingMethodGui = m_videoSettings.m_ScalingMethod;
-  m_scalingMethod = m_scalingMethodGui;
+  if (m_scalingMethod != activeScalingMethod)
+    m_reloadShaders = true;
+  m_scalingMethod = activeScalingMethod;
   m_viewRect = viewRect;
 
   if(!Supports(m_scalingMethod))
@@ -559,6 +907,8 @@ void CLinuxRendererGLES::UpdateVideoFilter()
     return;
   }
   case VS_SCALINGMETHOD_LINEAR:
+  case VS_SCALINGMETHOD_LANCZOS3_FAST:
+  case VS_SCALINGMETHOD_SPLINE36_FAST:
   {
     CLog::Log(LOGINFO, "GLES: Selecting single pass rendering");
     SetTextureFilter(GL_LINEAR);
@@ -566,8 +916,6 @@ void CLinuxRendererGLES::UpdateVideoFilter()
     return;
   }
   case VS_SCALINGMETHOD_LANCZOS2:
-  case VS_SCALINGMETHOD_SPLINE36_FAST:
-  case VS_SCALINGMETHOD_LANCZOS3_FAST:
   case VS_SCALINGMETHOD_SPLINE36:
   case VS_SCALINGMETHOD_LANCZOS3:
   case VS_SCALINGMETHOD_CUBIC_B_SPLINE:
@@ -652,9 +1000,19 @@ void CLinuxRendererGLES::LoadShaders(int field)
 
           EShaderFormat shaderFormat = GetShaderFormat();
           m_toneMapMethod = m_videoSettings.m_ToneMapMethod;
-          m_pYUVProgShader = new YUV2RGBProgressiveShader(
-              shaderFormat, m_passthroughHDR ? m_srcPrimaries : AVColorPrimaries::AVCOL_PRI_BT709,
-              m_srcPrimaries, m_toneMap, m_toneMapMethod);
+          if (m_scalingMethod == VS_SCALINGMETHOD_LANCZOS3_FAST ||
+              m_scalingMethod == VS_SCALINGMETHOD_SPLINE36_FAST)
+          {
+            m_pYUVProgShader = new YUV2RGBFilterShader(
+                shaderFormat, m_passthroughHDR ? m_srcPrimaries : AVColorPrimaries::AVCOL_PRI_BT709,
+                m_srcPrimaries, m_toneMap, m_toneMapMethod, m_scalingMethod);
+          }
+          else
+          {
+            m_pYUVProgShader = new YUV2RGBProgressiveShader(
+                shaderFormat, m_passthroughHDR ? m_srcPrimaries : AVColorPrimaries::AVCOL_PRI_BT709,
+                m_srcPrimaries, m_toneMap, m_toneMapMethod);
+          }
           m_pYUVProgShader->SetConvertFullColorRange(m_fullRange);
           m_pYUVBobShader = new YUV2RGBBobShader(
               shaderFormat, m_passthroughHDR ? m_srcPrimaries : AVColorPrimaries::AVCOL_PRI_BT709,
@@ -706,8 +1064,7 @@ void CLinuxRendererGLES::ReleaseShaders()
 void CLinuxRendererGLES::UnInit()
 {
   CLog::Log(LOGDEBUG, "LinuxRendererGLES: Cleaning up GLES resources");
-
-  std::lock_guard lock(CServiceBroker::GetWinSystem()->GetGfxContext());
+  std::unique_lock lock(CServiceBroker::GetWinSystem()->GetGfxContext());
 
   glFinish();
 
@@ -719,11 +1076,37 @@ void CLinuxRendererGLES::UnInit()
 
   // cleanup framebuffer object if it was in use
   m_fbo.fbo.Cleanup();
+#if defined(HAS_GLES) && HAS_GLES == 3
+  DestroyGpuTimerQuery(m_renderToFboTimer);
+  DestroyGpuTimerQuery(m_renderFromFboTimer);
+#endif
+  m_gpuTimersInitialized = false;
+  m_gpuTimersEnabled = false;
+  m_dynamicScalingFallbackActive = false;
+  m_dynamicScalingMethod = VS_SCALINGMETHOD_MAX;
+  m_scalerOverBudgetCount = 0;
+  m_scalerUnderBudgetCount = 0;
   m_bValidated = false;
   m_bConfigured = false;
 
   CServiceBroker::GetWinSystem()->SetHDR(nullptr);
   m_passthroughHDR = false;
+
+  if (m_dvOpened)
+  {
+    if (!CServiceBroker::GetDataCacheCore().IsVideoHwDecoder())
+      aml_dv_close();
+    else
+      logM(LOGDEBUG,
+           "LinuxRendererGLES::UnInit - hardware decoder active, leaving DV state to its owner");
+    m_dvOpened = false;
+  }
+
+  if (m_pVideoFilterShader)
+  {
+    delete m_pVideoFilterShader;
+    m_pVideoFilterShader = nullptr;
+  }
 }
 
 bool CLinuxRendererGLES::CreateTexture(int index)
@@ -788,8 +1171,10 @@ bool CLinuxRendererGLES::UploadTexture(int index)
   return ret;
 }
 
-void CLinuxRendererGLES::Render(unsigned int flags, int index)
+bool CLinuxRendererGLES::Render(unsigned int flags, int index)
 {
+  PumpGpuTimerQueries();
+
   // obtain current field, if interlaced
   if( flags & RENDER_FLAG_TOP)
   {
@@ -807,7 +1192,7 @@ void CLinuxRendererGLES::Render(unsigned int flags, int index)
   // call texture load function
   if (!UploadTexture(index))
   {
-    return;
+    return false;
   }
 
   if (RenderHook(index))
@@ -837,8 +1222,13 @@ void CLinuxRendererGLES::Render(unsigned int flags, int index)
       break;
     }
   }
+  else
+  {
+    return false;
+  }
 
   AfterRenderHook(index);
+  return true;
 }
 
 void CLinuxRendererGLES::RenderSinglePass(int index, int field)
@@ -852,8 +1242,6 @@ void CLinuxRendererGLES::RenderSinglePass(int index, int field)
   {
     LoadShaders(field);
   }
-
-  glDisable(GL_DEPTH_TEST);
 
   // Y
   glActiveTexture(GL_TEXTURE0);
@@ -980,8 +1368,6 @@ void CLinuxRendererGLES::RenderToFBO(int index, int field)
     }
   }
 
-  glDisable(GL_DEPTH_TEST);
-
   // Y
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(m_textureTarget, planes[0].id);
@@ -1007,6 +1393,10 @@ void CLinuxRendererGLES::RenderToFBO(int index, int field)
     CLog::Log(LOGERROR, "GLES: YUV shader not active, cannot do multipass render");
     return;
   }
+
+#if defined(HAS_GLES) && HAS_GLES == 3
+  const bool gpuTimerActive = BeginGpuTimerQuery(m_renderToFboTimer, "RenderToFBO");
+#endif
 
   m_fbo.fbo.BeginRender();
   VerifyGLState();
@@ -1122,9 +1512,19 @@ void CLinuxRendererGLES::RenderToFBO(int index, int field)
   m_fbo.fbo.EndRender();
 
   VerifyGLState();
+
+#if defined(HAS_GLES) && HAS_GLES == 3
+  if (gpuTimerActive)
+    EndGpuTimerQuery(m_renderToFboTimer);
+#endif
 }
 
-void CLinuxRendererGLES::RenderFromFBO() const {
+void CLinuxRendererGLES::RenderFromFBO()
+{
+#if defined(HAS_GLES) && HAS_GLES == 3
+  const bool gpuTimerActive = BeginGpuTimerQuery(m_renderFromFboTimer, "RenderFromFBO");
+#endif
+
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, m_fbo.fbo.Texture());
   VerifyGLState();
@@ -1203,6 +1603,13 @@ void CLinuxRendererGLES::RenderFromFBO() const {
 
   glBindTexture(GL_TEXTURE_2D, 0);
   VerifyGLState();
+
+  m_fbo.fbo.Invalidate();
+
+#if defined(HAS_GLES) && HAS_GLES == 3
+  if (gpuTimerActive)
+    EndGpuTimerQuery(m_renderFromFboTimer);
+#endif
 }
 
 bool CLinuxRendererGLES::RenderCapture(int index, CRenderCapture* capture)
@@ -1252,6 +1659,8 @@ bool CLinuxRendererGLES::RenderCapture(int index, CRenderCapture* capture)
   // restore original video rect
   m_destRect = saveSize;
   restoreRotatedCoords(); // restores the previous state of the rotated dest coords
+
+  glEnable(GL_BLEND);
 
   return true;
 }
@@ -1686,6 +2095,18 @@ bool CLinuxRendererGLES::Supports(ESCALINGMETHOD method) const
       method == VS_SCALINGMETHOD_SPLINE36 ||
       method == VS_SCALINGMETHOD_LANCZOS3)
   {
+    if (method == VS_SCALINGMETHOD_SPLINE36_FAST || method == VS_SCALINGMETHOD_LANCZOS3_FAST)
+    {
+#if defined(GL_ES_VERSION_3_0)
+      // we need GLES 3.0 headers for GL_RGBA16f, but GLES 3.1 for the shader
+      uint32_t major, minor;
+      m_renderSystem->GetRenderVersion(major, minor);
+      if (major < 3 || minor == 0)
+        return false;
+#else
+      return false;
+#endif
+    }
     // if scaling is below level, avoid hq scaling
     float scaleX = fabs((static_cast<float>(m_sourceWidth) - m_destRect.Width()) / m_sourceWidth) * 100;
     float scaleY = fabs((static_cast<float>(m_sourceHeight) - m_destRect.Height()) / m_sourceHeight) * 100;

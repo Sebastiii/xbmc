@@ -38,7 +38,7 @@ static const operatorField operators[] = {
     {"notinthelast", CDatabaseQueryRule::OPERATOR_NOT_IN_THE_LAST, 21411},
     {"true", CDatabaseQueryRule::OPERATOR_TRUE, 20122},
     {"false", CDatabaseQueryRule::OPERATOR_FALSE, 20424},
-    {"between", CDatabaseQueryRule::OPERATOR_BETWEEN, 21456}};
+    {"between", CDatabaseQueryRule::OPERATOR_BETWEEN, 21398}};
 
 CDatabaseQueryRule::CDatabaseQueryRule()
 {

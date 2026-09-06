@@ -19,7 +19,8 @@ if("aml" IN_LIST CORE_PLATFORM_NAME_LC OR
                         LibInputKeyboard.h
                         LibInputPointer.h
                         LibInputSettings.h
-                        LibInputTouch.h)
+                        LibInputTouch.h
+                        XkbCompat.h)
   endif()
 endif()
 

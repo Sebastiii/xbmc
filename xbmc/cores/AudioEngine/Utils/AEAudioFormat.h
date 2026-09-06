@@ -48,6 +48,8 @@ struct AEAudioFormat
    */
   CAEStreamInfo m_streamInfo;
 
+  bool m_resample44to48Mult{false};
+
   AEAudioFormat()
   {
     m_dataFormat = AE_FMT_INVALID;

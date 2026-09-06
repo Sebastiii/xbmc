@@ -173,3 +173,6 @@ private:
 };
 
 bool write_resolution_ini(RESOLUTION_INFO res);
+bool write_current_resolution_ini();
+std::string compute_bandwidth_safe_fmt_attr(const RESOLUTION_INFO& res);
+bool kernel_display_is_4k_50_60();

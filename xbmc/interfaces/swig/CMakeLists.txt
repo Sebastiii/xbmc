@@ -26,9 +26,14 @@ function(generate_file file)
                      COMMAND ${Java_JAVA_EXECUTABLE}
                      ARGS ${JAVA_OPEN_OPTS} -cp "${classpath}" groovy.ui.GroovyMain ${CMAKE_SOURCE_DIR}/tools/codegenerator/Generator.groovy ${file}.xml ${CMAKE_CURRENT_SOURCE_DIR}/../python/PythonSwig.cpp.template ${file}.cpp > ${devnull}
                      ${CLANG_FORMAT_COMMAND}
-                     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../swig/${file} ${CMAKE_CURRENT_SOURCE_DIR}/../python/PythonSwig.cpp.template)
+                     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../swig/${file} ${CMAKE_CURRENT_SOURCE_DIR}/../python/PythonSwig.cpp.template ${SWIG_LEGACY_HEADERS})
   set(SOURCES ${SOURCES} "${CPP_FILE}" PARENT_SCOPE)
 endfunction()
+
+file(GLOB SWIG_LEGACY_HEADERS ${CMAKE_SOURCE_DIR}/xbmc/interfaces/legacy/*.h
+                              ${CMAKE_SOURCE_DIR}/xbmc/interfaces/legacy/*/*.h
+                              ${CMAKE_SOURCE_DIR}/xbmc/input/actions/ActionIDs.h
+                              ${CMAKE_SOURCE_DIR}/xbmc/input/keyboard/KeyIDs.h)
 
 find_package(Java COMPONENTS Runtime REQUIRED)
 find_package(SWIG REQUIRED)

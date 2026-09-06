@@ -11,6 +11,8 @@
 #include "GUIPassword.h"
 #include "GUIUserMessages.h"
 #include "ServiceBroker.h"
+#include "application/ApplicationComponents.h"
+#include "application/ApplicationPlayer.h"
 #include "input/actions/Action.h"
 #include "input/actions/ActionIDs.h"
 #include "settings/DisplaySettings.h"
@@ -101,8 +103,17 @@ bool CGUIWindowSettingsCategory::OnMessage(CGUIMessage &message)
       {
         if (IsActive() && CDisplaySettings::GetInstance().GetCurrentResolution() != CServiceBroker::GetWinSystem()->GetGfxContext().GetVideoResolution())
         {
-          CDisplaySettings::GetInstance().SetCurrentResolution(CServiceBroker::GetWinSystem()->GetGfxContext().GetVideoResolution(), true);
-          CreateSettings();
+          const auto appPlayer = CServiceBroker::GetAppComponents().GetComponent<CApplicationPlayer>();
+          if (appPlayer->IsPlayingVideo())
+          {
+            logM(LOGDEBUG, "screenmodetrace: settings window resize save skipped, video playing, res={}",
+                 static_cast<int>(CServiceBroker::GetWinSystem()->GetGfxContext().GetVideoResolution()));
+          }
+          else
+          {
+            CDisplaySettings::GetInstance().SetCurrentResolution(CServiceBroker::GetWinSystem()->GetGfxContext().GetVideoResolution(), true);
+            CreateSettings();
+          }
         }
       }
       break;

@@ -19,6 +19,7 @@
 #include "filesystem/StackDirectory.h"
 #include "guilib/GUIComponent.h"
 #include "guilib/StereoscopicsManager.h"
+#include "messaging/ApplicationMessenger.h"
 #include "music/MusicDatabase.h"
 #include "music/tags/MusicInfoTag.h"
 #include "settings/AdvancedSettings.h"
@@ -310,7 +311,8 @@ bool CVideoThumbLoader::LoadItemLookup(CFileItem* pItem)
 
     // flag extraction mostly for non-library items - should end up somewhere else,
     // like a VideoInfoLoader if it existed
-    if (settings->GetBool(CSettings::SETTING_MYVIDEOS_EXTRACTFLAGS) &&
+    if (!CServiceBroker::GetAppMessenger()->IsProcessThread() &&
+        settings->GetBool(CSettings::SETTING_MYVIDEOS_EXTRACTFLAGS) &&
         CDVDFileInfo::CanExtract(*pItem) &&
         (!pItem->HasVideoInfoTag() || !pItem->GetVideoInfoTag()->HasStreamDetails()))
     {

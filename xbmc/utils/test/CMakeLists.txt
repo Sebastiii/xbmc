@@ -37,6 +37,7 @@ set(SOURCES TestAlarmClock.cpp
             TestScraperParser.cpp
             TestScraperUrl.cpp
             TestSortUtils.cpp
+            TestStereoAspect.cpp
             TestStopwatch.cpp
             TestStreamDetails.cpp
             TestStreamUtils.cpp

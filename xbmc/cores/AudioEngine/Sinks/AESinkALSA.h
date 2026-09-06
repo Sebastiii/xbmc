@@ -12,6 +12,7 @@
 #include "cores/AudioEngine/Utils/AEDeviceInfo.h"
 #include "threads/CriticalSection.h"
 
+#include <chrono>
 #include <stdint.h>
 
 #include <alsa/asoundlib.h>
@@ -51,7 +52,6 @@ public:
   double GetCacheTotal() override;
   unsigned int AddPackets(uint8_t **data, unsigned int frames, unsigned int offset) override;
   void Drain() override;
-  void Flush() override;
 
 private:
   CAEChannelInfo GetChannelLayoutRaw(const AEAudioFormat& format) const;
@@ -77,6 +77,8 @@ private:
   unsigned int m_bufferSize = 0;
   double m_formatSampleRateMul = 0.0;
   bool m_passthrough = false;
+  int m_settleHoldMs = 0;
+  std::chrono::steady_clock::time_point m_settleHoldUntil;
   bool m_isAmlDevice = false;
   std::string m_device;
   snd_pcm_t *m_pcm;

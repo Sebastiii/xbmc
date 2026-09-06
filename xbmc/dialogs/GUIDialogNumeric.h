@@ -9,6 +9,7 @@
 #pragma once
 
 #include "guilib/GUIDialog.h"
+#include "utils/TimeFormat.h"
 #include "utils/XTimeUtils.h"
 
 #include <cstdint>
@@ -50,7 +51,7 @@ public:
   static bool ShowAndGetDate(KODI::TIME::SystemTime& date, const std::string& heading);
   static bool ShowAndGetIPAddress(std::string &IPAddress, const std::string &heading);
   static bool ShowAndGetNumber(std::string& strInput, const std::string &strHeading, unsigned int iAutoCloseTimeoutMs = 0, bool bSetHidden = false);
-  static bool ShowAndGetSeconds(std::string& timeString, const std::string &heading);
+  static bool ShowAndGetSeconds(std::string& timeString, const std::string &heading, TIME_FORMAT format = TIME_FORMAT_GUESS);
 
 protected:
   void OnInitWindow() override;

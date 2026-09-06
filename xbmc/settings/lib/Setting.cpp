@@ -320,7 +320,7 @@ void CSetting::OnSettingPropertyChanged(const std::shared_ptr<const CSetting>& s
 
 void CSetting::Copy(const CSetting &setting)
 {
-  SetVisible(setting.IsVisible());
+  SetVisible(setting.GetVisible());
   SetLabel(setting.GetLabel());
   SetHelp(setting.GetHelp());
   SetRequirementsMet(setting.MeetsRequirements());

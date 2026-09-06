@@ -149,6 +149,12 @@ typedef enum
   FieldAlbumStatus,
   FieldAlbumDuration,
   FieldHdrType,
+  FieldHdrTypeAlt,
+  FieldDvProfile,
+  FieldAudioProfile,
+  FieldAudioObjects,
+  FieldAudioObjectChannels,
+  FieldAudioBedChannels,
   FieldProvider,
   FieldUserPreference,
   FieldMax

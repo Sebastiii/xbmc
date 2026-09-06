@@ -18,6 +18,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -38,6 +39,8 @@ public:
   bool GetAVChange();
   void SetAVChangeExtended(bool value);
   bool GetAVChangeExtended();
+  uint64_t NextAVChangeGeneration();
+  bool IsAVChangeGeneration(uint64_t generation) const;
 
   // player video info
   void SetVideoDecoderName(std::string name, bool isHw);
@@ -52,14 +55,17 @@ public:
   void SetVideoDimensions(int width, int height);
   int GetVideoWidth();
   int GetVideoHeight();
+  void SetVideoActiveArea(int top, int bottom, int topLines, int bottomLines);
+  int GetVideoActiveAreaTop();
+  int GetVideoActiveAreaBottom();
+  int GetVideoActiveAreaTopLines();
+  int GetVideoActiveAreaBottomLines();
   void SetVideoFps(float fps);
   float GetVideoFps();
   void SetVideoDAR(float dar);
   float GetVideoDAR();
 
   // Additional Player Process Info data (Only set in Data Core Cache)
-  void SetVideoPts(double pts);
-  double GetVideoPts();
   void SetVideoBitDepth(int bitDepth);
   int GetVideoBitDepth();
   void SetVideoHdrType(StreamHdrType hdrType);
@@ -78,6 +84,8 @@ public:
   AVColorTransferCharacteristic GetVideoColorTransferCharacteristic();
   void SetVideoDoViFrameMetadata(DOVIFrameMetadata value);
   DOVIFrameMetadata GetVideoDoViFrameMetadata();
+  bool GetVideoDoViActiveArea(uint16_t& top, uint16_t& bottom);
+  bool GetVideoDoViActiveAreaRect(uint16_t& top, uint16_t& bottom, uint16_t& left, uint16_t& right);
   void SetVideoDoViStreamMetadata(DOVIStreamMetadata value);
   DOVIStreamMetadata GetVideoDoViStreamMetadata();
   void SetVideoDoViStreamInfo(DOVIStreamInfo value);
@@ -111,9 +119,19 @@ public:
   void SetAudioDecoderName(std::string name);
   std::string GetAudioDecoderName();
   void SetAudioChannels(std::string channels);
+  void SetAudioObjectCount(int objectCount);
+  void SetAudioObjectChannels(int objectChannels);
+  void SetAudioBedChannels(int bedChannels);
+  int GetAudioObjectCount();
+  int GetAudioObjectChannels();
+  int GetAudioBedChannels();
   void SetAudioChannelsSink(std::string channels);
   std::string GetAudioChannels();
   std::string GetAudioChannelsSink();
+  void SetAudioObjectDescription(std::string description);
+  std::string GetAudioObjectDescription();
+  void SetAudioDialNorm(std::string dialNorm);
+  std::string GetAudioDialNorm();
   void SetAudioSampleRate(int sampleRate);
   int GetAudioSampleRate();
   void SetAudioBitsPerSample(int bitsPerSample);
@@ -121,14 +139,20 @@ public:
 
   // Speaker layout bitmasks (per-speaker booleans for skins)
   static uint64_t MakeSpeakerMask(const class CAEChannelInfo& channels);
+  static std::string SpeakerMaskToString(uint64_t mask);
   void SetAudioSpeakerMask(uint64_t mask);
   uint64_t GetAudioSpeakerMask();
   void SetAudioSpeakerMaskSink(uint64_t mask);
   uint64_t GetAudioSpeakerMaskSink();
 
+  void SetHdr10Overrides(uint32_t maxLum, uint32_t maxCll);
+  uint32_t GetHdr10OverrideMaxLum();
+  uint32_t GetHdr10OverrideMaxCll();
+  void SetDvLevel6Limits(uint32_t maxCll, uint32_t maxLum);
+  uint32_t GetDvLevel6MaxCll();
+  uint32_t GetDvLevel6MaxLum();
+
   // Additional Player Process Info data (Only set in Data Core Cache)
-  void SetAudioPts(double pts);
-  double GetAudioPts();
   void SetAudioLiveBitRate(double bitRate);
   double GetAudioLiveBitRate();
   void SetAudioQueueLevel(int level);
@@ -185,6 +209,9 @@ public:
   // render info
   void SetRenderClockSync(bool enabled);
   bool IsRenderClockSync();
+  void SetRenderPts(double pts);
+  double GetRenderPts();
+  void SetVideoDoViLookupPts(double pts);
 
   // player states
   /*!
@@ -206,7 +233,7 @@ public:
   /*!
    * @brief Gets the last seek offset
    * @return the last seek offset
-  */
+   */
   int64_t GetSeekOffSet() const;
 
   void SetSpeed(float tempo, float speed);
@@ -266,13 +293,16 @@ public:
   int64_t GetMaxTime() const;
 
 protected:
+  const DOVIFrameMetadata* GetCachedDoViFrameLocked();
+
   std::atomic_bool m_AVChange = false;
   std::atomic_bool m_AVChangeExtended = false;
+  std::atomic<uint64_t> m_avChangeGeneration{0};
   std::atomic_bool m_hasAVInfoChanges = false;
 
   CCriticalSection m_videoPlayerSection;
   struct SPlayerVideoInfo
-  {    
+  {
     std::string decoderName;
     bool isHwDecoder;
     std::string deintMethod;
@@ -283,7 +313,6 @@ protected:
     float fps;
     float dar;
     bool m_isInterlaced;
-    double pts = 0;
     int bitDepth = 0;
     StreamHdrType hdrType = StreamHdrType::HDR_TYPE_NONE;
     StreamHdrType sourceHdrType = StreamHdrType::HDR_TYPE_NONE;
@@ -293,6 +322,9 @@ protected:
     AVColorPrimaries colorPrimaries = AVCOL_PRI_UNSPECIFIED;
     AVColorTransferCharacteristic colorTransferCharacteristic = AVCOL_TRC_UNSPECIFIED;
     AgedMap<uint64_t, DOVIFrameMetadata> doviFrameMetadataMap;
+    DOVIFrameMetadata cachedDoViFrame = {};
+    uint64_t cachedDoViFramePts = 0;
+    bool cachedDoViFrameValid = false;
     DOVIStreamMetadata doviStreamMetadata = {};
     DOVIStreamInfo doviStreamInfo = {};
     DOVIStreamInfo sourceDoViStreamInfo = {};
@@ -305,22 +337,61 @@ protected:
     int queueLevel = 0;
     int queueDataLevel = 0;
   } m_playerVideoInfo;
+  std::atomic<uint64_t> m_videoSeq{0};
+  std::mutex m_videoSeqWriter;
+  std::atomic<int> m_videoWidth{0};
+  std::atomic<int> m_videoHeight{0};
+  std::atomic<int> m_videoActiveAreaTop{0};
+  std::atomic<int> m_videoActiveAreaBottom{0};
+  std::atomic<int> m_videoActiveAreaTopLines{0};
+  std::atomic<int> m_videoActiveAreaBottomLines{0};
+  std::atomic<uint32_t> m_hdr10OverrideMaxLum{0};
+  std::atomic<uint32_t> m_hdr10OverrideMaxCll{0};
+  std::atomic<uint32_t> m_dvLevel6MaxCll{0};
+  std::atomic<uint32_t> m_dvLevel6MaxLum{0};
+  std::atomic<float> m_videoFps{0.0f};
+  std::atomic<float> m_videoDar{0.0f};
+  std::atomic<bool> m_videoIsInterlaced{false};
+  std::atomic<int> m_videoBitDepth{0};
+  std::atomic<StreamHdrType> m_videoHdrType{StreamHdrType::HDR_TYPE_NONE};
+  std::atomic<StreamHdrType> m_videoSourceHdrType{StreamHdrType::HDR_TYPE_NONE};
+  std::atomic<StreamHdrType> m_videoSourceAdditionalHdrType{StreamHdrType::HDR_TYPE_NONE};
+  std::atomic<AVColorSpace> m_videoColorSpace{AVCOL_SPC_UNSPECIFIED};
+  std::atomic<AVColorRange> m_videoColorRange{AVCOL_RANGE_UNSPECIFIED};
+  std::atomic<AVColorPrimaries> m_videoColorPrimaries{AVCOL_PRI_UNSPECIFIED};
+  std::atomic<AVColorTransferCharacteristic> m_videoColorTransferCharacteristic{AVCOL_TRC_UNSPECIFIED};
+  std::atomic<double> m_videoLiveBitRate{0.0};
+  std::atomic<int> m_videoQueueLevel{0};
+  std::atomic<int> m_videoQueueDataLevel{0};
 
   CCriticalSection m_audioPlayerSection;
   struct SPlayerAudioInfo
   {
     std::string decoderName;
     std::string channels;
+    int objectCount = -1;
+    int objectChannels = -1;
+    int bedChannels = -1;
     std::string channels_sink;
+    std::string objectDescription;
+    std::string dialNorm;
     int sampleRate;
     int bitsPerSample;
     uint64_t speakerMask = 0;
     uint64_t speakerMaskSink = 0;
-    double pts = 0;
     double liveBitRate = 0;
     int queueLevel = 0;
     int queueDataLevel = 0;
   } m_playerAudioInfo;
+  std::atomic<uint64_t> m_audioSeq{0};
+  std::mutex m_audioSeqWriter;
+  std::atomic<int> m_audioSampleRate{0};
+  std::atomic<int> m_audioBitsPerSample{0};
+  std::atomic<uint64_t> m_audioSpeakerMask{0};
+  std::atomic<uint64_t> m_audioSpeakerMaskSink{0};
+  std::atomic<double> m_audioLiveBitRate{0.0};
+  std::atomic<int> m_audioQueueLevel{0};
+  std::atomic<int> m_audioQueueDataLevel{0};
 
   mutable CCriticalSection m_contentSection;
   struct SContentInfo
@@ -406,18 +477,26 @@ protected:
   struct SRenderInfo
   {
     bool m_isClockSync;
-  } m_renderInfo;
+    double pts = 0;
+  } m_renderInfo{};
+  std::atomic<uint64_t> m_renderSeq{0};
+  std::mutex m_renderSeqWriter;
+  std::atomic<bool> m_renderClockSync{false};
+  std::atomic<double> m_renderPts{0.0};
+  std::atomic<double> m_videoDoViLookupPts{0.0};
 
   mutable CCriticalSection m_stateSection;
   bool m_playerStateChanged = false;
   struct SStateInfo
   {
-    bool m_stateSeeking{false};
-    bool m_renderGuiLayer{false};
-    bool m_renderVideoLayer{false};
-    float m_tempo{1.0f};
-    float m_speed{1.0f};
-    bool m_frameAdvance{false};
+    std::atomic<uint64_t> m_speedTempoSeq{0};
+    std::mutex m_speedTempoSeqWriter;
+    std::atomic<bool> m_stateSeeking{false};
+    std::atomic<bool> m_renderGuiLayer{false};
+    std::atomic<bool> m_renderVideoLayer{false};
+    std::atomic<float> m_tempo{1.0f};
+    std::atomic<float> m_speed{1.0f};
+    std::atomic<bool> m_frameAdvance{false};
     /*! Time point of the last seek operation */
     std::chrono::time_point<std::chrono::system_clock> m_lastSeekTime{
         std::chrono::time_point<std::chrono::system_clock>{}};

@@ -34,6 +34,8 @@ namespace ADDON
 class DatabaseSettings
 {
 public:
+  static constexpr unsigned int DEFAULT_CONNECT_TIMEOUT = 0;
+
   DatabaseSettings() { Reset(); }
   void Reset()
   {
@@ -48,6 +50,7 @@ public:
     ca.clear();
     capath.clear();
     ciphers.clear();
+    connecttimeout = DEFAULT_CONNECT_TIMEOUT;
     compression = false;
   };
   std::string type;
@@ -61,6 +64,7 @@ public:
   std::string ca;
   std::string capath;
   std::string ciphers;
+  unsigned int connecttimeout{DEFAULT_CONNECT_TIMEOUT};
   bool compression;
 };
 
@@ -131,6 +135,8 @@ class CAdvancedSettings : public ISettingCallback, public ISettingsHandler
 
     std::string m_audioDefaultPlayer;
     float m_audioPlayCountMinimumPercent;
+    int m_audioPcmSinkBitsMax{0};
+    int m_audioSinkSettleHoldMs{0};
     float m_limiterHold;
     float m_limiterRelease;
 
@@ -139,6 +145,9 @@ class CAdvancedSettings : public ISettingCallback, public ISettingsHandler
     float m_videoSubsDelayRange;
     float m_videoAudioDelayRange;
     bool m_videoUseTimeSeeking;
+    bool m_videoSubtitleAsyncParse;
+    int m_videoAsyncFullscreenOSD;
+    bool m_videoAsyncVideoLayerRender;
     int m_videoTimeSeekForward;
     int m_videoTimeSeekBackward;
     int m_videoTimeSeekForwardBig;
@@ -147,6 +156,9 @@ class CAdvancedSettings : public ISettingCallback, public ISettingsHandler
     int m_videoPercentSeekBackward;
     int m_videoPercentSeekForwardBig;
     int m_videoPercentSeekBackwardBig;
+    int m_videoSeekMinimumDistanceBeforeEof;
+    float m_videoMenuDomainQueueTimeSize;
+    bool m_videoBdBoundaryDrain;
     std::vector<int> m_seekSteps;
     std::string m_videoPPFFmpegPostProc;
     bool m_videoVDPAUtelecine;
@@ -163,7 +175,7 @@ class CAdvancedSettings : public ISettingCallback, public ISettingsHandler
     int m_videoIgnoreSecondsAtStart;
     float m_videoIgnorePercentAtEnd;
     float m_audioApplyDrc;
-    unsigned int m_maxPassthroughOffSyncDuration = 20; // when off by this value then adjust
+    unsigned int m_maxPassthroughOffSyncDuration = 50; // when off by this value then adjust
     unsigned int m_audioAddPacketUnlockTime = 1000;
     bool m_AllowMultiChannelFloat = false; // Android only switch to be removed in v22
     bool m_superviseAudioDelay = false; // Android only to correct broken audio firmwares
@@ -182,6 +194,7 @@ class CAdvancedSettings : public ISettingCallback, public ISettingsHandler
     int  m_videoFpsDetect;
     float m_maxTempo;
     bool m_videoPreferStereoStream = false;
+    bool m_dvVsvdbV1Enabled = false;
 
     std::string m_videoDefaultPlayer;
     float m_videoPlayCountMinimumPercent;
@@ -193,6 +206,7 @@ class CAdvancedSettings : public ISettingCallback, public ISettingsHandler
     int m_songInfoDuration;
     int m_logLevel;
     int m_logLevelHint;
+    bool m_showOnScreenDebugInfo;
     std::string m_cddbAddress;
     bool m_addSourceOnTop; //!< True to put 'add source' buttons on top
 
@@ -277,6 +291,8 @@ class CAdvancedSettings : public ISettingCallback, public ISettingsHandler
     bool m_bVideoScannerIgnoreErrors;
     int m_iVideoLibraryDateAdded;
 
+    bool m_caseSensitiveLocalArtMatch{true};
+
     std::set<std::string> m_vecTokens;
 
     int m_iEpgUpdateCheckInterval;  // seconds
@@ -343,8 +359,28 @@ class CAdvancedSettings : public ISettingCallback, public ISettingsHandler
 
     bool m_guiVisualizeDirtyRegions;
     int  m_guiAlgorithmDirtyRegions;
+    bool m_guiAlgorithmDirtyRegionsIsExplicit{false};
     bool m_guiSmartRedraw;
+    int m_guiBufferAgePartialRedraw;
+    bool m_guiBufferAgeAfterRenderScope;
+    int m_guiMaxDirtyRegions;
+    int m_guiSkipSleepActiveWindow;
+    int m_guiMenuIdleFrameRateCap;
+    int32_t m_guiAnisotropicFiltering{0};
+    bool m_guiFrontToBackRendering{false};
+    bool m_guiGeometryClear{true};
+    bool m_guiWaitVsyncBeforeSwap{true};
+    int m_guiWaitGpuBeforeSwap{2};
+    bool m_guiSrgbHdrComposite{true};
+    bool m_guiCompositeDither{true};
+    bool m_guiAsyncTextureUpload{true};
     bool m_guiVideoLayoutTransparent{false};
+    int m_guiSkinHdrFbo{0};
+    int m_guiOsdGuestComposite{0};
+    int m_guiOsdTrace{0};
+    bool m_guiMipMapping;
+    float m_guiMipMappingSharpen;
+    bool m_guiMinifiedMipmapping{true};
     unsigned int m_guiAVChangeFlagTimeout;
     unsigned int m_addonPackageFolderSize;
 
@@ -364,6 +400,8 @@ class CAdvancedSettings : public ISettingCallback, public ISettingsHandler
     bool m_initialized;
 
     void SetDebugMode(bool debug);
+
+    void ApplyDirtyRegionAlgorithmForSkin(const std::string& skinId);
 
     //! \brief Toggles dirty-region visualization
     void ToggleDirtyRegionVisualization()
@@ -395,54 +433,15 @@ class CAdvancedSettings : public ISettingCallback, public ISettingsHandler
     float m_videoDecoderStreamBuffer;
     float m_videoDecoderMinimumBuffer;
     float m_videoDecoderMinimumStreamBuffer;
+    bool m_videoDeinterlaceDelayCompensation{false};
+    bool m_videoRateFieldHold{true};
+    bool m_vc1ForceFrameInt{true};
+    bool m_vc1DropFrame{true};
+    bool m_vc1RepairTimestamps{true};
 
-    void SetAlgoForReset(int num_resets);
-    int GetAlgoForReset() const;
-    int m_algoForReset;
-
-    void SetLastResetTime(double reset_time);
-    double GetLastResetTime() const;
-    double m_lastResetTime;
-
-    void SetResetSync(bool reset_sync);
-    bool GetResetSync() const;
-    bool m_resetSync;
-
-    void SetResetSeek(bool reset_seek);
-    bool GetResetSeek() const;
-    bool m_resetSeek;
-
-    void SetAlgoForResetSub(int num_resets);
-    int GetAlgoForResetSub() const;
-    int m_algoForResetSub;
-
-    void SetLastResetTimeSub(double reset_time);
-    double GetLastResetTimeSub() const;
-    double m_lastResetTimeSub;
-
-    void SetResetSyncSub(bool reset_sync);
-    bool GetResetSyncSub() const;
-    bool m_resetSyncSub;
-
-    void SetResetSeekSub(bool reset_seek);
-    bool GetResetSeekSub() const;
-    bool m_resetSeekSub;
-
-    void SetLimitCD(bool limit_cd);
-    bool GetLimitCD() const;
-    bool m_limitCD;
-
-    void SetLimitCDPrevVal(int cd_prev_val);
-    int GetLimitCDPrevVal() const;
-    int m_limitCDPrevVal;
-
-    void SetForceCS(bool force_cs);
-    bool GetForceCS() const;
-    bool m_forceCS;
-
-    void SetForceCSPrevVal(int cs_prev_val);
-    int GetForceCSPrevVal() const;
-    int m_forceCSPrevVal;
+    unsigned int m_blurayIsoCachePageSize;
+    unsigned int m_blurayIsoCacheMaxBytes;
+    unsigned int m_blurayIsoCacheForwardPrefetchPages;
 
   private:
     void Initialize();

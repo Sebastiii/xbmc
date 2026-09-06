@@ -1315,11 +1315,13 @@ CDateTime CPVRTimers::GetNextEventTime() const
     CDateTime dailywakeuptime;
     dailywakeuptime.SetFromDBTime(
         m_settings.GetStringValue(CSettings::SETTING_PVRPOWERMANAGEMENT_DAILYWAKEUPTIME));
-    dailywakeuptime = dailywakeuptime.GetAsUTCDateTime();
+    const CDateTime nowAsLocalTime{CDateTime::GetCurrentDateTime()};
 
-    dailywakeuptime.SetDateTime(now.GetYear(), now.GetMonth(), now.GetDay(),
-                                dailywakeuptime.GetHour(), dailywakeuptime.GetMinute(),
-                                dailywakeuptime.GetSecond());
+    dailywakeuptime.SetDateTime(nowAsLocalTime.GetYear(), nowAsLocalTime.GetMonth(),
+                                nowAsLocalTime.GetDay(), dailywakeuptime.GetHour(),
+                                dailywakeuptime.GetMinute(), dailywakeuptime.GetSecond());
+
+    dailywakeuptime = dailywakeuptime.GetAsUTCDateTime();
 
     if ((dailywakeuptime - idle) < now)
     {

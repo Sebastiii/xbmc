@@ -119,6 +119,7 @@ void CPVRGUIInfo::ClearDescrambleInfo(PVR_DESCRAMBLE_INFO& descrambleInfo)
 
 void CPVRGUIInfo::Start()
 {
+  Stop();
   ResetProperties();
   Create();
   SetPriority(ThreadPriority::BELOW_NORMAL);
@@ -442,6 +443,7 @@ bool CPVRGUIInfo::GetListItemAndPlayerLabel(const CFileItem* item,
       case LISTITEM_EPISODENAME:
       case LISTITEM_DIRECTOR:
       case LISTITEM_CHANNEL_NUMBER:
+      case LISTITEM_CHANNEL_GROUP:
       case LISTITEM_PREMIERED:
         break; // obtain value from channel/epg
       default:
@@ -820,6 +822,20 @@ bool CPVRGUIInfo::GetListItemAndPlayerLabel(const CFileItem* item,
         if (groupMember)
         {
           strValue = groupMember->ChannelNumber().FormattedChannelNumber();
+          return true;
+        }
+        break;
+      }
+      case LISTITEM_CHANNEL_GROUP:
+      {
+        auto groupMember = item->GetPVRChannelGroupMemberInfoTag();
+        if (!groupMember)
+          groupMember =
+              CServiceBroker::GetPVRManager().Get<PVR::GUI::Channels>().GetChannelGroupMember(
+                  *item);
+        if (groupMember)
+        {
+          strValue = groupMember->GroupName();
           return true;
         }
         break;

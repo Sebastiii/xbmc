@@ -10,6 +10,7 @@
 
 #include "utils/Geometry.h"
 
+#include <cstdint>
 #include <string>
 
 template <typename T> class CRectGen;
@@ -34,9 +35,10 @@ enum class StreamHdrType
 {
   HDR_TYPE_NONE, ///< <b>None</b>, returns an empty string when used in infolabels
   HDR_TYPE_HDR10, ///< <b>HDR10</b>, returns `hdr10` when used in infolabels
-  HDR_TYPE_HDR10PLUS, ///< <b>HDR10+</b>, returns `hdr10+` when used in infolabels
+  HDR_TYPE_HDR10PLUS, ///< <b>HDR10+</b>, returns `hdr10plus` when used in infolabels
   HDR_TYPE_DOLBYVISION, ///< <b>Dolby Vision</b>, returns `dolbyvision` when used in infolabels
-  HDR_TYPE_HLG ///< <b>HLG</b>, returns `hlg` when used in infolabels
+  HDR_TYPE_HLG, ///< <b>HLG</b>, returns `hlg` when used in infolabels
+  HDR_TYPE_HDR_VIVID
 };
 
 struct StreamInfo
@@ -45,8 +47,8 @@ struct StreamInfo
   int bitrate = 0;
   std::string language;
   std::string name;
-  std::string codecName; // Codec name (name definition from ffmpeg)
-  std::string codecDesc; // Codec description
+  std::string codecName;
+  std::string codecDesc;
   StreamFlags flags = StreamFlags::FLAG_NONE;
 
 protected:
@@ -59,10 +61,16 @@ struct AudioStreamInfo : StreamInfo
   int channels = 0;
   int samplerate = 0;
   int bitspersample = 0;
+  int objects = -1;
+  int objectChannels = -1;
+  int bedChannels = -1;
+  std::string profile;
 };
 
 struct SubtitleStreamInfo : StreamInfo
-{};
+{
+  bool isExternal{false};
+};
 
 struct VideoStreamInfo : StreamInfo
 {
@@ -75,6 +83,11 @@ struct VideoStreamInfo : StreamInfo
   std::string stereoMode;
   int angles = 0;
   StreamHdrType hdrType = StreamHdrType::HDR_TYPE_NONE;
+  StreamHdrType hdrTypeAlt = StreamHdrType::HDR_TYPE_NONE;
+  std::string hdrDetail;
+  std::string dvProfile;
+  uint32_t fpsRate{0};
+  uint32_t fpsScale{0};
 };
 
 struct ProgramInfo

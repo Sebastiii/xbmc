@@ -24,7 +24,11 @@
 #include "DVDInputStreams/DVDInputStreamBluray.h"
 #endif
 #include "DVDInputStreams/DVDInputStream.h"
+#include <chrono>
+#include <cstdint>
+#include <deque>
 #include <queue>
+#include <vector>
 
 extern "C" {
 #include "libavformat/avformat.h"
@@ -46,14 +50,37 @@ public:
   void SetBluRay(const std::shared_ptr<CDVDInputStream::IExtentionStream> &bluRay) { m_bluRay = bluRay; };
   bool IsBluRay() const { return m_bluRay != nullptr; };
 
+  int GetSubtitleOffsetAtPts(double pts, int planeId) const;
+
 private:
+  void ParseOFMD(const uint8_t* data, int size, double pts);
+
+  struct OFMDEntry
+  {
+    double pts;
+    std::vector<int8_t> planeOffsets;
+  };
+  std::vector<OFMDEntry> m_ofmdTable;
+
   DemuxPacket* GetMVCPacket();
   DemuxPacket* MergePacket(DemuxPacket* &srcPkt, DemuxPacket* &appendPkt);
   bool FillMVCQueue(double dtsBase);
+  void ResyncExtension(double dtsBase);
 
   std::shared_ptr<CDVDInputStream::IExtentionStream> m_bluRay = nullptr;
   std::queue<DemuxPacket*> m_H264queue;
-  std::queue<DemuxPacket*> m_MVCqueue;
+  std::deque<DemuxPacket*> m_MVCqueue;
   int m_h264StreamId = -1;
   int m_mvcStreamId = -1;
+  bool m_firstMatchLogged = false;
+  bool m_wrapResyncPending = false;
+  bool m_frontDtsValid = false;
+  double m_lastFrontDts = 0.0;
+  unsigned int m_baseDiscardsSinceMatch = 0;
+  std::chrono::steady_clock::time_point m_lastExtRecovery{};
+  std::chrono::steady_clock::time_point m_stitchAnchor{};
+  std::chrono::steady_clock::time_point m_lastDiscardActivity{};
+  std::chrono::steady_clock::time_point m_starveAnchor{};
+  std::chrono::steady_clock::time_point m_lastStarveActivity{};
+  bool m_stereoDeadSignaled = false;
 };

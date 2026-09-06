@@ -122,6 +122,7 @@ public:
   static constexpr auto SETTING_VIDEOPLAYER_HIGHPRECISIONPROCESSING = "videoplayer.highprecision";
   static constexpr auto SETTING_VIDEOPLAYER_USEAMCODEC = "videoplayer.useamcodec";
   static constexpr auto SETTING_VIDEOPLAYER_USEAMCODECMPEG2 = "videoplayer.useamcodecmpeg2";
+  static constexpr auto SETTING_VIDEOPLAYER_AMLMPEG2KEEPPROG = "videoplayer.amlmpeg2keepprog";
   static constexpr auto SETTING_VIDEOPLAYER_USEAMCODECMPEG4 = "videoplayer.useamcodecmpeg4";
   static constexpr auto SETTING_VIDEOPLAYER_USEAMCODECH264 = "videoplayer.useamcodech264";
   static constexpr auto SETTING_VIDEOPLAYER_USEAMCODECVC1 = "videoplayer.useamcodecvc1";
@@ -147,13 +148,20 @@ public:
   static constexpr auto SETTING_MYVIDEOS_USETAGS = "myvideos.usetags";
   static constexpr auto SETTING_MYVIDEOS_EXTRACTFLAGS = "myvideos.extractflags";
   static constexpr auto SETTING_MYVIDEOS_EXTRACTCHAPTERTHUMBS = "myvideos.extractchapterthumbs";
+  static constexpr auto SETTING_MYVIDEOS_EXTRACTHDR10PLUS = "myvideos.extracthdr10plus";
   static constexpr auto SETTING_MYVIDEOS_REPLACELABELS = "myvideos.replacelabels";
   static constexpr auto SETTING_MYVIDEOS_EXTRACTTHUMB = "myvideos.extractthumb";
   static constexpr auto SETTING_MYVIDEOS_STACKVIDEOS = "myvideos.stackvideos";
   static constexpr auto SETTING_LOCALE_SUBTITLELANGUAGE = "locale.subtitlelanguage";
   static constexpr auto SETTING_SUBTITLES_PARSECAPTIONS = "subtitles.parsecaptions";
+  static constexpr auto SETTING_SUBTITLES_PGSVERTICALMODE = "subtitles.pgsverticalmode";
+  static constexpr auto SETTING_SUBTITLES_PGSVERTICALOFFSET = "subtitles.pgsverticaloffset";
+  static constexpr auto SETTING_SUBTITLES_BITMAPZOOM = "subtitles.bitmapzoom";
+  static constexpr auto SETTING_SUBTITLES_PGSMANUALACTIVEASPECT = "subtitles.pgsmanualactiveaspect";
   static constexpr auto SETTING_SUBTITLES_CAPTIONSALIGN = "subtitles.captionsalign";
+  static constexpr auto SETTING_SUBTITLES_CAPTIONSIMPAIRED = "subtitles.captionsimpaired";
   static constexpr auto SETTING_SUBTITLES_ALIGN = "subtitles.align";
+  static constexpr auto SETTING_SUBTITLES_RESTRICT_TO_ACTIVE_AREA = "subtitles.restrict.to.active.area";
   static constexpr auto SETTING_SUBTITLES_STEREOSCOPICDEPTH = "subtitles.stereoscopicdepth";
   static constexpr auto SETTING_SUBTITLES_FONTNAME = "subtitles.fontname";
   static constexpr auto SETTING_SUBTITLES_FONTSIZE = "subtitles.fontsize";
@@ -173,6 +181,7 @@ public:
   static constexpr auto SETTING_SUBTITLES_CHARSET = "subtitles.charset";
   static constexpr auto SETTING_SUBTITLES_OVERRIDEFONTS = "subtitles.overridefonts";
   static constexpr auto SETTING_SUBTITLES_OVERRIDESTYLES = "subtitles.overridestyles";
+  static constexpr auto SETTING_SUBTITLES_OVERRIDEASS = "subtitles.overrideass";
   static constexpr auto SETTING_SUBTITLES_LANGUAGES = "subtitles.languages";
   static constexpr auto SETTING_SUBTITLES_STORAGEMODE = "subtitles.storagemode";
   static constexpr auto SETTING_SUBTITLES_CUSTOMPATH = "subtitles.custompath";
@@ -184,6 +193,7 @@ public:
   static constexpr auto SETTING_DVDS_PLAYERREGION = "dvds.playerregion";
   static constexpr auto SETTING_DVDS_AUTOMENU = "dvds.automenu";
   static constexpr auto SETTING_DISC_PLAYBACK = "disc.playback";
+  static constexpr auto SETTING_DISC_ALLOW_BDJ_TOP_MENU = "disc.allowbdjtopmenu";
   static constexpr auto SETTING_BLURAY_PLAYERREGION = "bluray.playerregion";
   static constexpr auto SETTING_ACCESSIBILITY_AUDIOVISUAL = "accessibility.audiovisual";
   static constexpr auto SETTING_ACCESSIBILITY_AUDIOHEARING = "accessibility.audiohearing";
@@ -384,10 +394,22 @@ public:
   static constexpr auto SETTING_VIDEOSCREEN_10BITSURFACES = "videoscreen.10bitsurfaces";
   static constexpr auto SETTING_VIDEOSCREEN_USESYSTEMSDRPEAKLUMINANCE =
       "videoscreen.usesystemsdrpeakluminance";
-  static constexpr auto SETTING_VIDEOSCREEN_GUISDRPEAKLUMINANCE = "videoscreen.guipeakluminance";
-  static constexpr auto SETTING_VIDEOSCREEN_GUISDRSATURATION = "videoscreen.guisdrsaturation";
+  static constexpr auto SETTING_VIDEOSCREEN_GUIPEAKLUMINANCE_HDR10 = "videoscreen.guipeakluminance";
+  static constexpr auto SETTING_VIDEOSCREEN_GUISATURATION_HDR10 = "videoscreen.guisdrsaturation";
+  static constexpr auto SETTING_VIDEOSCREEN_GUIPEAKLUMINANCE_HLG =
+      "videoscreen.guipeakluminance.hlg";
+  static constexpr auto SETTING_VIDEOSCREEN_GUISATURATION_HLG =
+      "videoscreen.guisaturation.hlg";
+  static constexpr auto SETTING_VIDEOSCREEN_GUIPEAKLUMINANCE_DOLBYVISION =
+      "videoscreen.guipeakluminance.dolbyvision";
+  static constexpr auto SETTING_VIDEOSCREEN_GUISATURATION_DOLBYVISION =
+      "videoscreen.guisaturation.dolbyvision";
   static constexpr auto SETTING_VIDEOSCREEN_HDRPGSPEAKLUMINANCE = "videoscreen.hdrpgspeakluminance";
   static constexpr auto SETTING_VIDEOSCREEN_HDRPGSSATURATION = "videoscreen.hdrpgssaturation";
+  static constexpr auto SETTING_VIDEOSCREEN_SDRPGSPEAKLUMINANCE = "videoscreen.sdrpgspeakluminance";
+  static constexpr auto SETTING_VIDEOSCREEN_SDRPGSSATURATION = "videoscreen.sdrpgssaturation";
+  static constexpr auto SETTING_VIDEOSCREEN_GUISRGBTRANSFER = "videoscreen.guisrgbtransfer";
+  static constexpr auto SETTING_VIDEOSCREEN_GUIDITHER8BIT = "videoscreen.guidither8bit";
   static constexpr auto SETTING_VIDEOSCREEN_DITHER = "videoscreen.dither";
   static constexpr auto SETTING_VIDEOSCREEN_DITHERDEPTH = "videoscreen.ditherdepth";
   static constexpr auto SETTING_AUDIOOUTPUT_AUDIODEVICE = "audiooutput.audiodevice";
@@ -402,6 +424,10 @@ public:
   static constexpr auto SETTING_AUDIOOUTPUT_STREAMSILENCE = "audiooutput.streamsilence";
   static constexpr auto SETTING_AUDIOOUTPUT_STREAMNOISE = "audiooutput.streamnoise";
   static constexpr auto SETTING_AUDIOOUTPUT_MIXSUBLEVEL = "audiooutput.mixsublevel";
+  static constexpr auto SETTING_AUDIOOUTPUT_DRC = "audiooutput.drc";
+  static constexpr auto SETTING_AUDIOOUTPUT_LFEMIXTO = "audiooutput.lfemixto";
+  static constexpr auto SETTING_AUDIOOUTPUT_BOOSTCENTER = "audiooutput.boostcenter";
+  static constexpr auto SETTING_AUDIOOUTPUT_IGNOREDOWNMIXMETADATA = "audiooutput.ignoredownmixmetadata";
   static constexpr auto SETTING_AUDIOOUTPUT_GUISOUNDMODE = "audiooutput.guisoundmode";
   static constexpr auto SETTING_AUDIOOUTPUT_GUISOUNDVOLUME = "audiooutput.guisoundvolume";
   static constexpr auto SETTING_AUDIOOUTPUT_PASSTHROUGH = "audiooutput.passthrough";
@@ -445,6 +471,7 @@ public:
   static constexpr auto SETTING_POWERMANAGEMENT_SHUTDOWNSTATE = "powermanagement.shutdownstate";
   static constexpr auto SETTING_POWERMANAGEMENT_WAKEONACCESS = "powermanagement.wakeonaccess";
   static constexpr auto SETTING_POWERMANAGEMENT_WAITFORNETWORK = "powermanagement.waitfornetwork";
+  static constexpr auto SETTING_DEBUG_SHOWONSCREENDEBUGINFO = "debug.showonscreendebuginfo";
   static constexpr auto SETTING_DEBUG_SHOWLOGINFO = "debug.showloginfo";
   static constexpr auto SETTING_DEBUG_EXTRALOGGING = "debug.extralogging";
   static constexpr auto SETTING_DEBUG_SETEXTRALOGLEVEL = "debug.setextraloglevel";
@@ -456,15 +483,17 @@ public:
   static constexpr auto SETTING_MASTERLOCK_LOCKCODE = "masterlock.lockcode";
   static constexpr auto SETTING_MASTERLOCK_STARTUPLOCK = "masterlock.startuplock";
   static constexpr auto SETTING_MASTERLOCK_MAXRETRIES = "masterlock.maxretries";
-  static constexpr auto SETTING_COREELEC_AMLOGIC_NOISEREDUCTION = "coreelec.amlogic.noisereduction";
-  static constexpr auto SETTING_COREELEC_AMLOGIC_SDR2HDR = "coreelec.amlogic.sdr2hdr";
-  static constexpr auto SETTING_COREELEC_AMLOGIC_HDR2SDR = "coreelec.amlogic.hdr2sdr";
   static constexpr auto SETTING_COREELEC_AMLOGIC_LIMIT_CD = "coreelec.amlogic.limitcd";
   static constexpr auto SETTING_COREELEC_AMLOGIC_FORCE_CS = "coreelec.amlogic.forcecs";
   static constexpr auto SETTING_COREELEC_AMLOGIC_DISABLEGUISCALING = "coreelec.amlogic.disableguiscaling";
+  static constexpr auto SETTING_COREELEC_AMLOGIC_USE_DISPLAY_AS_CLOCK = "coreelec.amlogic.usedisplayasclock";
+  static constexpr auto SETTING_COREELEC_AMLOGIC_VIDEOSYNC_FALLBACK_ON_STALL = "coreelec.amlogic.videosync.fallback.on.stall";
+  static constexpr auto SETTING_COREELEC_AMLOGIC_FAST_SEEK = "coreelec.amlogic.fastseek";
   static constexpr auto SETTING_COREELEC_AMLOGIC_DV_MODE = "coreelec.amlogic.dolbyvision.mode";
   static constexpr auto SETTING_COREELEC_AMLOGIC_DV_MODE_ON_LUMINANCE = "coreelec.amlogic.dolbyvision.mode.on.luminance";
+  static constexpr auto SETTING_COREELEC_AMLOGIC_DV_MASTERCLOCK_VSYNC_OFFSET = "coreelec.amlogic.dolbyvision.masterclock.vsync.offset";
   static constexpr auto SETTING_COREELEC_AMLOGIC_DV_TYPE = "coreelec.amlogic.dolbyvision.type";
+  static constexpr auto SETTING_COREELEC_AMLOGIC_DV_TYPE_ASSIGNED = "coreelec.amlogic.dolbyvision.type.assigned";
   static constexpr auto SETTING_COREELEC_AMLOGIC_DV_VIDEO_PROCESSOR = "coreelec.amlogic.dolbyvision.video.processor";
   static constexpr auto SETTING_COREELEC_AMLOGIC_DV_VIDEO_PROCESSOR_TM = "coreelec.amlogic.dolbyvision.video.processor.tm";
   static constexpr auto SETTING_COREELEC_AMLOGIC_DV_TYPE_VP_AUTO = "coreelec.amlogic.dolbyvision.video.type.vp.auto";
@@ -475,8 +504,11 @@ public:
   static constexpr auto SETTING_COREELEC_AMLOGIC_DV_VSVDB_MAX_LUM = "coreelec.amlogic.dolbyvision.vsvdb.max.luminance";
   static constexpr auto SETTING_COREELEC_AMLOGIC_DV_STD_SOURCE_LEVEL_5 = "coreelec.amlogic.dolbyvision.std.source.metadata.level5";
   static constexpr auto SETTING_COREELEC_AMLOGIC_DV_STD_SOURCE_LEVEL_5_OSDST = "coreelec.amlogic.dolbyvision.std.source.metadata.level5.osdst";
+  static constexpr auto SETTING_SUBTITLES_DOLBYVISION_L5_SIGNAL_MODE = "subtitles.dolbyvision.l5.signal.mode";
   static constexpr auto SETTING_COREELEC_AMLOGIC_DV_VS10_SDR8 = "coreelec.amlogic.dolbyvision.vs10.sdr8";
   static constexpr auto SETTING_COREELEC_AMLOGIC_DV_VS10_SDR10 = "coreelec.amlogic.dolbyvision.vs10.sdr10";
+  static constexpr auto SETTING_COREELEC_AMLOGIC_DV_VS10_SDR_BOOST = "coreelec.amlogic.dolbyvision.vs10.sdr.boost";
+  static constexpr auto SETTING_COREELEC_AMLOGIC_DV_VS10_SDR_SRC_MAX_NITS = "coreelec.amlogic.dolbyvision.vs10.sdr.source.max.nits";
   static constexpr auto SETTING_COREELEC_AMLOGIC_DV_VS10_HDR10 = "coreelec.amlogic.dolbyvision.vs10.hdr10";
   static constexpr auto SETTING_COREELEC_AMLOGIC_DV_VS10_HDR10PLUS = "coreelec.amlogic.dolbyvision.vs10.hdr10plus";
   static constexpr auto SETTING_COREELEC_AMLOGIC_DV_VS10_HDRHLG = "coreelec.amlogic.dolbyvision.vs10.hdrhlg";
@@ -486,10 +518,24 @@ public:
   static constexpr auto SETTING_COREELEC_AMLOGIC_DV_HDR10PLUS_PEAK_BRIGHTNESS_SOURCE = "coreelec.amlogic.dolbyvision.hdr10plus.peak.brightness.source";
   static constexpr auto SETTING_COREELEC_AMLOGIC_DV_DUAL_PRIORITY = "coreelec.amlogic.dolbyvision.dual.priority";
   static constexpr auto SETTING_COREELEC_AMLOGIC_DV_CMV40_APPEND = "coreelec.amlogic.dolbyvision.cmv40.append";
+  static constexpr auto SETTING_COREELEC_AMLOGIC_DV_CMV40_AUTO_TRIGGER = "coreelec.amlogic.dolbyvision.cmv40.auto.trigger";
+  static constexpr auto SETTING_COREELEC_AMLOGIC_DV_CMV40_AUTO2_THRESHOLD = "coreelec.amlogic.dolbyvision.cmv40.auto2.threshold";
   static constexpr auto SETTING_COREELEC_AMLOGIC_DV_AUDIO_SEAMLESSBRANCH = "coreelec.amlogic.dolbyvision.audio.seamlessbranch";
+  static constexpr auto SETTING_COREELEC_AMLOGIC_PREFER_12BIT = "coreelec.amlogic.prefer.12bit";
+  static constexpr auto SETTING_COREELEC_AMLOGIC_HDR10_LIMITER = "coreelec.amlogic.hdr10.limiter";
+  static constexpr auto SETTING_COREELEC_AMLOGIC_HDR10_MAX_LUMINANCE = "coreelec.amlogic.hdr10.max.luminance";
+  static constexpr auto SETTING_COREELEC_AMLOGIC_HDR10_MAX_CLL = "coreelec.amlogic.hdr10.max.cll";
+  static constexpr auto SETTING_COREELEC_AMLOGIC_DETECT_BROKEN_FILES = "coreelec.amlogic.detectbrokenfiles";
   static constexpr auto SETTING_COREELEC_AUDIO_AC3_DIALNORM = "coreelec.audio.ac3.dialnorm";
   static constexpr auto SETTING_COREELEC_AUDIO_EAC3_ATMOS_DIALNORM = "coreelec.audio.eac3.atmos.dialnorm";
   static constexpr auto SETTING_COREELEC_AUDIO_TRUEHD_ATMOS_DIALNORM = "coreelec.audio.truehd.atmos.dialnorm";
+  static constexpr auto SETTING_COREELEC_AUDIO_DTS_DIALNORM = "coreelec.audio.dts.dialnorm";
+  static constexpr auto SETTING_COREELEC_AUDIO_EAC3_SMALL_SPF_PCM = "coreelec.audio.eac3.small.spf.pcm";
+  static constexpr auto SETTING_COREELEC_AUDIO_DDR_PRIORITY = "coreelec.audio.ddr_priority";
+  static constexpr auto SETTING_COREELEC_RESET_PTS_ON_SEEK = "coreelec.resetptsonseek";
+  static constexpr auto SETTING_COREELEC_SUBTITLES_RECALL_FROM_FILE = "coreelec.subtitles.recallfromfile";
+  static constexpr auto SETTING_COREELEC_CODECLOGO_TIMEOUT = "coreelec.codeclogotimeout";
+  static constexpr auto SETTING_COREELEC_MKV_EDITIONS = "coreelec.mkveditions";
   static constexpr auto SETTING_CACHE_HARDDISK = "cache.harddisk";
   static constexpr auto SETTING_CACHEVIDEO_DVDROM = "cachevideo.dvdrom";
   static constexpr auto SETTING_CACHEVIDEO_LAN = "cachevideo.lan";

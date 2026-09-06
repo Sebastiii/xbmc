@@ -10,14 +10,17 @@
 
 #include "ServiceBroker.h"
 #include "log.h"
+#include "rendering/GLExtensions.h"
 #include "rendering/MatrixGL.h"
 #include "rendering/RenderSystem.h"
 #include "settings/AdvancedSettings.h"
 #include "settings/SettingsComponent.h"
+#include "utils/Map.h"
 #include "utils/StringUtils.h"
 
 #include <map>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 
 namespace

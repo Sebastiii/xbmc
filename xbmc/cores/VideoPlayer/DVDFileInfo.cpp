@@ -16,6 +16,7 @@
 #include "guilib/Texture.h"
 #include "pictures/Picture.h"
 #include "settings/AdvancedSettings.h"
+#include "settings/Settings.h"
 #include "settings/SettingsComponent.h"
 #include "utils/MemUtils.h"
 #include "utils/URIUtils.h"
@@ -42,6 +43,8 @@
 
 #include <cstdlib>
 #include <memory>
+#include <string>
+#include <vector>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -347,6 +350,102 @@ bool CDVDFileInfo::DemuxerToStreamDetails(const std::shared_ptr<CDVDInputStream>
   return result;
 }
 
+static bool GetHdrDetailsFromFrame(CDemuxStreamVideo* stream,
+                                   CDVDDemux* demuxer,
+                                   CStreamDetailVideo& vDetail)
+{
+  std::unique_ptr<CProcessInfo> pProcessInfo(CProcessInfo::CreateInstance());
+  std::vector<AVPixelFormat> pixFmts;
+  pixFmts.push_back(AV_PIX_FMT_YUV420P);
+  pProcessInfo->SetPixFormats(pixFmts);
+
+  CDVDStreamInfo hint(*stream, true);
+  hint.codecOptions = CODEC_FORCE_SOFTWARE;
+
+  std::unique_ptr<CDVDVideoCodec> pVideoCodec =
+      CDVDFactoryCodec::CreateVideoCodec(hint, *pProcessInfo);
+  if (!pVideoCodec)
+  {
+    CLog::LogF(LOGERROR, "unable to create video codec to retrieve HDR details");
+    return false;
+  }
+
+  int nTotalLen = demuxer->GetStreamLength();
+  int nSeekTo = nTotalLen / 5;
+
+  CLog::LogF(LOGDEBUG, "seeking to pos {}ms (total: {}ms) for HDR details", nSeekTo, nTotalLen);
+
+  if (!demuxer->SeekTime(static_cast<double>(nSeekTo), true))
+  {
+    CLog::LogF(LOGERROR, "unable to seek to pos {}ms", nSeekTo);
+    return false;
+  }
+
+  CDVDVideoCodec::VCReturn iDecoderState = CDVDVideoCodec::VC_NONE;
+  VideoPicture picture;
+  picture.Reset();
+
+  int abort_index = demuxer->GetNrOfStreams() * 160;
+  do
+  {
+    DemuxPacket* pPacket = demuxer->Read();
+
+    if (!pPacket)
+      break;
+
+    if (pPacket->iStreamId != stream->uniqueId || pPacket->isELPackage)
+    {
+      CDVDDemuxUtils::FreeDemuxPacket(pPacket);
+      continue;
+    }
+
+    pVideoCodec->AddData(*pPacket);
+    CDVDDemuxUtils::FreeDemuxPacket(pPacket);
+
+    iDecoderState = CDVDVideoCodec::VC_NONE;
+    int maxTries = 50;
+    while (maxTries-- > 0 && iDecoderState == CDVDVideoCodec::VC_NONE)
+    {
+      picture.Reset();
+      iDecoderState = pVideoCodec->GetPicture(&picture);
+    }
+
+    if (iDecoderState == CDVDVideoCodec::VC_PICTURE)
+    {
+      if (!(picture.iFlags & DVP_FLAG_DROPPED))
+        break;
+    }
+
+  } while (abort_index--);
+
+  if (iDecoderState != CDVDVideoCodec::VC_PICTURE || (picture.iFlags & DVP_FLAG_DROPPED))
+  {
+    CLog::LogF(LOGDEBUG, "decoder couldn't find a valid picture for HDR details");
+    picture.Reset();
+    return false;
+  }
+
+  if (!picture.strDVELType.empty() && !vDetail.m_strDvProfile.empty())
+  {
+    const size_t el = vDetail.m_strDvProfile.rfind(" EL");
+    if (el != std::string::npos && el == vDetail.m_strDvProfile.size() - 3)
+      vDetail.m_strDvProfile.erase(el);
+    vDetail.m_strDvProfile += " " + picture.strDVELType;
+  }
+
+  if (picture.hasHdr10Plus)
+  {
+    if (vDetail.m_strHdrType == "dolbyvision")
+      vDetail.m_strHdrTypeAlt = CStreamDetails::HdrTypeToString(StreamHdrType::HDR_TYPE_HDR10PLUS);
+    else
+      vDetail.SetHdrTypes(StreamHdrType::HDR_TYPE_HDR10PLUS,
+                          CStreamDetails::StringToHdrType(vDetail.m_strHdrTypeAlt));
+  }
+
+  picture.Reset();
+  return true;
+}
+
 /* returns true if details have been added */
 bool CDVDFileInfo::DemuxerToStreamDetails(const std::shared_ptr<CDVDInputStream>& pInputStream,
                                           CDVDDemux* pDemux,
@@ -372,7 +471,33 @@ bool CDVDFileInfo::DemuxerToStreamDetails(const std::shared_ptr<CDVDInputStream>
       p->m_iDuration = pDemux->GetStreamLength();
       p->m_strStereoMode = vstream->stereo_mode;
       p->m_strLanguage = vstream->language;
-      p->m_strHdrType = CStreamDetails::HdrTypeToString(vstream->hdr_type);
+      p->SetHdrTypes(vstream->hdr_type, StreamHdrType::HDR_TYPE_NONE);
+
+      if (vstream->hdr_type == StreamHdrType::HDR_TYPE_DOLBYVISION && vstream->dovi.dv_profile != 0)
+      {
+        p->m_strDvProfile =
+            std::to_string(static_cast<int>(vstream->dovi.dv_profile)) + "." +
+            std::to_string(static_cast<int>(vstream->dovi.dv_bl_signal_compatibility_id));
+
+        if (vstream->dovi.el_present_flag)
+          p->m_strDvProfile += " EL";
+
+        if (vstream->dovi.dv_bl_signal_compatibility_id == 4)
+          p->m_strHdrTypeAlt = CStreamDetails::HdrTypeToString(StreamHdrType::HDR_TYPE_HLG);
+      }
+
+      const bool probeDolbyVision = vstream->hdr_type == StreamHdrType::HDR_TYPE_DOLBYVISION &&
+                                    vstream->dovi.dv_profile != 5;
+      const bool probeHdr10 =
+          vstream->hdr_type == StreamHdrType::HDR_TYPE_HDR10 &&
+          CServiceBroker::GetSettingsComponent()->GetSettings()->GetBool(
+              CSettings::SETTING_MYVIDEOS_EXTRACTHDR10PLUS);
+
+      if (probeDolbyVision || probeHdr10)
+      {
+        if (!GetHdrDetailsFromFrame(vstream, pDemux, *p))
+          CLog::LogF(LOGDEBUG, "no additional HDR details found");
+      }
 
       // stack handling
       if (URIUtils::IsStack(path))
@@ -403,7 +528,7 @@ bool CDVDFileInfo::DemuxerToStreamDetails(const std::shared_ptr<CDVDInputStream>
       auto p = new CStreamDetailAudio();
       p->m_iChannels = static_cast<CDemuxStreamAudio*>(stream)->iChannels;
       p->m_strLanguage = stream->language;
-      p->m_strCodec = pDemux->GetStreamCodecName(stream->demuxerId, stream->uniqueId);
+      p->SetCodecFromStream(pDemux->GetStreamCodecName(stream->demuxerId, stream->uniqueId));
       details.AddStream(p);
       retVal = true;
     }

@@ -473,8 +473,10 @@ void CGUIEditControl::ProcessText(unsigned int currentTime)
   m_clipRect.y1 = m_posY;
   m_clipRect.y2 = m_posY + m_height;
 
-  // Limit left text max width to 50% of space when focused, otherwise 70%
-  const float maxTextWidth = m_width * (HasFocus() ? 0.5f : 0.7f);
+  const float floorTextWidth = m_width * (HasFocus() ? 0.5f : 0.7f);
+  const float entryTextWidth = m_label2.CalcTextWidth(GetDisplayedText() + L"|00");
+  const float maxTextWidth =
+      std::max(floorTextWidth, m_width - TEXT_SPACE - entryTextWidth);
 
   const float leftTextWidth =
       std::min(m_label.GetTextWidth(), maxTextWidth - 2 * m_label.GetLabelInfo().offsetX);
@@ -548,6 +550,9 @@ void CGUIEditControl::ProcessText(unsigned int currentTime)
 
 void CGUIEditControl::RenderText()
 {
+  if (CServiceBroker::GetWinSystem()->GetGfxContext().GetRenderOrder() ==
+      RENDER_ORDER_FRONT_TO_BACK)
+    return;
   m_label.Render();
 
   if (CServiceBroker::GetWinSystem()->GetGfxContext().SetClipRegion(m_clipRect.x1, m_clipRect.y1, m_clipRect.Width(), m_clipRect.Height()))

@@ -1,4 +1,5 @@
-set(SOURCES BaseRenderer.cpp
+set(SOURCES ActiveAreaDetector.cpp
+            BaseRenderer.cpp
             ColorManager.cpp
             OverlayRenderer.cpp
             OverlayRendererUtil.cpp
@@ -8,7 +9,8 @@ set(SOURCES BaseRenderer.cpp
             RenderManager.cpp
             DebugRenderer.cpp)
 
-set(HEADERS BaseRenderer.h
+set(HEADERS ActiveAreaDetector.h
+            BaseRenderer.h
             ColorManager.h
             DebugInfo.h
             OverlayRenderer.h

@@ -30,7 +30,7 @@
  \param bSourceLanguage If we are loading the source English strings.po.
  \return false if no strings.po file was loaded.
  */
-static bool LoadPO(const std::string &filename, std::map<uint32_t, LocStr>& strings,
+static bool LoadPO(const std::string &filename, LocStrMap& strings,
     std::string &encoding, uint32_t offset = 0 , bool bSourceLanguage = false)
 {
   CPODocument PODoc;
@@ -96,7 +96,7 @@ static bool LoadPO(const std::string &filename, std::map<uint32_t, LocStr>& stri
  \return false if no strings.po file was loaded.
  */
 static bool LoadStr2Mem(const std::string &pathname_in, const std::string &language,
-    std::map<uint32_t, LocStr>& strings,  std::string &encoding, uint32_t offset = 0 )
+    LocStrMap& strings,  std::string &encoding, uint32_t offset = 0 )
 {
   std::string pathname = CSpecialProtocol::TranslatePathConvertCase(pathname_in + language);
   if (!XFILE::CDirectory::Exists(pathname))
@@ -119,7 +119,7 @@ static bool LoadStr2Mem(const std::string &pathname_in, const std::string &langu
   return LoadPO(URIUtils::AddFileToFolder(pathname, "strings.po"), strings, encoding, offset, useSourceLang);
 }
 
-static bool LoadWithFallback(const std::string& path, const std::string& language, std::map<uint32_t, LocStr>& strings)
+static bool LoadWithFallback(const std::string& path, const std::string& language, LocStrMap& strings)
 {
   std::string encoding;
   if (!LoadStr2Mem(path, language, strings, encoding))
@@ -159,7 +159,7 @@ bool CLocalizeStrings::LoadSkinStrings(const std::string& path, const std::strin
 
 bool CLocalizeStrings::Load(const std::string& strPathName, const std::string& strLanguage)
 {
-  std::map<uint32_t, LocStr> strings;
+  LocStrMap strings;
   if (!LoadWithFallback(strPathName, strLanguage, strings))
     return false;
 
@@ -228,7 +228,7 @@ void CLocalizeStrings::Clear(uint32_t start, uint32_t end)
 
 bool CLocalizeStrings::LoadAddonStrings(const std::string& path, const std::string& language, const std::string& addonId)
 {
-  std::map<uint32_t, LocStr> strings;
+  LocStrMap strings;
   if (!LoadWithFallback(path, language, strings))
     return false;
 

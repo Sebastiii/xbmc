@@ -49,22 +49,22 @@ public:
 
 class CFileItem;
 
-enum IPlayerAudioCapabilities
+enum class IPlayerAudioCaps
 {
-  IPC_AUD_ALL,
-  IPC_AUD_OFFSET,
-  IPC_AUD_AMP,
-  IPC_AUD_SELECT_STREAM,
-  IPC_AUD_OUTPUT_STEREO,
-  IPC_AUD_SELECT_OUTPUT
+  ALL,
+  SELECT_STREAM,
+  SELECT_OUTPUT,
+  OUTPUT_STEREO,
+  OFFSET,
+  VOLUME_AMP,
 };
 
-enum IPlayerSubtitleCapabilities
+enum class IPlayerSubtitleCaps
 {
-  IPC_SUBS_ALL,
-  IPC_SUBS_SELECT,
-  IPC_SUBS_EXTERNAL,
-  IPC_SUBS_OFFSET
+  ALL,
+  SELECT_STREAM,
+  EXTERNAL,
+  OFFSET,
 };
 
 enum ERENDERFEATURE
@@ -190,6 +190,12 @@ public:
   virtual void SetTempo(float tempo) {}
   virtual bool SupportsTempo() const { return false; }
   virtual void FrameAdvance(int frames) {}
+  virtual void WaitAsyncMainPace() {}
+  virtual uint64_t GetVisibleOverlaySetSignature(bool& animated) const
+  {
+    animated = false;
+    return 0;
+  }
 
   //Returns true if not playback (paused or stopped being filled)
   virtual bool IsCaching() const { return false; }
@@ -210,16 +216,14 @@ public:
   virtual std::string GetPlayerState() { return ""; }
   virtual bool SetPlayerState(const std::string& state) { return false; }
 
-  virtual void GetAudioCapabilities(std::vector<int>& audioCaps) const
+  virtual void GetAudioCapabilities(std::vector<IPlayerAudioCaps>& caps) const
   {
-    audioCaps.assign(1, IPC_AUD_ALL);
+    caps.assign(1, IPlayerAudioCaps::ALL);
   }
-  /*!
-   \brief define the subtitle capabilities of the player
-   */
-  virtual void GetSubtitleCapabilities(std::vector<int>& subCaps) const
+
+  virtual void GetSubtitleCapabilities(std::vector<IPlayerSubtitleCaps>& caps) const
   {
-    subCaps.assign(1, IPC_SUBS_ALL);
+    caps.assign(1, IPlayerSubtitleCaps::ALL);
   }
 
   /*!
@@ -227,6 +231,8 @@ public:
    */
   virtual void Render(bool clear, uint32_t alpha = 255, bool gui = true) {}
   virtual void FlushRenderer() {}
+  virtual void PreInitRenderer() {}
+  virtual void UnInitRenderer() {}
   virtual void SetRenderViewMode(int mode, float zoom, float par, float shift, bool stretch) {}
   virtual float GetRenderAspectRatio() const { return 1.0; }
   virtual void TriggerUpdateResolution() {}

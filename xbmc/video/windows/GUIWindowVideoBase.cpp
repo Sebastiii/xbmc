@@ -160,7 +160,8 @@ bool CGUIWindowVideoBase::OnMessage(CGUIMessage& message)
         }
         else if (iAction == ACTION_SHOW_INFO)
         {
-          return OnItemInfo(iItem);
+          OnItemInfo(iItem);
+          return true;
         }
         else if (iAction == ACTION_PLAYER_PLAY)
         {
@@ -507,7 +508,7 @@ bool CGUIWindowVideoBase::ShowInfoAndRefresh(const CFileItemPtr& item, const Scr
   if (ret && IsActive())
   {
     const int itemNumber{m_viewControl.GetSelectedItem()};
-    Refresh();
+    Refresh(true);
     m_viewControl.SetSelectedItem(itemNumber);
   }
 
@@ -1126,7 +1127,8 @@ bool CGUIWindowVideoBase::PlayItem(const std::shared_ptr<CFileItem>& pItem,
 
     // recursively add items to list
     CFileItemList queuedItems;
-    VIDEO_UTILS::GetItemsForPlayList(item, queuedItems);
+    VIDEO_UTILS::GetItemsForPlayList(item, queuedItems,
+                                     ContentUtils::PlayMode::CHECK_AUTO_PLAY_NEXT_ITEM);
 
     CServiceBroker::GetPlaylistPlayer().ClearPlaylist(PLAYLIST::TYPE_VIDEO);
     CServiceBroker::GetPlaylistPlayer().Reset();

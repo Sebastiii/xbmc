@@ -13,6 +13,7 @@
 #include "guilib/GUIWindowManager.h"
 #include "utils/Screenshot.h"
 #include "windowing/GraphicContext.h"
+#include "windowing/WinSystem.h"
 
 #include <memory>
 #include <mutex>
@@ -40,8 +41,7 @@ bool CScreenshotSurfaceGL::Capture()
   if (!gui)
     return false;
 
-  std::lock_guard lock(winsystem->GetGfxContext());
-
+  std::unique_lock lock(winsystem->GetGfxContext());
   gui->GetWindowManager().Render();
 
   glReadBuffer(GL_BACK);

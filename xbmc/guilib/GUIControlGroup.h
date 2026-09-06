@@ -41,6 +41,7 @@ public:
   void FreeResources(bool immediately = false) override;
   void DynamicResourceAlloc(bool bOnOff) override;
   bool CanFocus() const override;
+  void AssignDepth() override;
 
   EVENT_RESULT SendMouseEvent(const CPoint& point, const KODI::MOUSE::CMouseEvent& event) override;
   void UnfocusFromPoint(const CPoint &point) override;
@@ -71,6 +72,8 @@ public:
   void SaveStates(std::vector<CControlState> &states) override;
 
   bool IsGroup() const override { return true; }
+
+  bool HasVisibleControlInRegions(const std::vector<CRect>& bars) const;
 
 #ifdef _DEBUG
   void DumpTextureUse() override;

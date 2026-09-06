@@ -29,6 +29,59 @@ CRenderSystemBase::CRenderSystemBase()
 
 CRenderSystemBase::~CRenderSystemBase() = default;
 
+bool CRenderSystemBase::SupportsGuiRenderTargets() const
+{
+  return false;
+}
+
+std::unique_ptr<CGUIRenderTargetFBO> CRenderSystemBase::CreateGuiRenderTarget(unsigned int width,
+                                                                           unsigned int height)
+{
+  return {};
+}
+
+bool CRenderSystemBase::BeginGuiRenderTarget(CGUIRenderTargetFBO& target)
+{
+  return false;
+}
+
+bool CRenderSystemBase::BeginGuiRenderTargetPersistent(CGUIRenderTargetFBO& target, bool clearColor)
+{
+  return false;
+}
+
+void CRenderSystemBase::EndGuiRenderTarget(CGUIRenderTargetFBO& target)
+{
+}
+
+bool CRenderSystemBase::RenderGuiRenderTarget(const CGUIRenderTargetFBO& target, bool replace)
+{
+  return false;
+}
+
+void* CRenderSystemBase::CreateGuiRenderFence()
+{
+  return nullptr;
+}
+
+bool CRenderSystemBase::WaitGuiRenderFence(void* fence, bool poll)
+{
+  return true;
+}
+
+bool CRenderSystemBase::WaitGuiRenderFenceBounded(void* fence, uint64_t maxWaitNs)
+{
+  return true;
+}
+
+void CRenderSystemBase::DeleteGuiRenderFence(void* fence)
+{
+}
+
+void CRenderSystemBase::EstablishGuiRenderBaseline(unsigned int width, unsigned int height)
+{
+}
+
 void CRenderSystemBase::GetRenderVersion(unsigned int& major, unsigned int& minor) const
 {
   major = m_RenderVersionMajor;
@@ -73,7 +126,7 @@ void CRenderSystemBase::ShowSplash(const std::string& message)
   }
 
   CServiceBroker::GetWinSystem()->GetGfxContext().lock();
-  CServiceBroker::GetWinSystem()->GetGfxContext().Clear();
+  CServiceBroker::GetWinSystem()->GetGfxContext().Clear(0xff000000);
 
   RESOLUTION_INFO res = CServiceBroker::GetWinSystem()->GetGfxContext().GetResInfo();
   CServiceBroker::GetWinSystem()->GetGfxContext().SetRenderingResolution(res, true);

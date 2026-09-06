@@ -19,11 +19,30 @@
 #include "utils/EndianSwap.h"
 #include "utils/log.h"
 #include "windowing/GraphicContext.h"
+#include "windowing/WinSystem.h"
+
+#include <cstdint>
 
 extern "C"
 {
 #include <libavutil/dict.h>
 }
+
+namespace
+{
+bool PgsIsPqAuthored(const CDVDStreamInfo& hints)
+{
+  switch (hints.hdrType)
+  {
+    case StreamHdrType::HDR_TYPE_HDR10:
+    case StreamHdrType::HDR_TYPE_HDR10PLUS:
+    case StreamHdrType::HDR_TYPE_DOLBYVISION:
+      return true;
+    default:
+      return false;
+  }
+}
+} // namespace
 
 CDVDOverlayCodecFFmpeg::CDVDOverlayCodecFFmpeg() : CDVDOverlayCodec("FFmpeg Subtitle Decoder")
 {
@@ -117,12 +136,7 @@ bool CDVDOverlayCodecFFmpeg::Open(CDVDStreamInfo &hints, CDVDCodecOptions &optio
   if (m_pCodecContext->codec_id == AV_CODEC_ID_HDMV_PGS_SUBTITLE)
   {
     // UHD-BD HDR PGS is BT.2020 PQ, SDR PGS is SDR BT.709 or SDR BT.2020.
-    StreamHdrType videoHdrType = hints.hdrType;
-
-    // Note: HDR10+ is not identified currently upstream - will though be caught as HDR10.
-    m_pgsIsPqAuthored = (videoHdrType == StreamHdrType::HDR_TYPE_HDR10 ||
-                         videoHdrType == StreamHdrType::HDR_TYPE_HDR10PLUS ||
-                         videoHdrType == StreamHdrType::HDR_TYPE_DOLBYVISION);
+    m_pgsIsPqAuthored = PgsIsPqAuthored(hints);
 
     // TODO: identify SDR BT.2020 and do the right thing for the PGS matrix, currently will treat as BT.709.
     const char* matrix = m_pgsIsPqAuthored ? "bt2020" : "auto";
@@ -140,6 +154,13 @@ bool CDVDOverlayCodecFFmpeg::Open(CDVDStreamInfo &hints, CDVDCodecOptions &optio
 
   av_dict_free(&codecOpts);
 
+  logComponentM(LOGDEBUG, LOGVIDEO,
+                "overlay codec open: codec_id={} name={} codec.time_base={}/{} "
+                "pkt.time_base={}/{}",
+                static_cast<int>(hints.codec), pCodec->name ? pCodec->name : "<null>",
+                m_pCodecContext->time_base.num, m_pCodecContext->time_base.den,
+                m_pCodecContext->pkt_timebase.num, m_pCodecContext->pkt_timebase.den);
+
   return true;
 }
 
@@ -155,7 +176,7 @@ OverlayMessage CDVDOverlayCodecFFmpeg::Decode(DemuxPacket* pPacket)
   AVPacket* avpkt = av_packet_alloc();
   if (!avpkt)
   {
-    CLog::Log(LOGERROR, "CDVDOverlayCodecFFmpeg::{} - av_packet_alloc failed: {}", __FUNCTION__,
+    logComponentM(LOGERROR, LOGVIDEO, "CDVDOverlayCodecFFmpeg::{} - av_packet_alloc failed: {}", __FUNCTION__,
               strerror(errno));
     return OverlayMessage::OC_ERROR;
   }
@@ -173,13 +194,13 @@ OverlayMessage CDVDOverlayCodecFFmpeg::Decode(DemuxPacket* pPacket)
 
   if (len < 0)
   {
-    CLog::Log(LOGERROR, "{} - avcodec_decode_subtitle returned failure", __FUNCTION__);
+    logComponentM(LOGERROR, LOGVIDEO, "{} - avcodec_decode_subtitle returned failure", __FUNCTION__);
     Flush();
     return OverlayMessage::OC_ERROR;
   }
 
   if (len != size)
-    CLog::Log(LOGWARNING, "{} - avcodec_decode_subtitle didn't consume the full packet",
+    logComponentM(LOGWARNING, LOGVIDEO, "{} - avcodec_decode_subtitle didn't consume the full packet",
               __FUNCTION__);
 
   if (!gotsub)
@@ -199,8 +220,10 @@ OverlayMessage CDVDOverlayCodecFFmpeg::Decode(DemuxPacket* pPacket)
     }
   }
 
-  m_StartTime   = DVD_MSEC_TO_TIME(m_Subtitle.start_display_time);
-  m_StopTime    = DVD_MSEC_TO_TIME(m_Subtitle.end_display_time);
+  m_StartTime = DVD_MSEC_TO_TIME(m_Subtitle.start_display_time);
+  m_StopTime = (m_Subtitle.end_display_time == UINT32_MAX)
+                   ? 0.0
+                   : DVD_MSEC_TO_TIME(m_Subtitle.end_display_time);
 
   //adapt start and stop time to our packet pts
   CDVDOverlayCodec::GetAbsoluteTimes(m_StartTime, m_StopTime, pPacket);
@@ -210,6 +233,30 @@ OverlayMessage CDVDOverlayCodecFFmpeg::Decode(DemuxPacket* pPacket)
     m_StopTime += pts_offset;
 
   m_SubtitleIndex = 0;
+
+  {
+    static unsigned int s_lastRects = 0;
+    static double s_lastStart = -1.0, s_lastStop = -1.0;
+    if (m_Subtitle.num_rects != s_lastRects ||
+        m_StartTime / DVD_TIME_BASE != s_lastStart ||
+        m_StopTime / DVD_TIME_BASE != s_lastStop)
+    {
+      s_lastRects = m_Subtitle.num_rects;
+      s_lastStart = m_StartTime / DVD_TIME_BASE;
+      s_lastStop = m_StopTime / DVD_TIME_BASE;
+      logComponentM(LOGDEBUG, LOGVIDEO,
+                    "overlay codec decoded: rects={} sub.pts={:.6f} "
+                    "sub.start_dt_ms={} sub.end_dt_ms={} pts_offset={:.6f} "
+                    "m_StartTime={:.6f} m_StopTime={:.6f}",
+                    m_Subtitle.num_rects,
+                    m_Subtitle.pts == AV_NOPTS_VALUE
+                        ? -1.0
+                        : static_cast<double>(m_Subtitle.pts) / AV_TIME_BASE,
+                    m_Subtitle.start_display_time, m_Subtitle.end_display_time,
+                    pts_offset / DVD_TIME_BASE, m_StartTime / DVD_TIME_BASE,
+                    m_StopTime / DVD_TIME_BASE);
+    }
+  }
 
   return OverlayMessage::OC_OVERLAY;
 }

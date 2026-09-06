@@ -57,11 +57,14 @@ public:
     GLfloat x, y, z;
   };
 
-  std::vector<VERTEX> m_vertex;
+private:
+  struct Page
+  {
+    GLuint texture{0};
+    std::vector<VERTEX> vertex;
+  };
 
-  GLuint m_texture = 0;
-  float m_u;
-  float m_v;
+  std::vector<Page> m_pages;
 };
 
 } // namespace OVERLAY

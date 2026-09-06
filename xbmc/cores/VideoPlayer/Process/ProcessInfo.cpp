@@ -67,6 +67,13 @@ void CProcessInfo::SetDataCache(CDataCacheCore *cache)
 //******************************************************************************
 void CProcessInfo::ResetVideoCodecInfo()
 {
+  {
+    std::lock_guard lock(m_stateSection);
+    m_stateSeeking = false;
+    if (m_dataCache)
+      m_dataCache->SetStateSeeking(m_stateSeeking);
+  }
+
   std::lock_guard lock(m_videoCodecSection);
 
   m_videoIsHWDecoder = false;
@@ -82,7 +89,6 @@ void CProcessInfo::ResetVideoCodecInfo()
   m_deintMethods.clear();
   m_deintMethods.push_back(EINTERLACEMETHOD::VS_INTERLACEMETHOD_NONE);
   m_deintMethodDefault = EINTERLACEMETHOD::VS_INTERLACEMETHOD_NONE;
-  m_stateSeeking = false;
 
   if (m_dataCache)
   {
@@ -92,7 +98,6 @@ void CProcessInfo::ResetVideoCodecInfo()
     m_dataCache->SetVideoDimensions(m_videoWidth, m_videoHeight);
     m_dataCache->SetVideoFps(m_videoFPS);
     m_dataCache->SetVideoDAR(m_videoDAR);
-    m_dataCache->SetStateSeeking(m_stateSeeking);
     m_dataCache->SetVideoStereoMode(m_videoStereoMode);
   }
 }
@@ -238,6 +243,16 @@ bool CProcessInfo::GetVideoInterlaced() const {
   return m_videoIsInterlaced;
 }
 
+void CProcessInfo::SetInMenu(bool inMenu)
+{
+  m_isInMenu.store(inMenu, std::memory_order_relaxed);
+}
+
+bool CProcessInfo::GetInMenu() const
+{
+  return m_isInMenu.load(std::memory_order_relaxed);
+}
+
 EINTERLACEMETHOD CProcessInfo::GetFallbackDeintMethod()
 {
   return VS_INTERLACEMETHOD_DEINTERLACE;
@@ -329,6 +344,9 @@ void CProcessInfo::ResetAudioCodecInfo()
   m_audioChannels = "unknown";
   m_audioSampleRate = 0;;
   m_audioBitsPerSample = 0;
+  m_audioObjectCount = -1;
+  m_audioObjectChannels = -1;
+  m_audioBedChannels = -1;
 
   if (m_dataCache)
   {
@@ -336,6 +354,9 @@ void CProcessInfo::ResetAudioCodecInfo()
     m_dataCache->SetAudioChannels(m_audioChannels);
     m_dataCache->SetAudioSampleRate(m_audioSampleRate);
     m_dataCache->SetAudioBitsPerSample(m_audioBitsPerSample);
+    m_dataCache->SetAudioObjectCount(m_audioObjectCount);
+    m_dataCache->SetAudioObjectChannels(m_audioObjectChannels);
+    m_dataCache->SetAudioBedChannels(m_audioBedChannels);
   }
 }
 
@@ -360,13 +381,66 @@ void CProcessInfo::SetAudioChannels(const CAEChannelInfo& channels)
 {
   std::unique_lock lock(m_audioCodecSection);
 
-  m_audioChannels = std::string(channels);
+  const uint64_t mask = CDataCacheCore::MakeSpeakerMask(channels);
+  m_audioChannels = channels.HasChannel(AE_CH_RAW) ? CDataCacheCore::SpeakerMaskToString(mask)
+                                                   : std::string(channels);
 
   if (m_dataCache)
   {
     m_dataCache->SetAudioChannels(m_audioChannels);
-    m_dataCache->SetAudioSpeakerMask(CDataCacheCore::MakeSpeakerMask(channels));
+    m_dataCache->SetAudioSpeakerMask(mask);
   }
+}
+
+void CProcessInfo::SetAudioObjectCount(int objectCount)
+{
+  std::unique_lock lock(m_audioCodecSection);
+
+  m_audioObjectCount = objectCount;
+
+  if (m_dataCache)
+    m_dataCache->SetAudioObjectCount(m_audioObjectCount);
+}
+
+int CProcessInfo::GetAudioObjectCount()
+{
+  std::unique_lock lock(m_audioCodecSection);
+
+  return m_audioObjectCount;
+}
+
+void CProcessInfo::SetAudioObjectChannels(int objectChannels)
+{
+  std::unique_lock lock(m_audioCodecSection);
+
+  m_audioObjectChannels = objectChannels;
+
+  if (m_dataCache)
+    m_dataCache->SetAudioObjectChannels(m_audioObjectChannels);
+}
+
+void CProcessInfo::SetAudioBedChannels(int bedChannels)
+{
+  std::unique_lock lock(m_audioCodecSection);
+
+  m_audioBedChannels = bedChannels;
+
+  if (m_dataCache)
+    m_dataCache->SetAudioBedChannels(m_audioBedChannels);
+}
+
+int CProcessInfo::GetAudioBedChannels()
+{
+  std::unique_lock lock(m_audioCodecSection);
+
+  return m_audioBedChannels;
+}
+
+int CProcessInfo::GetAudioObjectChannels()
+{
+  std::unique_lock lock(m_audioCodecSection);
+
+  return m_audioObjectChannels;
 }
 
 void CProcessInfo::SetAudioChannels(const std::string &channels)
@@ -503,7 +577,7 @@ void CProcessInfo::SeekFinished(int64_t offset)
 
 void CProcessInfo::SetStateSeeking(bool active)
 {
-  std::lock_guard lock(m_renderSection);
+  std::lock_guard lock(m_stateSection);
 
   m_stateSeeking = active;
 
@@ -520,7 +594,7 @@ bool CProcessInfo::IsSeeking()
 
 void CProcessInfo::SetStateRealtime(bool state)
 {
-  std::lock_guard lock(m_renderSection);
+  std::lock_guard lock(m_stateSection);
 
   m_realTimeStream = state;
 }
@@ -618,7 +692,8 @@ float CProcessInfo::MaxTempoPlatform()
 bool CProcessInfo::IsTempoAllowed(float tempo)
 {
   if (tempo > MinTempoPlatform() &&
-      (tempo < MaxTempoPlatform() || tempo < CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_maxTempo))
+      (tempo < MaxTempoPlatform() ||
+       tempo < CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_maxTempo + 0.05f))
     return true;
 
   return false;

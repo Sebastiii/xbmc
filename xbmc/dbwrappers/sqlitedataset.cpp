@@ -385,6 +385,7 @@ void SqliteDatabase::disconnect(void)
     return;
   sqlite3_close(conn);
   active = false;
+  conn = nullptr;
 }
 
 int SqliteDatabase::create()
@@ -845,7 +846,7 @@ int SqliteDataset::exec(const std::string& sql)
       qry.resize(pos);
   }
 
-  char* errmsg;
+  char* errmsg = nullptr;
   if ((res = db->setErr(sqlite3_exec(handle(), qry.c_str(), &callback, &exec_res, &errmsg),
                         qry.c_str())) == SQLITE_OK)
     return res;
@@ -853,13 +854,19 @@ int SqliteDataset::exec(const std::string& sql)
   {
     if (errmsg)
     {
-      DbErrors err("%s (%s)", db->getErrorMsg(), errmsg);
+      const char* dbErr = db->getErrorMsg();
+      if (!dbErr)
+        dbErr = "unknown database error";
+      DbErrors err("%s (%s)", dbErr, errmsg);
       sqlite3_free(errmsg);
       throw err;
     }
     else
     {
-      throw DbErrors("%s", db->getErrorMsg());
+      const char* dbErr = db->getErrorMsg();
+      if (!dbErr)
+        dbErr = "unknown database error";
+      throw DbErrors("%s", dbErr);
     }
   }
 }

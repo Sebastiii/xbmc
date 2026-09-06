@@ -18,6 +18,7 @@
 #include "utils/Geometry.h"
 
 #include <queue>
+#include <vector>
 #include <linux/videodev2.h>
 #include <deque>
 #include <atomic>
@@ -30,6 +31,7 @@ extern "C" {
 typedef struct hdr_buf {
     char *data;
     int size;
+    int capacity;
 } hdr_buf_t;
 
 typedef struct am_packet {
@@ -209,6 +211,7 @@ typedef struct am_private_t
   unsigned int      video_rate;
   unsigned int      video_rotation_degree;
   FFmpegExtraData   extradata;
+  std::vector<uint8_t> av1_source_copy;
   DllLibAmCodec     *m_dll;
 
   int               dumpfile;
@@ -259,10 +262,12 @@ public:
   bool          OpenDecoder(bool restart);
   void          CloseDecoder(bool restart);
   void          Reset();
+  void          Abort();
 
   bool          Enable_vadj1();
 
   bool          AddData(uint8_t *pData, size_t size, double dts, double pts);
+  int           AddHDR10PData(const uint8_t *pData, size_t size);
   CDVDVideoCodec::VCReturn GetPicture(VideoPicture& videoPicture);
 
   void          SetSpeed(int speed);
@@ -306,12 +311,18 @@ private:
 
   DllLibAmCodec   *m_dll;
   bool             m_opened;
+  bool             m_fieldRateHeld = false;
   bool             m_drain = false;
+  bool             m_no_data_since_reset = false;
+  bool             m_pictureEmitted = false;
+  bool             m_stillEosSent = false;
   am_private_t    *am_private;
 
   int              m_speed;
   uint64_t         m_cur_pts;
   uint64_t         m_last_pts;
+  size_t           m_repairExcursionRun = 0;
+  bool             m_repairTimestamps = false;
   uint32_t         m_bufferIndex;
 
   CRect            m_dst_rect;
@@ -333,6 +344,9 @@ private:
 
   PosixFilePtr     m_amlVideoFile;
   std::string      m_defaultVfmMap;
+  std::string      m_dvblpathVfmMap;
+  bool             m_vfmDefaultModified = false;
+  bool             m_vfmDvblpathModified = false;
 
   static           std::atomic_flag  m_pollSync;
   static int       m_pollDevice;
@@ -349,11 +363,18 @@ private:
   float            m_decoder_minimum_buffer;
   float            m_decoder_minimum_stream_buffer;
 
-  std::chrono::time_point<std::chrono::system_clock> m_tp_last_frame;
+  std::chrono::time_point<std::chrono::steady_clock> m_tp_last_frame;
   float            m_last_drain_buffer_level{0.0f};
 
   bool             m_buffer_level_ready;
   float            m_minimum_buffer_level{0.0f};
+  bool             m_starve_bypass{false};
+
+  bool             m_wrFailActive = false;
+  std::chrono::time_point<std::chrono::steady_clock> m_tpWrFailStart;
+  std::chrono::time_point<std::chrono::steady_clock> m_tpWrFailLastReset;
+  std::chrono::time_point<std::chrono::steady_clock> m_tpWrFailLastWarn;
+  std::atomic_bool m_abort{false};
 
   std::mutex       m_ioControlMutex;
 };

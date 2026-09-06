@@ -38,6 +38,7 @@ CPlayList::CPlayList(Id id /* = PLAYLIST::TYPE_NONE */) : m_id(id)
   m_iPlayableItems = -1;
   m_bShuffled = false;
   m_bWasPlayed = false;
+  m_iModCount = 0;
 }
 
 void CPlayList::AnnounceRemove(int pos) const {
@@ -89,6 +90,9 @@ void CPlayList::Add(const std::shared_ptr<CFileItem>& item, int iPosition, int i
   // set 'IsPlayable' property - needed for properly handling plugin:// URLs
   item->SetProperty("IsPlayable", true);
 
+  if (!item->HasProperty("BasePath"))
+    item->SetProperty("BasePath", m_strBasePath);
+
   //CLog::Log(LOGDEBUG,"{} item:({:02}/{:02})[{}]", __FUNCTION__, iPosition, item->m_iprogramCount, item->GetPath());
   if (iPosition == iOldSize)
     m_vecItems.push_back(item);
@@ -100,6 +104,7 @@ void CPlayList::Add(const std::shared_ptr<CFileItem>& item, int iPosition, int i
     if (iOrder < iOldSize)
       IncrementOrder(iPosition + 1, iOrder);
   }
+  ++m_iModCount;
   AnnounceAdd(item, iPosition);
 }
 
@@ -210,6 +215,7 @@ void CPlayList::Clear()
   if (!m_vecItems.empty())
   {
     m_vecItems.erase(m_vecItems.begin(), m_vecItems.end());
+    ++m_iModCount;
     announce = true;
   }
   m_strPlayListName = "";
@@ -263,6 +269,8 @@ void CPlayList::Shuffle(int iPosition)
     ivecItems it = m_vecItems.begin() + iPosition;
     KODI::UTILS::RandomShuffle(it, m_vecItems.end());
 
+    ++m_iModCount;
+
     // the list is now shuffled!
     m_bShuffled = true;
   }
@@ -278,6 +286,7 @@ struct SSortPlayListItem
 
 void CPlayList::UnShuffle()
 {
+  ++m_iModCount;
   std::sort(m_vecItems.begin(), m_vecItems.end(), SSortPlayListItem::PlaylistSort);
   // the list is now unshuffled!
   m_bShuffled = false;
@@ -301,6 +310,7 @@ void CPlayList::Remove(const std::string& strFileName)
     {
       iOrder = item->m_iprogramCount;
       it = m_vecItems.erase(it);
+      ++m_iModCount;
       AnnounceRemove(position);
       //CLog::Log(LOGDEBUG,"PLAYLIST, removing item at order {}", iPos);
     }
@@ -331,6 +341,7 @@ void CPlayList::Remove(int position)
   {
     iOrder = m_vecItems[position]->m_iprogramCount;
     m_vecItems.erase(m_vecItems.begin() + position);
+    ++m_iModCount;
   }
   DecrementOrder(iOrder);
 
@@ -382,6 +393,8 @@ bool CPlayList::Swap(int position1, int position2)
   {
     return false;
   }
+
+  ++m_iModCount;
 
   if (!IsShuffled())
   {
@@ -474,6 +487,8 @@ bool CPlayList::Expand(int position)
     (*playlist)[i]->SetDynPath((*playlist)[i]->GetPath());
     (*playlist)[i]->SetPath(item->GetDynPath());
     (*playlist)[i]->SetStartOffset(item->GetStartOffset());
+    if (!(*playlist)[i]->HasProperty("BasePath"))
+      (*playlist)[i]->SetProperty("BasePath", playlist->m_strBasePath);
   }
 
   if (playlist->size() <= 0)

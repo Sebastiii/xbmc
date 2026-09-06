@@ -115,18 +115,22 @@ void CTCPServer::Process()
     struct timeval  to     = {1, 0};
     FD_ZERO(&rfds);
 
-    for (auto& it : m_servers)
     {
-      FD_SET(it, &rfds);
-      if ((intptr_t)it > (intptr_t)max_fd)
-        max_fd = it;
-    }
+      std::unique_lock lock(m_connectionsCritSection);
 
-    for (unsigned int i = 0; i < m_connections.size(); i++)
-    {
-      FD_SET(m_connections[i]->m_socket, &rfds);
-      if ((intptr_t)m_connections[i]->m_socket > (intptr_t)max_fd)
-        max_fd = m_connections[i]->m_socket;
+      for (auto& it : m_servers)
+      {
+        FD_SET(it, &rfds);
+        if ((intptr_t)it > (intptr_t)max_fd)
+          max_fd = it;
+      }
+
+      for (unsigned int i = 0; i < m_connections.size(); i++)
+      {
+        FD_SET(m_connections[i]->m_socket, &rfds);
+        if ((intptr_t)m_connections[i]->m_socket > (intptr_t)max_fd)
+          max_fd = m_connections[i]->m_socket;
+      }
     }
 
     int res = select((intptr_t)max_fd+1, &rfds, nullptr, nullptr, &to);
@@ -138,6 +142,8 @@ void CTCPServer::Process()
     }
     else if (res > 0)
     {
+      std::unique_lock lock(m_connectionsCritSection);
+
       for (int i = m_connections.size() - 1; i >= 0; i--)
       {
         int socket = m_connections[i]->m_socket;
@@ -237,6 +243,8 @@ void CTCPServer::Announce(ANNOUNCEMENT::AnnouncementFlag flag,
                           const std::string& message,
                           const CVariant& data)
 {
+  std::unique_lock lock(m_connectionsCritSection);
+
   if (m_connections.empty())
     return;
 
@@ -480,13 +488,17 @@ bool CTCPServer::InitializeTCP()
 
 void CTCPServer::Deinitialize()
 {
-  for (unsigned int i = 0; i < m_connections.size(); i++)
   {
-    m_connections[i]->Disconnect();
-    delete m_connections[i];
-  }
+    std::unique_lock lock(m_connectionsCritSection);
 
-  m_connections.clear();
+    for (unsigned int i = 0; i < m_connections.size(); i++)
+    {
+      m_connections[i]->Disconnect();
+      delete m_connections[i];
+    }
+
+    m_connections.clear();
+  }
 
   for (unsigned int i = 0; i < m_servers.size(); i++)
     closesocket(m_servers[i]);

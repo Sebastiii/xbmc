@@ -42,6 +42,7 @@ public:
 
 #include "PeripheralHID.h"
 #include "XBDateTime.h"
+#include "input/actions/interfaces/IActionListener.h"
 #include "interfaces/AnnouncementManager.h"
 #include "threads/CriticalSection.h"
 #include "threads/Thread.h"
@@ -93,6 +94,7 @@ typedef enum
 
 class CPeripheralCecAdapter : public CPeripheralHID,
                               public ANNOUNCEMENT::IAnnouncer,
+                              public KODI::ACTION::IActionListener,
                               private CThread
 {
   friend class CPeripheralCecAdapterUpdateThread;
@@ -126,10 +128,13 @@ public:
   unsigned int GetHoldTime(void);
   void ResetButton(void);
 
+  bool OnAction(const CAction& action) override { return false; }
+  void OnActionPre(const CAction& action) override;
+
   // public CEC methods
   void ActivateSource(void);
   void UnregisterDevice(void);
-  void StandbyDevices(void);
+  void StandbyDevices(bool bBypassTimer = false);
   bool ToggleDeviceState(CecStateChange mode = STATE_SWITCH_TOGGLE, bool forceType = false);
 
 private:
@@ -145,6 +150,9 @@ private:
   void SetConfigurationFromLibCEC(const CEC::libcec_configuration& config);
   void SetVersionInfo(const CEC::libcec_configuration& configuration);
 
+  bool LoadCecFuncConfig(void);
+  void SetWakeupBitsFromSettings(void);
+
   static void ReadLogicalAddresses(const std::string& strString,
                                    CEC::cec_logical_addresses& addresses);
   static void ReadLogicalAddresses(int iLocalisedId, CEC::cec_logical_addresses& addresses);
@@ -159,6 +167,7 @@ private:
   void PushCecKeypress(const CEC::cec_keypress& key);
   void PushCecKeypress(const CecButtonPress& key);
   void GetNextKey(void);
+  void ProcessInactiveView(void);
 
   void SetAudioSystemConnected(bool bSetTo);
   void SetMenuLanguage(const char* strLanguage) const;
@@ -199,7 +208,10 @@ private:
   CEC::libcec_configuration m_configuration;
   bool m_bActiveSourcePending;
   bool m_bStandbyPending;
+  bool m_bExplicitStandbyPending;
+  bool m_bInactiveViewPending;
   CDateTime m_preventActivateSourceOnPlay;
+  CDateTime m_tvStandbyReceived;
   bool m_bActiveSourceBeforeStandby;
   bool m_bOnPlayReceived;
   bool m_bPlaybackPaused;
@@ -210,7 +222,12 @@ private:
   bool m_bSendInactiveSource;
   bool m_bPowerOffScreensaver;
   bool m_bShutdownOnStandby;
-  int m_iCec_func_config;
+  int m_iCec_func_config = 0;
+  bool m_bFuncConfigLoaded = false;
+  std::chrono::steady_clock::time_point m_lastActivateSourceTime{};
+  std::chrono::steady_clock::time_point m_lastCecKeypressTime{};
+  std::chrono::steady_clock::time_point m_lastSourceDeactivatedTime{};
+  std::chrono::steady_clock::time_point m_lastActionPreCheckTime{};
 };
 
 class CPeripheralCecAdapterUpdateThread : public CThread

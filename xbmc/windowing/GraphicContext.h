@@ -16,6 +16,7 @@
 #include "utils/StreamDetails.h"
 #include "utils/TransformMatrix.h" // for the members m_guiTransform etc.
 
+#include <atomic>
 #include <map>
 #include <stack>
 #include <string>
@@ -60,6 +61,20 @@ enum AdjustRefreshRate
   ADJUST_REFRESHRATE_ON_START,
 };
 
+enum RENDER_ORDER
+{
+  RENDER_ORDER_ALL_BACK_TO_FRONT = 0,
+  RENDER_ORDER_BACK_TO_FRONT,
+  RENDER_ORDER_FRONT_TO_BACK,
+};
+
+enum class GuiHdr : int
+{
+  SDR = 0,
+  HDR,
+  HDR_PQ,
+};
+
 class CGraphicContext : public CCriticalSection
 {
 public:
@@ -102,8 +117,37 @@ public:
   void ResetScreenParameters(RESOLUTION res);
   void CaptureStateBlock();
   void ApplyStateBlock();
-  void Clear(UTILS::COLOR::Color color = 0);
+  /*! \brief Invalidates color buffer, clears the depth buffer (if used). 
+   Will result in undefined color buffer values which will have to be 
+   repainted. Has to be called at the beginning of a frame.
+   */
+  void Clear();
+  /*! \brief Clears the depth buffer (if used) and the color buffer. Guaranties
+   a defined color buffer value. Has to be called at the beginning of a frame.
+   \param color the specified color.
+   */
+  void Clear(UTILS::COLOR::Color color);
   void GetAllowedResolutions(std::vector<RESOLUTION> &res);
+  /*! \brief Sets the direction of the current rendering pass.
+   \param renderOrder direction of the pass
+   */
+  void SetRenderOrder(RENDER_ORDER renderOrder);
+  /*! \brief Returns the current render order mode
+   \returns RENDER_ORDER returns the mode
+   */
+  RENDER_ORDER GetRenderOrder() { return m_renderOrder; }
+  size_t GetClipRegionDepth();
+  size_t GetViewPortDepth();
+  /*! \brief Resets the z-depth. Layer 0 and 1 are reserved as presentation (video) layer.
+   */
+  void ResetDepth() { m_layer = 2; }
+  uint32_t GetLayer() const { return m_layer; }
+  void SetLayer(uint32_t layer) { m_layer = layer; }
+  /*! \brief Reserve layers for the caller to use
+   \param addLayers number of layers needed
+   \returns uint32_t returns the absolute layer hight
+   */
+  uint32_t GetDepth(uint32_t addLayers = 2);
 
   /* \brief Get UI scaling information from a given resolution to the screen resolution.
    Takes account of overscan and UI zooming.
@@ -139,6 +183,16 @@ public:
   void RestoreCameraPosition();
   void SetStereoFactor(float factor);
   void RestoreStereoFactor();
+  /*! \brief Gets the depth information of the current transform matrix
+   \param depthOffset adds an offset to the current depth
+   \returns float normalized -1 to 1
+   */
+  float GetTransformDepth(int32_t depthOffset = 0);
+  /*! \brief Gets the (normalized) depth information 
+   \param depth to be normalized
+   \returns float normalized -1 to 1
+   */
+  float GetNormalizedDepth(uint32_t depth);
   /*! \brief Set a region in which to clip all rendering
    Anything that is rendered after setting a clip region will be clipped so that no part renders
    outside of the clip region.  Successive calls to SetClipRegion intersect the clip region, which
@@ -184,8 +238,27 @@ public:
   const std::string& GetMediaDir() const;
   void SetMediaDir(const std::string& strMediaDir);
 
-  void SetTransferPQ(bool PQ) { m_isTransferPQ = PQ; }
-  bool IsTransferPQ() const { return m_isTransferPQ; }
+  void SetGuiHdr(GuiHdr hdr)
+  {
+    if (m_guiHdr != hdr)
+      m_guiTransferChanged.store(true, std::memory_order_relaxed);
+    m_guiHdr = hdr;
+  }
+  GuiHdr GetGuiHdr() const { return m_guiHdr; }
+  void SetTransferPQ(bool PQ) { SetGuiHdr(PQ ? GuiHdr::HDR_PQ : GuiHdr::SDR); }
+  bool IsTransferPQ() const { return m_guiHdr == GuiHdr::HDR_PQ; }
+  bool ConsumeGuiTransferChange()
+  {
+    return m_guiTransferChanged.exchange(false, std::memory_order_relaxed);
+  }
+
+  void VerifyAndRestoreGuiResolution();
+  void CaptureGuiResolutionSnapshot();
+  RESOLUTION FindSavedGuiResolutionIndex() const;
+  RESOLUTION FindConfiguredGuiResolutionIndex() const;
+
+  static void PersistDesktopResolution(const RESOLUTION_INFO& info);
+  static bool LoadPersistedDesktopResolution(RESOLUTION_INFO& out);
 
 protected:
 
@@ -203,6 +276,13 @@ protected:
   bool m_bCalibrating = false;
   RESOLUTION m_Resolution = RES_INVALID;
   float m_fFPSOverride = 0.0f;
+
+  RESOLUTION_INFO m_savedGuiResolutionInfo{};
+  bool m_savedGuiResolutionValid = false;
+  RESOLUTION m_savedGuiResolution = RES_INVALID;
+  RESOLUTION_INFO m_guiSnapshotInfo{};
+  bool m_guiSnapshotValid = false;
+  RESOLUTION m_guiSnapshotResolution = RES_INVALID;
 
   RESOLUTION_INFO m_windowResolution;
   std::stack<CPoint> m_cameras;
@@ -236,7 +316,23 @@ protected:
   std::stack<UITransform> m_transforms;
   RENDER_STEREO_VIEW m_stereoView = RENDER_STEREO_VIEW_OFF;
   RENDER_STEREO_MODE m_stereoMode = RENDER_STEREO_MODE_OFF;
-  StreamHdrType m_hdrType;
+  StreamHdrType m_hdrType{StreamHdrType::HDR_TYPE_NONE};
 
-  bool m_isTransferPQ{false};
+  GuiHdr m_guiHdr{GuiHdr::SDR};
+  std::atomic<bool> m_guiTransferChanged{false};
+  RENDER_ORDER m_renderOrder{RENDER_ORDER_ALL_BACK_TO_FRONT};
+  uint32_t m_layer{2};
 };
+
+class CGraphicContextStateBlock
+{
+public:
+  explicit CGraphicContextStateBlock(CGraphicContext& gfx) : m_gfx(gfx) { m_gfx.CaptureStateBlock(); }
+  ~CGraphicContextStateBlock() { m_gfx.ApplyStateBlock(); }
+  CGraphicContextStateBlock(const CGraphicContextStateBlock&) = delete;
+  CGraphicContextStateBlock& operator=(const CGraphicContextStateBlock&) = delete;
+
+private:
+  CGraphicContext& m_gfx;
+};
+

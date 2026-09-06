@@ -124,7 +124,7 @@ private:
     const CTextureArray& GetTexture() const { return m_texture; }
 
   private:
-    static const unsigned int TIME_TO_DELETE = 2000;
+    static const unsigned int TIME_TO_DELETE = 5000;
 
     unsigned int m_refCount;
     std::string m_path;

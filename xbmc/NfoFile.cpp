@@ -37,6 +37,7 @@ CInfoScanner::INFO_TYPE CNfoFile::Create(const std::string& strPath,
 
   CFileItemList items;
   bool bNfo=false;
+  bool overrideNfo{false};
 
   if (m_type == AddonType::SCRAPER_ALBUMS)
   {
@@ -54,6 +55,7 @@ CInfoScanner::INFO_TYPE CNfoFile::Create(const std::string& strPath,
     // first check if it's an XML file with the info we need
     CVideoInfoTag details;
     bNfo = GetDetails(details);
+    overrideNfo = details.GetOverride();
     if (episode > -1 && bNfo && m_type == AddonType::SCRAPER_TVSHOWS)
     {
       int infos=0;
@@ -91,7 +93,7 @@ CInfoScanner::INFO_TYPE CNfoFile::Create(const std::string& strPath,
   {
     if (!m_scurl.HasUrls())
     {
-      if (m_doc.find("[scrape url]") != std::string::npos)
+      if (overrideNfo || m_doc.find("[scrape url]") != std::string::npos)
         return CInfoScanner::OVERRIDE_NFO;
       else
         return CInfoScanner::FULL_NFO;

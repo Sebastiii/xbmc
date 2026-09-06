@@ -61,6 +61,13 @@ public:
   virtual void SetBufferSize(int numBuffers) { }
   virtual void ReleaseBuffer(int idx) { }
   virtual bool NeedBuffer(int idx) { return false; }
+  virtual bool SupportsAsyncVideoLayerRender() const { return false; }
+  virtual int GetAsyncRenderIndex() { return -1; }
+  virtual void BeginAsyncVideoLayerRender(int idx) {}
+  virtual void EndAsyncVideoLayerRender(int idx) {}
+  virtual void PrepareVideoLayer() {}
+  virtual void RenderVideoLayerCommit(int idx, const CRect& src, const CRect& dst) {}
+  virtual int PollVideoLayer() { return 0; }
   virtual bool IsGuiLayer() { return true; }
   // Render info, can be called before configure
   virtual CRenderInfo GetRenderInfo() { return CRenderInfo(); }

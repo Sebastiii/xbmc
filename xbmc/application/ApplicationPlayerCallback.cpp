@@ -16,6 +16,7 @@
 #include "application/ApplicationComponents.h"
 #include "application/ApplicationPlayer.h"
 #include "application/ApplicationStackHelper.h"
+#include "cores/VideoPlayer/DVDFileInfo.h"
 #include "guilib/GUIComponent.h"
 #include "guilib/GUIMessage.h"
 #include "guilib/GUIWindowManager.h"
@@ -35,6 +36,8 @@
 #include "video/VideoDatabase.h"
 #include "video/VideoFileItemClassify.h"
 #include "video/VideoInfoTag.h"
+#include "windowing/GraphicContext.h"
+#include "windowing/WinSystem.h"
 
 #include <memory>
 
@@ -50,37 +53,42 @@ void CApplicationPlayerCallback::OnPlayBackEnded()
   CServiceBroker::GetGUI()->GetWindowManager().SendThreadMessage(msg);
 }
 
-namespace
-{
-bool ShouldUpdateStreamDetails(const CFileItem& file)
-{
-  // If a title/playlist hasn't been selected for a bluray/dvds then the stream details may not be known
-  const bool isDiscOrStream{KODI::VIDEO::IsBDFile(file) || KODI::VIDEO::IsDVDFile(file) || file.IsDiscImage() ||
-                            URIUtils::IsBlurayMenuPath(file.GetDynPath()) ||
-                            KODI::NETWORK::IsInternetStream(file)};
-
-  // Stream details may be already set from a previous playback or nfo
-  const bool hasNoStreamDetails{!file.HasVideoInfoTag() ||
-                                !file.GetVideoInfoTag()->HasStreamDetails()};
-
-  return hasNoStreamDetails && isDiscOrStream;
-}
-} // namespace
-
 void CApplicationPlayerCallback::OnPlayBackStarted(const CFileItem& file)
 {
   CLog::LogF(LOGDEBUG, "CApplication::OnPlayBackStarted");
+
+  if (auto winSystem = CServiceBroker::GetWinSystem())
+    winSystem->GetGfxContext().CaptureGuiResolutionSnapshot();
+
   std::shared_ptr<CFileItem> itemCurrentFile;
 
   // check if VideoPlayer should set file item stream details from its current streams
-  const bool isBlu_dvd_image_or_stream = (URIUtils::IsBluray(file.GetPath()) || file.IsDVDFile() ||
-                                          file.IsDiscImage() || file.IsInternetStream());
+  const bool isDisc =
+      (URIUtils::IsBluray(file.GetPath()) || file.IsDVDFile() || file.IsDiscImage());
 
   const bool hasNoStreamDetails =
       (!file.HasVideoInfoTag() || !file.GetVideoInfoTag()->HasStreamDetails());
 
+  const std::string dynPath = file.GetDynPath();
+  const bool isTranscoded = (dynPath.find("/transcode") != std::string::npos ||
+                             URIUtils::HasExtension(dynPath, ".m3u8|.mpd"));
+
+  const bool isStack = [&]()
+  {
+    auto& components = CServiceBroker::GetAppComponents();
+    const auto helper = components.GetComponent<CApplicationStackHelper>();
+    return helper->IsPlayingISOStack() || helper->IsPlayingRegularStack();
+  }();
+
+  const bool refreshLibraryDetails =
+      (file.HasVideoInfoTag() && file.GetVideoInfoTag()->m_iDbId > 0 && !isTranscoded && !isStack &&
+       !isDisc);
+
   if (file.GetProperty("get_stream_details_from_player").asBoolean() ||
-      (hasNoStreamDetails && isBlu_dvd_image_or_stream))
+      (hasNoStreamDetails &&
+       (isDisc || file.IsInternetStream() ||
+        (file.IsVideo() && CDVDFileInfo::CanExtract(file)))) ||
+      refreshLibraryDetails)
   {
     auto& components = CServiceBroker::GetAppComponents();
     const auto appPlayer = components.GetComponent<CApplicationPlayer>();
@@ -265,7 +273,7 @@ void CApplicationPlayerCallback::OnPlayBackSpeedChanged(int iSpeed)
 
 void CApplicationPlayerCallback::OnAVChange()
 {
-  CLog::LogF(LOGDEBUG, "CApplication::OnAVChange");
+  logComponentM(LOGDEBUG, LOGVIDEO, "CApplication::OnAVChange");
 
   CServiceBroker::GetGUI()->GetStereoscopicsManager().OnStreamChange();
 

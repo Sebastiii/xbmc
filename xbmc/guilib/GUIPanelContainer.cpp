@@ -41,8 +41,8 @@ void CGUIPanelContainer::Process(unsigned int currentTime, CDirtyRegionList &dir
   UpdateScrollOffset(currentTime);
 
   // Calculate and cache offset for reuse in Render()
-  m_cachedScrollOffset = (int)(m_scroller.GetValue() / m_layout->Size(m_orientation));
-  int offset = m_cachedScrollOffset;
+  m_cachedScrollOffset = static_cast<int>(m_scroller.GetValue() / m_layout->Size(m_orientation));
+  const int offset = *m_cachedScrollOffset;
 
   int cacheBefore, cacheAfter;
   GetCacheOffsets(cacheBefore, cacheAfter);
@@ -98,8 +98,9 @@ void CGUIPanelContainer::Render()
   if (!m_layout || !m_focusedLayout)
     return;
 
-  // Use cached offset from Process() to avoid redundant calculation
-  int offset = m_cachedScrollOffset;
+  // Use cached offset from Process(), fall back to calculating if not yet cached
+  const int offset = m_cachedScrollOffset.value_or(
+      static_cast<int>(m_scroller.GetValue() / m_layout->Size(m_orientation)));
 
   int cacheBefore, cacheAfter;
   GetCacheOffsets(cacheBefore, cacheAfter);
@@ -117,6 +118,7 @@ void CGUIPanelContainer::Render()
     std::shared_ptr<CGUIListItem> focusedItem;
     int current = (offset - cacheBefore) * m_itemsPerRow;
     int col = 0;
+    std::vector<RENDERITEM> renderitems;
     while (pos < end && m_items.size())
     {
       if (current >= (int)m_items.size())
@@ -135,9 +137,11 @@ void CGUIPanelContainer::Render()
         else
         {
           if (m_orientation == VERTICAL)
-            RenderItem(origin.x + col * m_layout->Size(HORIZONTAL), pos, item.get(), false);
+            renderitems.emplace_back(
+                RENDERITEM{origin.x + col * m_layout->Size(HORIZONTAL), pos, item, false});
           else
-            RenderItem(pos, origin.y + col * m_layout->Size(VERTICAL), item.get(), false);
+            renderitems.emplace_back(
+                RENDERITEM{pos, origin.y + col * m_layout->Size(VERTICAL), item, false});
         }
       }
       // increment our position
@@ -154,9 +158,27 @@ void CGUIPanelContainer::Render()
     if (focusedItem)
     {
       if (m_orientation == VERTICAL)
-        RenderItem(origin.x + focusedCol * m_layout->Size(HORIZONTAL), focusedPos, focusedItem.get(), true);
+        renderitems.emplace_back(RENDERITEM{origin.x + focusedCol * m_layout->Size(HORIZONTAL),
+                                            focusedPos, focusedItem, true});
       else
-        RenderItem(focusedPos, origin.y + focusedCol * m_layout->Size(VERTICAL), focusedItem.get(), true);
+        renderitems.emplace_back(RENDERITEM{
+            focusedPos, origin.y + focusedCol * m_layout->Size(VERTICAL), focusedItem, true});
+    }
+
+    if (CServiceBroker::GetWinSystem()->GetGfxContext().GetRenderOrder() ==
+        RENDER_ORDER_FRONT_TO_BACK)
+    {
+      for (auto it = std::crbegin(renderitems); it != std::crend(renderitems); it++)
+      {
+        RenderItem(it->posX, it->posY, it->item.get(), it->focused);
+      }
+    }
+    else
+    {
+      for (const auto& renderitem : renderitems)
+      {
+        RenderItem(renderitem.posX, renderitem.posY, renderitem.item.get(), renderitem.focused);
+      }
     }
 
     CServiceBroker::GetWinSystem()->GetGfxContext().RestoreClipRegion();

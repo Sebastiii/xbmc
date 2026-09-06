@@ -17,12 +17,6 @@
 #include <stdint.h>
 #include <string.h>
 
-namespace
-{
-constexpr auto BURST_HEADER_SIZE = 8;
-constexpr auto EAC3_MAX_BURST_PAYLOAD_SIZE = 24576 - BURST_HEADER_SIZE;
-} // namespace
-
 CAEBitstreamPacker::CAEBitstreamPacker()
 {
   Reset();
@@ -52,7 +46,7 @@ void CAEBitstreamPacker::Pack(CAEStreamInfo &info, uint8_t* data, int size)
       break;
 
     case CAEStreamInfo::STREAM_TYPE_EAC3:
-      PackEAC3 (info, data, size);
+      m_dataSize = CAEPackIEC61937::PackEAC3(data, size, m_packedBuffer);
       break;
 
     case CAEStreamInfo::STREAM_TYPE_DTSHD_CORE:
@@ -145,48 +139,6 @@ void CAEBitstreamPacker::PackDTSHD(CAEStreamInfo &info, uint8_t* data, int size)
 
   m_dataSize =
       CAEPackIEC61937::PackDTSHD(m_dtsHD.data(), dataSize, m_packedBuffer, info.m_dtsPeriod);
-}
-
-void CAEBitstreamPacker::PackEAC3(CAEStreamInfo &info, uint8_t* data, int size)
-{
-  unsigned int framesPerBurst = info.m_repeat;
-
-  if (m_eac3FramesPerBurst != framesPerBurst)
-  {
-    /* switched streams, discard partial burst */
-    m_eac3Size = 0;
-    m_eac3FramesPerBurst = framesPerBurst;
-  }
-
-  if (m_eac3FramesPerBurst == 1)
-  {
-    /* simple case, just pass through */
-    m_dataSize = CAEPackIEC61937::PackEAC3(data, size, m_packedBuffer);
-  }
-  else
-  {
-    /* multiple frames needed to achieve 6 blocks as required by IEC 61937-3:2007 */
-
-    if (m_eac3.size() == 0)
-      m_eac3.resize(EAC3_MAX_BURST_PAYLOAD_SIZE);
-
-    unsigned int newsize = m_eac3Size + size;
-    bool overrun = newsize > EAC3_MAX_BURST_PAYLOAD_SIZE;
-
-    if (!overrun)
-    {
-      memcpy(m_eac3.data() + m_eac3Size, data, size);
-      m_eac3Size = newsize;
-      m_eac3FramesCount++;
-    }
-
-    if (m_eac3FramesCount >= m_eac3FramesPerBurst || overrun)
-    {
-      m_dataSize = CAEPackIEC61937::PackEAC3(m_eac3.data(), m_eac3Size, m_packedBuffer);
-      m_eac3Size = 0;
-      m_eac3FramesCount = 0;
-    }
-  }
 }
 
 unsigned int CAEBitstreamPacker::GetOutputRate(const CAEStreamInfo& info)

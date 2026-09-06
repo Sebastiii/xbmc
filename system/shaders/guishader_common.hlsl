@@ -42,6 +42,8 @@ SamplerState LinearSampler : register(s0)
   Comparison = NEVER;
 };
 
+SamplerState NearestSampler : register(s1);
+
 cbuffer cbWorld : register(b0)
 {
   float4x4 worldViewProj;
@@ -49,6 +51,7 @@ cbuffer cbWorld : register(b0)
   float colorRange;
   float sdrPeakLum;
   int PQ;
+  float depth;
 };
 
 inline float3 transferPQ(float3 x)

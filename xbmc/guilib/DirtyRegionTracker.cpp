@@ -18,39 +18,32 @@
 #include <algorithm>
 #include <stdio.h>
 
-CDirtyRegionTracker::CDirtyRegionTracker(int buffering)
-{
-  m_buffering = buffering;
-  m_solver = nullptr;
-}
+CDirtyRegionTracker::CDirtyRegionTracker() = default;
 
-CDirtyRegionTracker::~CDirtyRegionTracker()
-{
-  delete m_solver;
-}
+CDirtyRegionTracker::~CDirtyRegionTracker() = default;
 
 void CDirtyRegionTracker::SelectAlgorithm()
 {
-  delete m_solver;
+  m_solver.reset();
 
   switch (CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_guiAlgorithmDirtyRegions)
   {
     case DIRTYREGION_SOLVER_FILL_VIEWPORT_ON_CHANGE:
       CLog::Log(LOGDEBUG, "guilib: Fill viewport on change for solving rendering passes");
-      m_solver = new CFillViewportOnChangeRegionSolver();
+      m_solver = std::make_unique<CFillViewportOnChangeRegionSolver>();
       break;
     case DIRTYREGION_SOLVER_COST_REDUCTION:
       CLog::Log(LOGDEBUG, "guilib: Cost reduction as algorithm for solving rendering passes");
-      m_solver = new CGreedyDirtyRegionSolver();
+      m_solver = std::make_unique<CGreedyDirtyRegionSolver>();
       break;
     case DIRTYREGION_SOLVER_UNION:
-      m_solver = new CUnionDirtyRegionSolver();
+      m_solver = std::make_unique<CUnionDirtyRegionSolver>();
       CLog::Log(LOGDEBUG, "guilib: Union as algorithm for solving rendering passes");
       break;
     case DIRTYREGION_SOLVER_FILL_VIEWPORT_ALWAYS:
     default:
       CLog::Log(LOGDEBUG, "guilib: Fill viewport always for solving rendering passes");
-      m_solver = new CFillViewportAlwaysRegionSolver();
+      m_solver = std::make_unique<CFillViewportAlwaysRegionSolver>();
       break;
   }
 }
@@ -66,7 +59,7 @@ const CDirtyRegionList &CDirtyRegionTracker::GetMarkedRegions() const
   return m_markedRegions;
 }
 
-CDirtyRegionList CDirtyRegionTracker::GetDirtyRegions() const {
+CDirtyRegionList CDirtyRegionTracker::GetDirtyRegions() {
   CDirtyRegionList output;
 
   if (m_solver)
@@ -75,11 +68,10 @@ CDirtyRegionList CDirtyRegionTracker::GetDirtyRegions() const {
   return output;
 }
 
-void CDirtyRegionTracker::CleanMarkedRegions()
+void CDirtyRegionTracker::CleanMarkedRegions(int bufferAge)
 {
-  int buffering = CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_guiVisualizeDirtyRegions ? 20 : m_buffering;
-  m_markedRegions.erase(
-      std::remove_if(m_markedRegions.begin(), m_markedRegions.end(),
-                     [buffering](CDirtyRegion& r) { return r.UpdateAge() >= buffering; }),
-      m_markedRegions.end());
+  m_markedRegions.erase(std::remove_if(m_markedRegions.begin(), m_markedRegions.end(),
+                                       [bufferAge](CDirtyRegion& r)
+                                       { return r.UpdateAge() > bufferAge; }),
+                        m_markedRegions.end());
 }

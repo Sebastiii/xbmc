@@ -261,6 +261,7 @@ bool VideoPlayerCodec::Init(const CFileItem &file, unsigned int filecache)
                        false,
                        false,
                        M_SQRT1_2,
+                       M_SQRT1_2,
                        nullptr,
                        AE_QUALITY_UNKNOWN,
                        false,

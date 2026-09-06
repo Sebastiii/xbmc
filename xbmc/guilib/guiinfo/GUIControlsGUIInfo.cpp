@@ -41,11 +41,13 @@ using namespace KODI::GUILIB::GUIINFO;
 void CGUIControlsGUIInfo::SetContainerMoving(int id, bool next, bool scrolling)
 {
   // magnitude 2 indicates a scroll, sign indicates direction
+  std::lock_guard lock(m_containerMovesSection);
   m_containerMoves[id] = (next ? 1 : -1) * (scrolling ? 2 : 1);
 }
 
 void CGUIControlsGUIInfo::ResetContainerMovingCache()
 {
+  std::lock_guard lock(m_containerMovesSection);
   m_containerMoves.clear();
 }
 
@@ -610,17 +612,27 @@ bool CGUIControlsGUIInfo::GetBool(bool& value, const CGUIListItem *gitem, int co
       }
       if (containerId != -1)
       {
-        const auto it = m_containerMoves.find(containerId);
-        if (it != m_containerMoves.end())
+        int moveDirection = 0;
+        bool haveMove = false;
+        {
+          std::lock_guard lock(m_containerMovesSection);
+          const auto it = m_containerMoves.find(containerId);
+          if (it != m_containerMoves.end())
+          {
+            moveDirection = it->second;
+            haveMove = true;
+          }
+        }
+        if (haveMove)
         {
           if (info.m_info == CONTAINER_SCROLL_PREVIOUS)
-            value = it->second <= -2;
+            value = moveDirection <= -2;
           else if (info.m_info == CONTAINER_MOVE_PREVIOUS)
-            value = it->second <= -1;
+            value = moveDirection <= -1;
           else if (info.m_info == CONTAINER_MOVE_NEXT)
-            value = it->second >= 1;
+            value = moveDirection >= 1;
           else if (info.m_info == CONTAINER_SCROLL_NEXT)
-            value = it->second >= 2;
+            value = moveDirection >= 2;
           return true;
         }
       }

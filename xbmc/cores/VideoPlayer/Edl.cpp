@@ -22,6 +22,8 @@
 
 #include "PlatformDefs.h"
 
+#include <algorithm>
+
 #define COMSKIP_HEADER "FILE PROCESSING COMPLETE"
 #define VIDEOREDO_HEADER "<Version>2"
 #define VIDEOREDO_TAG_CUT "<Cut>"
@@ -716,7 +718,16 @@ bool CEdl::AddSceneMarker(const int iSceneMarker)
 
   CLog::Log(LOGDEBUG, "{} - Inserting new scene marker: {}", __FUNCTION__,
             MillisecondsToTimeString(iSceneMarker));
-  m_vecSceneMarkers.push_back(iSceneMarker); // Unsorted
+  if (m_vecSceneMarkers.empty() || iSceneMarker > m_vecSceneMarkers.back())
+  {
+    m_vecSceneMarkers.emplace_back(iSceneMarker);
+  }
+  else
+  {
+    const auto it =
+        std::lower_bound(m_vecSceneMarkers.begin(), m_vecSceneMarkers.end(), iSceneMarker);
+    m_vecSceneMarkers.insert(it, iSceneMarker);
+  }
 
   return true;
 }

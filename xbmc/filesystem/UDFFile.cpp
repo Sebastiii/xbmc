@@ -33,6 +33,7 @@ bool CUDFFile::Open(const CURL& url)
   if (!bi)
   {
     udfread_close(m_udf);
+    m_udf = nullptr;
     return false;
   }
 
@@ -40,6 +41,7 @@ bool CUDFFile::Open(const CURL& url)
   {
     bi->close(bi);
     udfread_close(m_udf);
+    m_udf = nullptr;
     return false;
   }
 

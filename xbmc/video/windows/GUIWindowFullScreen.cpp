@@ -22,9 +22,11 @@
 #include "input/actions/Action.h"
 #include "input/actions/ActionIDs.h"
 #include "input/mouse/MouseEvent.h"
+#include "settings/AdvancedSettings.h"
 #include "settings/DisplaySettings.h"
 #include "settings/Settings.h"
 #include "settings/SettingsComponent.h"
+#include "utils/AMLUtils.h"
 #include "utils/StringUtils.h"
 #include "video/ViewModeSettings.h"
 #include "video/dialogs/GUIDialogFullScreenInfo.h"
@@ -182,6 +184,10 @@ void CGUIWindowFullScreen::ClearBackground()
   const auto appPlayer = components.GetComponent<CApplicationPlayer>();
   if (appPlayer->IsRenderingVideoLayer())
     CServiceBroker::GetWinSystem()->GetGfxContext().Clear(0);
+  else if (!CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_guiGeometryClear)
+    CServiceBroker::GetWinSystem()->GetGfxContext().Clear(0xff000000);
+  else
+    CServiceBroker::GetWinSystem()->GetGfxContext().Clear();
 }
 
 void CGUIWindowFullScreen::OnWindowLoaded()
@@ -233,6 +239,8 @@ bool CGUIWindowFullScreen::OnMessage(CGUIMessage& message)
       CServiceBroker::GetSettingsComponent()->GetSettings()->Save();
 
       CServiceBroker::GetWinSystem()->GetGfxContext().SetFullScreenVideo(false);
+
+      aml_dv_set_xbmc_osd(true);
 
       return true;
     }
@@ -363,8 +371,25 @@ void CGUIWindowFullScreen::Process(unsigned int currentTime, CDirtyRegionList &d
 {
   const auto& components = CServiceBroker::GetAppComponents();
   const auto appPlayer = components.GetComponent<CApplicationPlayer>();
-  if (appPlayer->IsRenderingGuiLayer())
+  const auto settingsComponent = CServiceBroker::GetSettingsComponent();
+  const auto advancedSettings =
+      settingsComponent ? settingsComponent->GetAdvancedSettings() : nullptr;
+  const bool overlayChangeGate = advancedSettings &&
+                                 advancedSettings->m_guiBufferAgePartialRedraw >= 1 &&
+                                 appPlayer->IsRenderingVideoLayer();
+  const bool guiLayer = appPlayer->IsRenderingGuiLayer();
+  if (overlayChangeGate)
+  {
+    bool overlayAnimated = false;
+    const uint64_t overlaySig = appPlayer->GetVisibleOverlaySetSignature(overlayAnimated);
+    const bool sigChanged = overlaySig != m_lastSeenOverlaySig;
+    m_lastSeenOverlaySig = overlaySig;
+    if ((overlayAnimated || sigChanged) && (guiLayer || m_lastGuiLayer))
+      MarkDirtyRegion();
+  }
+  else if (guiLayer)
     MarkDirtyRegion();
+  m_lastGuiLayer = guiLayer;
 
   m_controlStats->Reset();
 
@@ -377,11 +402,19 @@ void CGUIWindowFullScreen::Process(unsigned int currentTime, CDirtyRegionList &d
 
 void CGUIWindowFullScreen::Render()
 {
-  CServiceBroker::GetWinSystem()->GetGfxContext().SetRenderingResolution(CServiceBroker::GetWinSystem()->GetGfxContext().GetVideoResolution(), false);
-  auto& components = CServiceBroker::GetAppComponents();
-  const auto appPlayer = components.GetComponent<CApplicationPlayer>();
-  appPlayer->Render(true, 255);
-  CServiceBroker::GetWinSystem()->GetGfxContext().SetRenderingResolution(m_coordsRes, m_needsScaling);
+  if (CServiceBroker::GetWinSystem()->GetGfxContext().GetRenderOrder() !=
+      RENDER_ORDER_FRONT_TO_BACK)
+  {
+    CServiceBroker::GetWinSystem()->GetGfxContext().SetRenderingResolution(
+        CServiceBroker::GetWinSystem()->GetGfxContext().GetVideoResolution(), false);
+    auto& components = CServiceBroker::GetAppComponents();
+    const auto appPlayer = components.GetComponent<CApplicationPlayer>();
+    // FIXME: remove clearing pass from renderer, it should be its own, dedicated function.
+    bool clear = CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_guiGeometryClear;
+    appPlayer->Render(clear, 255);
+    CServiceBroker::GetWinSystem()->GetGfxContext().SetRenderingResolution(m_coordsRes,
+                                                                           m_needsScaling);
+  }
   CGUIWindow::Render();
 }
 

@@ -37,7 +37,7 @@ using namespace XFILE;
 
 typedef struct
 {
-  char string[17];
+  char string[20];
   Field field;
   CDatabaseQueryRule::FIELD_TYPE type;
   StringValidation::Validator validator;
@@ -131,6 +131,12 @@ static const translateField fields[] = {
   { "albumstatus",       FieldAlbumStatus,             CDatabaseQueryRule::TEXT_FIELD, nullptr,                                 false, 38081 },
   { "albumduration",     FieldAlbumDuration,           CDatabaseQueryRule::SECONDS_FIELD,  StringValidation::IsTime,             false, 180 },
   { "hdrtype",           FieldHdrType,                 CDatabaseQueryRule::TEXTIN_FIELD, nullptr,                                 false, 20474 },
+  { "hdrtypealt",        FieldHdrTypeAlt,              CDatabaseQueryRule::TEXTIN_FIELD, nullptr,                                 false, 60664 },
+  { "dvprofile",         FieldDvProfile,               CDatabaseQueryRule::TEXTIN_FIELD, nullptr,                                 false, 60663 },
+  { "audioprofile",      FieldAudioProfile,            CDatabaseQueryRule::TEXTIN_FIELD, nullptr,                                 false, 60673 },
+  { "audioobjects",      FieldAudioObjects,            CDatabaseQueryRule::REAL_FIELD, nullptr,                                 false, 60674 },
+  { "audioobjectchannels", FieldAudioObjectChannels,  CDatabaseQueryRule::REAL_FIELD, nullptr,                                 false, 60675 },
+  { "audiobedchannels",  FieldAudioBedChannels,        CDatabaseQueryRule::REAL_FIELD, nullptr,                                 false, 60676 },
 };
 // clang-format on
 
@@ -509,6 +515,12 @@ std::vector<Field> CSmartPlaylistRule::GetFields(const std::string &type)
     fields.push_back(FieldSubtitleLanguage);
     fields.push_back(FieldVideoAspectRatio);
     fields.push_back(FieldHdrType);
+    fields.push_back(FieldHdrTypeAlt);
+    fields.push_back(FieldDvProfile);
+    fields.push_back(FieldAudioProfile);
+    fields.push_back(FieldAudioObjects);
+    fields.push_back(FieldAudioObjectChannels);
+    fields.push_back(FieldAudioBedChannels);
   }
   fields.push_back(FieldPlaylist);
   fields.push_back(FieldVirtualFolder);
@@ -1054,6 +1066,18 @@ std::string CSmartPlaylistRule::FormatWhereClause(const std::string &negate, con
     query = db.PrepareSQL(negate + " EXISTS (SELECT 1 FROM streamdetails WHERE streamdetails.idFile = " + table + ".idFile AND streamdetails.iStreamType = %i GROUP BY streamdetails.idFile HAVING COUNT(streamdetails.iStreamType) " + parameter + ")",CStreamDetail::SUBTITLE);
   else if (m_field == FieldHdrType)
     query = negate + " EXISTS (SELECT 1 FROM streamdetails WHERE streamdetails.idFile = " + table + ".idFile AND strHdrType " + parameter + ")";
+  else if (m_field == FieldHdrTypeAlt)
+    query = negate + " EXISTS (SELECT 1 FROM streamdetails WHERE streamdetails.idFile = " + table + ".idFile AND strHdrTypeAlt " + parameter + ")";
+  else if (m_field == FieldDvProfile)
+    query = negate + " EXISTS (SELECT 1 FROM streamdetails WHERE streamdetails.idFile = " + table + ".idFile AND strDvProfile " + parameter + ")";
+  else if (m_field == FieldAudioProfile)
+    query = negate + " EXISTS (SELECT 1 FROM streamdetails WHERE streamdetails.idFile = " + table + ".idFile AND strAudioProfile " + parameter + ")";
+  else if (m_field == FieldAudioObjects)
+    query = negate + " EXISTS (SELECT 1 FROM streamdetails WHERE streamdetails.idFile = " + table + ".idFile AND iAudioObjects " + parameter + ")";
+  else if (m_field == FieldAudioObjectChannels)
+    query = negate + " EXISTS (SELECT 1 FROM streamdetails WHERE streamdetails.idFile = " + table + ".idFile AND iAudioObjectChannels " + parameter + ")";
+  else if (m_field == FieldAudioBedChannels)
+    query = negate + " EXISTS (SELECT 1 FROM streamdetails WHERE streamdetails.idFile = " + table + ".idFile AND iAudioBedChannels " + parameter + ")";
   if (m_field == FieldPlaycount && strType != "songs" && strType != "albums" && strType != "tvshows")
   { // playcount IS stored as NULL OR number IN video db
     if ((m_operator == OPERATOR_EQUALS && param == "0") ||

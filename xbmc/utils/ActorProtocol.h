@@ -101,6 +101,7 @@ public:
                           std::chrono::milliseconds timeout,
                           CPayloadWrapBase* payload);
   bool ReceiveOutMessage(Message **msg);
+  bool ReceiveOutMessageIf(Message **msg, int signal);
   bool ReceiveInMessage(Message **msg);
   void Purge();
   void PurgeIn(int signal);

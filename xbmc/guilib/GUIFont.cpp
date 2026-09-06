@@ -151,9 +151,7 @@ bool CGUIFont::UpdateScrollInfo(const vecText& text, CScrollInfo& scrollInfo)
 
   CScrollInfo old(scrollInfo);
 
-  // move along by the appropriate scroll amount
-  float scrollAmount =
-      fabs(scrollInfo.GetPixelsPerFrame() * winSystem->GetGfxContext().GetGUIScaleX());
+  float scrollAmount = fabs(scrollInfo.GetPixelsPerFrame());
 
   if (!scrollInfo.m_widthValid)
   {
@@ -233,18 +231,18 @@ void CGUIFont::DrawScrollingText(float x,
       shadowColors.emplace_back((renderColor & 0xff000000) != 0 ? shadowColor : 0);
     for (float dx = -offset; dx < maxWidth; dx += scrollInfo.m_totalWidth)
     {
-      m_font->DrawTextInternal(context, x + dx + 1, y + 1, shadowColors, text, alignment,
-                               textPixelWidth, scroll);
-      m_font->DrawTextInternal(context, x + dx + scrollInfo.m_textWidth + 1, y + 1, shadowColors,
-                               scrollInfo.m_suffix, alignment, suffixPixelWidth, scroll);
+      m_font->DrawTextInternal(context, x + 1, y + 1, shadowColors, text, alignment, textPixelWidth,
+                               scroll, dx);
+      m_font->DrawTextInternal(context, x + scrollInfo.m_textWidth + 1, y + 1, shadowColors,
+                               scrollInfo.m_suffix, alignment, suffixPixelWidth, scroll, dx);
     }
   }
   for (float dx = -offset; dx < maxWidth; dx += scrollInfo.m_totalWidth)
   {
-    m_font->DrawTextInternal(context, x + dx, y, renderColors, text, alignment, textPixelWidth,
-                             scroll);
-    m_font->DrawTextInternal(context, x + dx + scrollInfo.m_textWidth, y, renderColors,
-                             scrollInfo.m_suffix, alignment, suffixPixelWidth, scroll);
+    m_font->DrawTextInternal(context, x, y, renderColors, text, alignment, textPixelWidth, scroll,
+                             dx);
+    m_font->DrawTextInternal(context, x + scrollInfo.m_textWidth, y, renderColors,
+                             scrollInfo.m_suffix, alignment, suffixPixelWidth, scroll, dx);
   }
 
   context.RestoreClipRegion();

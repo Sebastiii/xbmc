@@ -9,9 +9,13 @@
 #pragma once
 
 #include "DVDDemux.h"
+#include "DVDInputStreams/DVDInputStream.h"
 #include "DemuxStreamSSIF.h"
+#include "cores/VideoPlayer/Interface/TimingConstants.h"
 #include "threads/CriticalSection.h"
 #include "threads/SystemClock.h"
+#include <atomic>
+#include <chrono>
 #include <map>
 #include <memory>
 #include <vector>
@@ -21,6 +25,7 @@ extern "C" {
 }
 
 class CDVDDemuxFFmpeg;
+class CDVDInputStreamFFmpeg;
 class CURL;
 
 enum class TRANSPORT_STREAM_STATE
@@ -109,12 +114,19 @@ public:
   int GetChapter() override;
   void GetChapterName(std::string& strChapterName, int chapterIdx=-1) override;
   int64_t GetChapterPos(int chapterIdx = -1) override;
+  int GetEditionCount() override;
+  std::string GetEditionName(int index) override;
   std::string GetStreamCodecName(int iStreamId) override;
 
   bool Aborted() const;
 
   AVFormatContext* m_pFormatContext;
   std::shared_ptr<CDVDInputStream> m_pInput;
+  bool m_brokenFileDetected = false;
+  int64_t m_sourceReadBytes = 0;
+
+  void MarkBroken() override;
+  int64_t GetSourceReadBytes() override { return m_sourceReadBytes; }
 
 protected:
   friend class CDemuxStreamAudioFFmpeg;
@@ -132,6 +144,7 @@ protected:
   void ResetVideoStreams() const;
   AVDictionary* GetFFMpegOptionsFromInput() const;
   double ConvertTimestamp(int64_t pts, int den, int num) const;
+  void ApplySeamTimeOffset(DemuxPacket* pPacket, int streamIndex);
   bool IsProgramChange();
   unsigned int HLSSelectProgram() const;
 
@@ -143,10 +156,18 @@ protected:
 
   bool IsDoViP7DualLayer() const;
   StreamHdrType DetermineHdrType(AVStream* pStream);
+  void ComputePreferredVideoStream();
 
   CCriticalSection m_critSection;
   std::map<int, CDemuxStream*> m_streams;
   std::map<int, std::unique_ptr<CDemuxParserFFmpeg>> m_parsers;
+
+  struct SeamStreamState
+  {
+    int generation = 0;
+    double lastCorrected = DVD_NOPTS_VALUE;
+  };
+  std::map<int, SeamStreamState> m_seamStreamState;
 
   AVIOContext* m_ioContext;
 
@@ -161,8 +182,14 @@ protected:
   unsigned int m_newProgram;
   unsigned int m_initialProgramNumber;
   int m_seekStream;
+  int m_editionIndex = -1;
 
   XbmcThreads::EndTime<> m_timeout;
+  std::atomic<bool> m_aborted{false};
+  std::shared_ptr<CDVDInputStream::IMenus> m_menuInterface;
+  std::shared_ptr<CDVDInputStreamFFmpeg> m_ffmpegInput;
+  std::chrono::steady_clock::time_point m_lastBLLogTime;
+  std::chrono::steady_clock::time_point m_lastELLogTime;
 
   // Due to limitations of ffmpeg, we only can detect a program change
   // with a packet. This struct saves the packet for the next read and
@@ -180,6 +207,11 @@ protected:
   bool m_seekToKeyFrame = false;
   double m_startTime = 0;
   bool m_dv_dual_stream = false;
-  bool m_dv_dual_stream_started = false;
+  int m_dv_bl_stream_idx = -1;
+  int FirstVideoStreamIndex() const;
+  int m_dv_preferred_video_stream = -1;
+
+public:
+  int GetPreferredVideoStream() const override { return m_dv_preferred_video_stream; }
 };
 

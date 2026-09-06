@@ -14,6 +14,7 @@
 #include "cores/VideoPlayer/DVDStreamInfo.h"
 
 #include <memory>
+#include <chrono>
 #include <string>
 #include <vector>
 
@@ -85,6 +86,16 @@ protected:
 
   std::string m_name;
   int m_decoderState;
+  void ClearSwRateCounters();
+  bool m_swRateArmed = false;
+  int m_swDecodeOut = 0;
+  int m_swFilterOut = 0;
+  int m_swPacketsIn = 0;
+  int m_swPacketsRej = 0;
+  int64_t m_swSendUs = 0;
+  int64_t m_swDecodeUs = 0;
+  int64_t m_swFilterUs = 0;
+  std::chrono::steady_clock::time_point m_swRateStamp{};
   IHardwareDecoder *m_pHardware = nullptr;
   int m_iLastKeyframe = 0;
   double m_dts = DVD_NOPTS_VALUE;
@@ -97,8 +108,10 @@ protected:
   bool m_requestSkipDeint = false;
   int m_codecControlFlags = 0;
   bool m_interlaced = false;
+  bool m_hdr10PlusUpgraded = false;
   double m_DAR = 1.0;
   CDVDStreamInfo m_hints;
+  DOVIELType m_publishedDoviElType{DOVIELType::TYPE_NONE};
   CDVDCodecOptions m_options;
 
   struct CDropControl

@@ -53,6 +53,8 @@ public:
   void FrameMove();
   void Render(bool clear, uint32_t alpha = 255, bool gui = true);
   void FlushRenderer();
+  void PreInitRenderer();
+  void UnInitRenderer();
   void SetRenderViewMode(int mode, float zoom, float par, float shift, bool stretch);
   float GetRenderAspectRatio() const;
   void TriggerUpdateResolution();
@@ -60,6 +62,8 @@ public:
   bool IsRenderingVideo() const;
   bool IsRenderingGuiLayer() const;
   bool IsRenderingVideoLayer() const;
+  void WaitAsyncMainPace();
+  uint64_t GetVisibleOverlaySetSignature(bool& animated) const;
   bool Supports(EINTERLACEMETHOD method) const;
   EINTERLACEMETHOD GetDeinterlacingMethodDefault() const;
   bool Supports(ESCALINGMETHOD method) const;
@@ -82,7 +86,7 @@ public:
   bool CanPause() const;
   bool CanSeek() const;
   int GetAudioDelay() const;
-  void GetAudioCapabilities(std::vector<int>& audioCaps) const;
+  void GetAudioCapabilities(std::vector<IPlayerAudioCaps>& caps) const;
   int GetAudioStream();
   int GetAudioStreamCount() const;
   void GetAudioStreamInfo(int index, AudioStreamInfo& info) const;
@@ -97,7 +101,7 @@ public:
   PLAYLIST::Id GetPreferredPlaylist() const;
   int GetSubtitleDelay() const;
   int GetSubtitle();
-  void GetSubtitleCapabilities(std::vector<int>& subCaps) const;
+  void GetSubtitleCapabilities(std::vector<IPlayerSubtitleCaps>& caps) const;
   int GetSubtitleCount() const;
   void GetSubtitleStreamInfo(int index, SubtitleStreamInfo& info) const;
   bool GetSubtitleVisible() const;

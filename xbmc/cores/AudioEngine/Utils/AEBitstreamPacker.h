@@ -33,15 +33,9 @@ public:
 
 private:
   void PackDTSHD(CAEStreamInfo &info, uint8_t* data, int size);
-  void PackEAC3(CAEStreamInfo &info, uint8_t* data, int size);
 
   std::vector<uint8_t> m_dtsHD;
   unsigned int m_dtsHDSize = 0;
-
-  std::vector<uint8_t> m_eac3;
-  unsigned int m_eac3Size = 0;
-  unsigned int m_eac3FramesCount = 0;
-  unsigned int m_eac3FramesPerBurst = 0;
 
   unsigned int  m_dataSize = 0;
   uint8_t       m_packedBuffer[MAX_IEC61937_PACKET];
