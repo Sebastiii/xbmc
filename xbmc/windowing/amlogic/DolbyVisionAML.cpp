@@ -625,9 +625,11 @@ void vs10_dv_filler(const SettingConstPtr& setting, std::vector<IntegerSettingOp
 }
 
 // Ported from Pannal PR #15: dynamic C++ filler for the VSVDB colour space
-// setting, replacing a static XML <options> list that could not conditionally
-// hide "DISPLAY" per DV type without a real-time list-size change that made
-// Kodi's UI skip values / lose focus while scrolling.
+// setting, replacing a static XML <options> list. "DISPLAY" (id 3) means the
+// colour space is read from the display's EDID -- this is valid in Player-Led
+// mode too (some DV-LL-only displays with no DV-Std support still provide
+// usable EDID there), so it is NOT restricted to DV_TYPE_DISPLAY_LED here,
+// matching this tree's original unconditional static <option> list.
 void vsvdb_colour_space_filler(const SettingConstPtr& setting, std::vector<IntegerSettingOption>& list, int& current, void* data)
 {
   list.clear();
@@ -635,11 +637,7 @@ void vsvdb_colour_space_filler(const SettingConstPtr& setting, std::vector<Integ
   list.emplace_back(g_localizeStrings.Get(60081), 0); // DCI-P3
   list.emplace_back(g_localizeStrings.Get(60082), 1); // BT.2020
   list.emplace_back(g_localizeStrings.Get(60083), 2); // BT.709
-
-  enum DV_TYPE dv_type(static_cast<DV_TYPE>(settings()->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_TYPE)));
-  if (dv_type == DV_TYPE_DISPLAY_LED)
-    list.emplace_back(g_localizeStrings.Get(60563), 3); // DISPLAY
-
+  list.emplace_back(g_localizeStrings.Get(60563), 3); // DISPLAY
   list.emplace_back(g_localizeStrings.Get(60084), 4); // EPSON LS12000
 }
 
