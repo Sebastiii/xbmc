@@ -667,7 +667,6 @@ bool CDolbyVisionAML::Setup()
   set_visible(CSettings::SETTING_VIDEOPLAYER_CONVERTDOVI, true);
   set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_CMV40_APPEND, true);
   set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_AUDIO_SEAMLESSBRANCH, true);
-  set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_BYPASS, true);
   set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_HANDSHAKE_BYPASS, true);
   set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_KEEP_SDR_STATE, true);
   set_visible(CSettings::SETTING_COREELEC_AMLOGIC_DV_ENGAGE_AT_STARTUP, true);

@@ -1860,8 +1860,6 @@ void aml_dv_open(StreamHdrType hdrType, unsigned int bitDepth, AVColorPrimaries 
 
 void aml_dv_close()
 {
-  const auto bypass_dv_mode_switch_gui = settings()->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_BYPASS);
-
   s_dvPlaybackActive = false;
 
   CDVCoreGuard dvlock(__FUNCTION__);
@@ -1918,7 +1916,7 @@ void aml_dv_close()
   if (aml_dv_mode() != DV_MODE_ON)
     aml_apply_pq_input_state(StreamHdrType::HDR_TYPE_NONE, 0);
 
-  if (aml_is_dv_enable() && (aml_dv_mode() == DV_MODE_ON_DEMAND) && !bypass_dv_mode_switch_gui)
+  if (aml_is_dv_enable() && (aml_dv_mode() == DV_MODE_ON_DEMAND))
     aml_dv_off(true);
   else if (CServiceBroker::GetDataCacheCore().GetVideoHdrType() != StreamHdrType::HDR_TYPE_NONE &&
            aml_dv_mode() != DV_MODE_ON)

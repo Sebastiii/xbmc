@@ -150,21 +150,18 @@ bool CWinSystemAmlogicGLESContext::CreateNewWindow(const std::string& name,
   StreamHdrType hdrType = CServiceBroker::GetWinSystem()->GetGfxContext().GetHDRType();
   bool bypass_dv_mode_switch = CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_bypassDVModeSwitch;
   const auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
-  const auto bypass_dv_mode_switch_gui = settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_BYPASS);
   const auto bypass_dv_handshake_gui = settings->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DV_HANDSHAKE_BYPASS);
-  bool is_bypass_active = bypass_dv_mode_switch || bypass_dv_mode_switch_gui || bypass_dv_handshake_gui;
+  bool is_bypass_active = bypass_dv_mode_switch || bypass_dv_handshake_gui;
 
   CLog::Log(LOGINFO, "CWinSystemAmlogicGLESContext::{}: "
     "m_bWindowCreated: {}, "
     "frac rate {:d}({:d}), "
     "m_bypassDVModeSwitch: {}, "
-    "m_bypassDVModeSwitchGUI: {}, "
     "m_bypassDVHandshakeGUI: {}",
     __FUNCTION__,
     m_bWindowCreated,
     fractional_rate, cur_fractional_rate,
     bypass_dv_mode_switch,
-    bypass_dv_mode_switch_gui,
     bypass_dv_handshake_gui);
 
   bool force_mode_switch_by_dv = !is_bypass_active &&
@@ -178,14 +175,12 @@ bool CWinSystemAmlogicGLESContext::CreateNewWindow(const std::string& name,
     "frac rate {:d}({:d}), "
     "force mode switch: {}, "
     "m_bypassDVModeSwitch: {}, "
-    "m_bypassDVModeSwitchGUI: {}, "
     "m_bypassDVHandshakeGUI: {}",
     __FUNCTION__,
     m_bWindowCreated,
     fractional_rate, cur_fractional_rate,
     force_mode_switch_by_dv,
     bypass_dv_mode_switch,
-    bypass_dv_mode_switch_gui,
     bypass_dv_handshake_gui);
 
   // get current used resolution
