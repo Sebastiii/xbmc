@@ -452,6 +452,8 @@ class CAdvancedSettings : public ISettingCallback, public ISettingsHandler
 
     bool m_bypassDVModeSwitch = false;
 
+    std::string m_dvCustomVsvdb; // Raw colon-separated VSVDB hex string from advancedsettings.xml, e.g. "EB:01:46:D0:..." (ported from Pannal PR #25)
+
     void SetAlgoForResetSub(int num_resets);
     int GetAlgoForResetSub() const;
     int m_algoForResetSub;
