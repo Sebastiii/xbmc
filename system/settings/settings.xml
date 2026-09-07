@@ -4452,7 +4452,7 @@
           </constraints>
           <control type="slider" format="integer" />
         </setting>
-        <setting id="coreelec.amlogic.dolbyvision.bypass" type="boolean" label="60607" help="60608">
+        <setting id="coreelec.amlogic.dolbyvision.bypass" type="boolean" label="60900" help="60901">
           <level>2</level>
           <default>false</default>
           <control type="toggle" />
