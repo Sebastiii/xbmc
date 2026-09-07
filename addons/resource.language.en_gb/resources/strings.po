@@ -21632,12 +21632,6 @@ msgctxt "#36547"
 msgid "Adjusts how bright SDR GUI elements appear while the display is in HDR PQ mode (OSD, subtitles and other graphics). Does not affect HDR-authored bitmap subtitles."
 msgstr ""
 
-#. Description of setting with label #36095 "System / Display / GUI saturation boost in HDR PQ mode"
-#: system/settings/settings.xml
-msgctxt "#36998"
-msgid "Adjusts colour saturation for SDR GUI elements while the display is in HDR PQ mode (OSD, subtitles and other graphics). Does not affect HDR-authored PGS subtitles."
-msgstr ""
-
 #. Description of setting with label #37021 "Set GUI resolution limit"
 #: system/settings/android.xml
 #: system/settings/gbm.xml
@@ -26552,18 +26546,6 @@ msgstr ""
 #: system/settings/settings.xml
 msgctxt "#69187"
 msgid "Closed caption subtitles"
-msgstr ""
-
-#. "Dolby Vision HDR Bypass"
-#: system/settings/settings.xml
-msgctxt "#60607"
-msgid "Disable DV blank screen when starting to play"
-msgstr ""
-
-#. "Dolby Vision HDR Bypass"
-#: system/settings/settings.xml
-msgctxt "#60608"
-msgid "Setting this option to avoid handcheck when starting DV video from HDR or SDR"
 msgstr ""
 
 #. "Dolby Vision HDR Bypass" (ported from Pannal PR #45)
