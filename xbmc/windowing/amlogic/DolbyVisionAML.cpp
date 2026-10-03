@@ -626,14 +626,13 @@ void vs10_dv_filler(const SettingConstPtr& setting, std::vector<IntegerSettingOp
 
 // Ported from Pannal PR #15: dynamic C++ filler for the VSVDB colour space
 // setting, replacing a static XML <options> list. "DISPLAY" (id 3) means the
-// colour space is read from the display's EDID -- this is valid in Player-Led
-// mode too (some DV-LL-only displays with no DV-Std support still provide
-// usable EDID there), so it is NOT restricted to DV_TYPE_DISPLAY_LED here,
-// matching this tree's original unconditional static <option> list.
-// DISPLAY must stay LAST: selecting it fires OnSettingChanged ->
-// CalculateVSVDBPayload*, which immediately rewrites id 3 to the EDID-derived
-// (or fallback BT.2020) id, so the spinner snaps back and any option listed
-// after DISPLAY can never be reached by scrolling (same order as Pannal).
+// colour space is read from the display's DV EDID block (dv_cap). Selecting it
+// fires OnSettingChanged -> CalculateVSVDBPayload*, which rewrites id 3 at once:
+// to the EDID-derived id when the sink reports DV, to BT.2020 (1) when it does
+// not. So DISPLAY is only offered when the sink reports DV (Display-Led AND
+// DV-LL-only displays in Player-Led, per avdvplus); on a non-DV sink it would be
+// a fake BT.2020 entry the spinner bounces off (it wraps around, so it is
+// reached from both ends). Kept last so it never blocks EPSON.
 void vsvdb_colour_space_filler(const SettingConstPtr& setting, std::vector<IntegerSettingOption>& list, int& current, void* data)
 {
   list.clear();
@@ -642,7 +641,9 @@ void vsvdb_colour_space_filler(const SettingConstPtr& setting, std::vector<Integ
   list.emplace_back(g_localizeStrings.Get(60082), 1); // BT.2020
   list.emplace_back(g_localizeStrings.Get(60083), 2); // BT.709
   list.emplace_back(g_localizeStrings.Get(60084), 4); // EPSON LS12000
-  list.emplace_back(g_localizeStrings.Get(60563), 3); // DISPLAY
+
+  if (aml_display_support_dv())
+    list.emplace_back(g_localizeStrings.Get(60563), 3); // DISPLAY
 }
 
 CDolbyVisionAML::CDolbyVisionAML()
