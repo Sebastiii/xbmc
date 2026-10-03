@@ -630,6 +630,10 @@ void vs10_dv_filler(const SettingConstPtr& setting, std::vector<IntegerSettingOp
 // mode too (some DV-LL-only displays with no DV-Std support still provide
 // usable EDID there), so it is NOT restricted to DV_TYPE_DISPLAY_LED here,
 // matching this tree's original unconditional static <option> list.
+// DISPLAY must stay LAST: selecting it fires OnSettingChanged ->
+// CalculateVSVDBPayload*, which immediately rewrites id 3 to the EDID-derived
+// (or fallback BT.2020) id, so the spinner snaps back and any option listed
+// after DISPLAY can never be reached by scrolling (same order as Pannal).
 void vsvdb_colour_space_filler(const SettingConstPtr& setting, std::vector<IntegerSettingOption>& list, int& current, void* data)
 {
   list.clear();
@@ -637,8 +641,8 @@ void vsvdb_colour_space_filler(const SettingConstPtr& setting, std::vector<Integ
   list.emplace_back(g_localizeStrings.Get(60081), 0); // DCI-P3
   list.emplace_back(g_localizeStrings.Get(60082), 1); // BT.2020
   list.emplace_back(g_localizeStrings.Get(60083), 2); // BT.709
-  list.emplace_back(g_localizeStrings.Get(60563), 3); // DISPLAY
   list.emplace_back(g_localizeStrings.Get(60084), 4); // EPSON LS12000
+  list.emplace_back(g_localizeStrings.Get(60563), 3); // DISPLAY
 }
 
 CDolbyVisionAML::CDolbyVisionAML()
